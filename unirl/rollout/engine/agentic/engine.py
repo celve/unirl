@@ -40,7 +40,7 @@ from unirl.config.require import require
 from unirl.distributed.group.dispatch import Dispatch, Execute, distributed
 from unirl.rollout.engine.agentic.config import AgenticRolloutEngineConfig
 from unirl.rollout.engine.base import BaseRolloutEngine
-from unirl.types.sample import Sample
+from unirl.types.sample import Sample, _part_with_field
 from unirl.types.sampling import total_samples_per_prompt
 
 logger = logging.getLogger(__name__)
@@ -210,19 +210,42 @@ class AgenticRolloutEngine(BaseRolloutEngine):
     async def _run_one(self, task: Sample) -> Sample:
         """One trajectory's agent loop. Failure-isolated: never raises into the drain."""
         sample = task
+        env_reward: Optional[float] = None
         try:
             sample = self._env.reset(task)  # [input(1)], root id = prompt id
             for _ in range(self._max_turns):
                 sample = await self._inner.agenerate(sample.fork(1, sampling_params=self._sp))  # +[gen(1)]
-                observation, done, _info = await self._env.astep(sample)  # async tool boundary (§7)
+                observation, done, info = await self._env.astep(sample)  # async tool boundary (§7)
+                # Env-sourced reward (LIN-519): interactive envs (ALFWorld, …) return a
+                # per-trajectory return in ``info["reward"]`` (last value = the episode
+                # return); tool-only envs (calculator/search) omit it — a no-op here.
+                if isinstance(info, dict) and info.get("reward") is not None:
+                    env_reward = float(info["reward"])
                 if done:
                     break
                 if observation is not None:
                     sample = sample.observe(observation)  # +[obs(1)]
-            return sample
+            return self._attach_env_reward(sample, env_reward)
         except Exception as exc:  # noqa: BLE001 — isolate: one bad trajectory must not sink the drain
             logger.warning("AgenticRolloutEngine: trajectory failed, returning partial: %s", exc, exc_info=True)
+            return self._attach_env_reward(sample, env_reward)
+
+    @staticmethod
+    def _attach_env_reward(sample: Sample, reward: Optional[float]) -> Sample:
+        """Attach an env-sourced trajectory return to the LAST generated Part so the
+        trainer (:class:`~unirl.trainer.agentic_env.AgenticEnvTrainer`) can read it
+        directly — env tasks bypass ``RewardService``. No-op when the env supplied no
+        reward, so tool-only envs (calculator/search) are byte-identical."""
+        if reward is None:
             return sample
+        gens = sample.gen_parts()
+        if not gens:
+            return sample
+        last = gens[-1]
+        rewarded = _part_with_field(
+            last, "rewards", torch.full((int(last.batch_size),), float(reward), dtype=torch.float32)
+        )
+        return sample.with_parts([rewarded if p is last else p for p in sample.parts])
 
     async def _pull(self, coordinator: Any, role_name: str) -> Optional[Sample]:
         """Pull the next task from the coordinator. Bridges the Ray RPC onto the

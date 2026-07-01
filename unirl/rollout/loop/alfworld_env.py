@@ -1,0 +1,259 @@
+"""AlfworldEnv — stateful ALFWorld environment for the agentic engine (LIN-519).
+
+ALFWorld (text-only ``AlfredTWEnv``) is the field's canonical multi-turn agentic-RL
+benchmark: a household task where the agent issues text commands (``go to shelf 1``,
+``take mug 1``, ``clean mug 1 with sinkbasin 1`` …) and the simulator returns the next
+observation, ending with a binary task-success reward. Unlike the stateless
+:class:`~unirl.rollout.loop.tool_environment.ToolEnvironment`, each trajectory is its
+own **episode with evolving state** and the **reward comes from the simulator**.
+
+Fits the engine's ``reset(sample)->Sample`` / ``astep(sample)->(obs, done, info)``
+protocol (:class:`~unirl.rollout.engine.agentic.engine.AgenticRolloutEngine`), which
+builds one env per worker and requires re-entrancy across concurrent trajectories.
+Re-entrancy here means **per-episode state keyed by a unique id** minted in
+:meth:`reset` and carried in the Sample's root *control* bag — because the ``n`` GRPO
+siblings of a prompt are fanned as identical tasks (same ``sample_id``), they must
+share the *game* (selected by ``metadata['game_index']``, identical across siblings)
+but get *separate* episodes. The terminal task-success is emitted as the trajectory
+reward through ``info['reward']``; the engine attaches it to the trajectory and
+:class:`~unirl.trainer.agentic_env.AgenticEnvTrainer` reads it (no reward backend).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+import re
+import threading
+from glob import glob
+from typing import Any, Dict, List, Optional, Tuple
+
+from unirl.types.primitives import Texts
+from unirl.types.sample import Part, Primitive, Sample
+
+logger = logging.getLogger(__name__)
+
+# ReAct action line: the command after the last ``Action:``.
+_ACTION_RE = re.compile(r"[Aa]ction\s*:\s*(.+)")
+
+_SYSTEM = (
+    "You are an agent completing a household task in a text-based world. Each turn, "
+    "reason briefly, then issue exactly ONE admissible command on a final line that "
+    "starts with 'Action:'. For example:\n"
+    "Thought: I need to find a mug.\n"
+    "Action: go to cabinet 1"
+)
+
+
+def list_alfworld_games(split: str = "train", data_dir: Optional[str] = None) -> List[str]:
+    """Enumerate ALFWorld TextWorld game files for a split (sorted → stable indices).
+
+    Shared by :class:`AlfworldEnv` and ``unirl.utils.prepare_alfworld`` so a data row's
+    ``game_index`` maps to the same game on both sides. Globs ``$ALFWORLD_DATA`` (or
+    ``data_dir``) for the ``*.tw-pddl`` task games (verified against the installed
+    package layout on setup)."""
+    root = data_dir or os.environ.get("ALFWORLD_DATA", "")
+    if not root:
+        return []
+    patterns = [
+        os.path.join(root, "json_2.1.1", split, "**", "*.tw-pddl"),
+        os.path.join(root, split, "**", "*.tw-pddl"),
+        os.path.join(root, "**", split, "**", "*.tw-pddl"),
+    ]
+    for pat in patterns:
+        games = sorted(glob(pat, recursive=True))
+        if games:
+            return games
+    return []
+
+
+class _Episode:
+    """Per-trajectory ALFWorld episode state."""
+
+    __slots__ = ("env", "reward", "steps")
+
+    def __init__(self, env: Any) -> None:
+        self.env = env
+        self.reward = 0.0
+        self.steps = 0
+
+
+def _parse_action(text: Optional[str]) -> str:
+    """The command after the last ``Action:``; fallback to the last non-empty line."""
+    matches = _ACTION_RE.findall(text or "")
+    if matches:
+        return matches[-1].strip()
+    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+    return lines[-1] if lines else ""
+
+
+class AlfworldEnv:
+    """Stateful ALFWorld environment (one episode per trajectory, env-sourced reward)."""
+
+    def __init__(
+        self,
+        *,
+        config_file: Optional[str] = None,
+        split: str = "train",
+        max_steps: int = 30,
+        step_penalty: float = 0.0,
+        max_obs_chars: int = 2000,
+    ) -> None:
+        self._config_file = config_file
+        self._split = split
+        self._max_steps = int(max_steps)
+        self._step_penalty = float(step_penalty)
+        self._max_obs_chars = int(max_obs_chars)
+        # Per-trajectory episodes keyed by the id minted in reset() (carried in the
+        # Sample's root control bag). Guarded: reset runs on the loop thread, astep in
+        # an executor thread.
+        self._episodes: Dict[str, _Episode] = {}
+        self._lock = threading.Lock()
+        self._counter = 0
+        self._games: List[str] = []
+        self._alfworld: Any = None
+        self._alfworld_cfg: Any = None
+        self._ready = False
+
+    # ------------------------------------------------------------------
+    # ALFWorld backend — lazy + isolated so tests can inject a mock episode.
+    # ------------------------------------------------------------------
+    def _ensure_backend(self) -> None:
+        if self._ready:
+            return
+        import alfworld.agents.environment as environment
+        import alfworld.agents.modules.generic as generic
+
+        cfg = generic.load_config(self._config_file) if self._config_file else generic.load_config()
+        self._alfworld_cfg = cfg
+        self._alfworld = environment
+        self._games = list_alfworld_games(self._split)
+        if not self._games:
+            logger.warning("AlfworldEnv: no game files found under $ALFWORLD_DATA (split=%s).", self._split)
+        self._ready = True
+
+    def _open_episode(self, game_index: int) -> Any:
+        """Build a ``batch_size=1`` ALFWorld env restricted to a single game and reset
+        it; return the TextWorld env handle (``.step([a]) -> (obs, scores, dones, infos)``,
+        ``.reset() -> (obs, info)``). Overridable in tests. Restricting ``game_files``
+        to one game makes the ``n`` GRPO siblings share the same task deterministically."""
+        env_type = self._alfworld_cfg["env"]["type"]
+        env = self._alfworld.get_environment(env_type)(self._alfworld_cfg, train_eval=self._split)
+        if self._games and hasattr(env, "game_files"):
+            env.game_files = [self._games[game_index % len(self._games)]]
+        return env.init_env(batch_size=1)
+
+    # ------------------------------------------------------------------
+    # Engine protocol
+    # ------------------------------------------------------------------
+    def reset(self, request: Sample) -> Sample:
+        """Start an episode for this trajectory; return a Sample whose input is the
+        ReAct instruction + the initial observation + admissible commands."""
+        self._ensure_backend()
+        root = request.parts[0]
+        sid = str(root.sample_ids[0])
+        meta = (root.metadata or [None])[0] or {}
+        game_index = int(meta.get("game_index", 0))
+
+        tw = self._open_episode(game_index)
+        obs, info = tw.reset()
+
+        with self._lock:
+            self._counter += 1
+            eid = f"{sid}#ep{self._counter}"
+            self._episodes[eid] = _Episode(tw)
+
+        control = dict(root.control or {})
+        control["alfworld"] = {"episode_id": eid}
+        new_root = Part.input(
+            [sid],
+            primitive=Texts(texts=[self._format(obs, info, first=True)]),
+            metadata=root.metadata,
+            control=control,
+        )
+        return Sample.request(new_root)
+
+    async def astep(self, sample: Sample) -> Tuple[Optional[Primitive], bool, dict]:
+        """Async :meth:`step`: run the blocking simulator in the loop's executor so a
+        slow env yields the worker's shared loop to sibling trajectories."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self.step, sample)
+
+    def step(self, sample: Sample) -> Tuple[Optional[Primitive], bool, dict]:
+        """Apply the frontier action to this trajectory's episode; return
+        ``(observation, done, info)`` with the (cumulative) env return in
+        ``info['reward']`` — the last value the engine sees is the episode return."""
+        eid = self._episode_id(sample)
+        with self._lock:
+            ep = self._episodes.get(eid) if eid is not None else None
+        if ep is None:  # lost/expired episode — terminate this trajectory cleanly
+            return None, True, {"reward": 0.0}
+
+        frontier = sample.parts[-1].primitive
+        action = _parse_action(frontier.texts[0] if isinstance(frontier, Texts) and frontier.texts else "")
+        obs, scores, dones, infos = ep.env.step([action])
+        ep.steps += 1
+
+        success = self._success(scores, infos)
+        ep.reward = success - self._step_penalty * ep.steps
+        done = bool(self._first(dones, False)) or ep.steps >= self._max_steps
+
+        if done:
+            with self._lock:
+                self._episodes.pop(eid, None)
+            self._close(ep.env)
+            return None, True, {"reward": ep.reward, "success": success, "steps": ep.steps}
+
+        observation = Texts(texts=[self._format(obs, infos, first=False)])
+        return observation, False, {"reward": ep.reward}
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _episode_id(sample: Sample) -> Optional[str]:
+        ctrl = sample.parts[0].control or {}
+        return (ctrl.get("alfworld") or {}).get("episode_id")
+
+    @staticmethod
+    def _first(seq: Any, default: Any) -> Any:
+        if isinstance(seq, (list, tuple)):
+            return seq[0] if seq else default
+        return seq if seq is not None else default
+
+    def _success(self, scores: Any, infos: Any) -> float:
+        """ALFWorld terminal success → 1.0/0.0. Prefers ``infos['won']``, falls back
+        to a goal-progress score of 1.0."""
+        won = None
+        if isinstance(infos, dict):
+            won = self._first(infos.get("won"), None)
+        if won is not None:
+            return 1.0 if bool(won) else 0.0
+        try:
+            return 1.0 if float(self._first(scores, 0.0)) >= 1.0 else 0.0
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _format(self, obs: Any, info: Any, *, first: bool) -> str:
+        text = str(self._first(obs, obs))[: self._max_obs_chars]
+        cmds = None
+        if isinstance(info, dict):
+            cmds = self._first(info.get("admissible_commands"), None)
+        blocks: List[str] = []
+        if first:
+            blocks.append(_SYSTEM)
+        blocks.append(text)
+        if cmds:
+            blocks.append("Admissible actions: " + ", ".join(str(c) for c in cmds))
+        return "\n\n".join(blocks)
+
+    @staticmethod
+    def _close(env: Any) -> None:
+        try:
+            env.close()
+        except Exception:  # noqa: BLE001 — best-effort cleanup
+            pass
+
+
+__all__ = ["AlfworldEnv", "list_alfworld_games"]

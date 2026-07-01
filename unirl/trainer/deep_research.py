@@ -108,59 +108,13 @@ class DeepResearchTrainer(ARTrainer):
         trajs: List[Sample] = self.rollout.generate(sample)[0]  # BROADCAST+RANK_ZERO -> [List[Sample]]
         self.rollout.sleep()
 
-        # 2) Per-trajectory question / predicted answer / ground truth / group id.
-        #    The ``n`` siblings of a prompt share its root id (group-by-root).
-        root = sample.parts[0]
-        root_meta = root.metadata or [None] * len(root.sample_ids)
-        gt_by_root = {sid: (md or {}).get("answer") for sid, md in zip(root.sample_ids, root_meta)}
-        questions: List[str] = []
-        predictions: List[str] = []
-        answers: List[Optional[str]] = []
-        group_ids: List[str] = []
-        for tr in trajs:
-            root_id = tr.parts[0].sample_ids[0]
-            q_prim = tr.parts[0].primitive
-            questions.append(q_prim.texts[0] if (q_prim is not None and q_prim.texts) else "")
-            gens = tr.gen_parts()
-            term = ""
-            if gens and gens[-1].primitive is not None and gens[-1].primitive.texts:
-                term = gens[-1].primitive.texts[0]
-            predictions.append(_extract_answer(term))
-            answers.append(gt_by_root.get(root_id))
-            group_ids.append(root_id)
-
-        # 3) Reward — ONE fresh flat scoring Sample, scored once. (``score_and_attach``
-        #    rejects precomputed frontier rewards, so a FRESH sample is required; its
-        #    frontier carries no ``segment`` so the truncation-shaping branch is skipped.)
-        m = len(trajs)
-        ar_sp = self.sampling_params.get("ar")
-        score_in = Part.input(
-            [f"score{rollout_id}:{i}" for i in range(m)],
-            primitive=Texts(texts=list(questions)),
-            metadata=[{"answer": a} for a in answers],
-        )
-        scoring = (
-            Sample.request(score_in)
-            .fork(1, sampling_params=ar_sp)  # frontier is a gen Part (reward/adv panels read gen_parts)
-            .with_filled_frontier(primitive=Texts(texts=list(predictions)))
-        )
-        scoring = self.reward.score_and_attach(scoring)
-        rewards = hydrate(scoring.parts[-1].rewards).to(torch.float32)
+        # 2) Per-trajectory scalar reward + GRPO group id (root id). Overridable:
+        #    answer-graded here (``<answer>`` -> reward backend), env-sourced in
+        #    ``AgenticEnvTrainer`` (ALFWorld etc.).
+        rewards, group_ids = self._rewards_and_groups(sample, trajs, rollout_id)
         mean_reward = float(rewards.mean().item()) if rewards.numel() else 0.0
 
-        # Sanity sample (first rollout only): a few gold/prediction/reward triples so a
-        # dead reward (wrong data schema, unparsed answer, or root-id mismatch) is
-        # visible in the log rather than silently zero.
-        if rollout_id == 0:
-            logger.info("reward-sample req_roots=%s", list(root.sample_ids))
-            for _i in range(min(4, m)):
-                logger.info(
-                    "reward-sample[%d] group=%s gold=%r depth=%d reward=%.3f pred=%r",
-                    _i, group_ids[_i], answers[_i], len(trajs[_i].gen_parts()),
-                    float(rewards[_i].item()), predictions[_i][:160],
-                )
-
-        # 4) GROUP-relative GRPO advantage over the ``n`` siblings per prompt.
+        # 3) GROUP-relative GRPO advantage over the ``n`` siblings per prompt.
         advantages = self._group_advantages(rewards, group_ids)
 
         # 5) Assign each trajectory's scalar advantage to ALL its assistant turns; gather.
@@ -199,6 +153,55 @@ class DeepResearchTrainer(ARTrainer):
             },
         )
         return result, mean_reward
+
+    def _rewards_and_groups(
+        self, sample: Sample, trajs: List[Sample], rollout_id: int
+    ) -> Tuple[torch.Tensor, List[str]]:
+        """Per-trajectory scalar reward + GRPO group id (root id) — the overridable
+        reward step. Base path grades each trajectory's ``<answer>`` against the
+        ground truth via the reward backend (MathVerify / LLM judge); the ``n``
+        siblings of a prompt share its root id (group-by-root). Subclasses swap the
+        reward SOURCE (e.g. :class:`~unirl.trainer.agentic_env.AgenticEnvTrainer`
+        reads the environment's per-trajectory return) while keeping the GRPO tail.
+
+        A FRESH flat scoring Sample is required because ``score_and_attach`` rejects
+        precomputed frontier rewards; its frontier carries no ``segment`` so the
+        truncation-shaping branch is skipped.
+        """
+        root = sample.parts[0]
+        root_meta = root.metadata or [None] * len(root.sample_ids)
+        gt_by_root = {sid: (md or {}).get("answer") for sid, md in zip(root.sample_ids, root_meta)}
+        questions: List[str] = []
+        predictions: List[str] = []
+        answers: List[Optional[str]] = []
+        group_ids: List[str] = []
+        for tr in trajs:
+            root_id = tr.parts[0].sample_ids[0]
+            q_prim = tr.parts[0].primitive
+            questions.append(q_prim.texts[0] if (q_prim is not None and q_prim.texts) else "")
+            gens = tr.gen_parts()
+            term = ""
+            if gens and gens[-1].primitive is not None and gens[-1].primitive.texts:
+                term = gens[-1].primitive.texts[0]
+            predictions.append(_extract_answer(term))
+            answers.append(gt_by_root.get(root_id))
+            group_ids.append(root_id)
+
+        m = len(trajs)
+        ar_sp = self.sampling_params.get("ar")
+        score_in = Part.input(
+            [f"score{rollout_id}:{i}" for i in range(m)],
+            primitive=Texts(texts=list(questions)),
+            metadata=[{"answer": a} for a in answers],
+        )
+        scoring = (
+            Sample.request(score_in)
+            .fork(1, sampling_params=ar_sp)  # frontier is a gen Part (reward/adv panels read gen_parts)
+            .with_filled_frontier(primitive=Texts(texts=list(predictions)))
+        )
+        scoring = self.reward.score_and_attach(scoring)
+        rewards = hydrate(scoring.parts[-1].rewards).to(torch.float32)
+        return rewards, group_ids
 
     def _group_advantages(self, rewards: torch.Tensor, group_ids: List[str]) -> torch.Tensor:
         """Group-relative GRPO advantages, ``ARTrainer.compute_advantages`` parity
