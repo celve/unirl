@@ -181,6 +181,7 @@ data_source:
   args:
     run:
       data_path: ${oc.env:DATA_PATH} # jsonl: {"prompt": ..., "answer": ...}
+      eval_data_path: ${oc.env:EVAL_DATA_PATH,${oc.env:DATA_PATH}} # unused (eval_interval=0); defaults to train
       seed: 42
     algorithm:
       prompts_per_rollout: 4 # == batch_size (P); P*n = 8 trajectories / rollout
