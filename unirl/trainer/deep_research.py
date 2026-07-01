@@ -136,10 +136,10 @@ class DeepResearchTrainer(ARTrainer):
         train_part = self._pad_to_dp_multiple(train_part)
         result = self.stack.train_track(train_part, training_progress=float(training_progress))
 
-        # Logging: reuse the scored Sample (its gen frontier carries reward + advantage).
-        log_sample = scoring.with_parts(
-            [*scoring.parts[:-1], _part_with_field(scoring.parts[-1], "advantages", advantages)]
-        )
+        # Logging sample: one row per trajectory whose gen frontier carries the reward +
+        # advantage (compute_rollout_sample_metrics reads gen_parts). Built from the
+        # computed tensors so it is independent of the reward SOURCE (answer vs env).
+        log_sample = self._build_log_sample(trajs, rewards, advantages, rollout_id)
         self.wandb_logger.log_rollout_step(
             rollout_id,
             result,
@@ -202,6 +202,25 @@ class DeepResearchTrainer(ARTrainer):
         scoring = self.reward.score_and_attach(scoring)
         rewards = hydrate(scoring.parts[-1].rewards).to(torch.float32)
         return rewards, group_ids
+
+    def _build_log_sample(
+        self, trajs: List[Sample], rewards: torch.Tensor, advantages: torch.Tensor, rollout_id: int
+    ) -> Sample:
+        """A flat one-row-per-trajectory Sample whose gen frontier carries the
+        per-trajectory reward + advantage, for ``compute_rollout_sample_metrics``
+        (reward/advantage distributions). Reward-source agnostic — no reward backend,
+        no scoring sample — so it works for both the answer-graded and env-sourced paths."""
+        m = len(trajs)
+        ar_sp = self.sampling_params.get("ar")
+        log_in = Part.input([f"log{rollout_id}:{i}" for i in range(m)], primitive=Texts(texts=[""] * m))
+        log_sample = (
+            Sample.request(log_in)
+            .fork(1, sampling_params=ar_sp)
+            .with_filled_frontier(primitive=Texts(texts=[""] * m))
+        )
+        frontier = _part_with_field(log_sample.parts[-1], "rewards", rewards.to(torch.float32))
+        frontier = _part_with_field(frontier, "advantages", advantages.to(torch.float32))
+        return log_sample.with_parts([*log_sample.parts[:-1], frontier])
 
     def _group_advantages(self, rewards: torch.Tensor, group_ids: List[str]) -> torch.Tensor:
         """Group-relative GRPO advantages, ``ARTrainer.compute_advantages`` parity
