@@ -7,12 +7,17 @@ the engine's ``_attach_env_reward`` (puts the episode return on the last gen Par
 
 from __future__ import annotations
 
+import types
+
 import pytest
 
 pytest.importorskip("torch")
 
+import torch  # noqa: E402
+
 from unirl.rollout.engine.agentic.engine import AgenticRolloutEngine  # noqa: E402
 from unirl.trainer.agentic_env import AgenticEnvTrainer  # noqa: E402
+from unirl.trainer.deep_research import DeepResearchTrainer  # noqa: E402
 from unirl.types.primitives import Texts  # noqa: E402
 from unirl.types.sample import Part, Sample  # noqa: E402
 from unirl.types.sampling import ARSamplingParams  # noqa: E402
@@ -67,3 +72,16 @@ def test_rewards_and_groups_missing_reward_scores_zero():
     rewards, group_ids = AgenticEnvTrainer._rewards_and_groups(object(), None, trajs, 0)
     assert float(rewards[0].item()) == 0.0
     assert group_ids == ["g0"]
+
+
+def test_group_advantages_excludes_nan_crashes():
+    # 2 groups x 2 siblings; a NaN (crashed) sibling in g1 must be neutral (adv 0) and
+    # excluded from its group's mean, and must not corrupt g0.
+    rewards = torch.tensor([1.0, 0.0, float("nan"), 1.0])
+    groups = ["g0", "g0", "g1", "g1"]
+    dummy = types.SimpleNamespace(adv_normalization_scope="group", normalize_adv_by_std=False)
+    adv = DeepResearchTrainer._group_advantages(dummy, rewards, groups)
+    assert abs(adv[0].item() - 0.5) < 1e-6 and abs(adv[1].item() + 0.5) < 1e-6  # g0 centered on 0.5
+    assert adv[2].item() == 0.0  # crashed sibling -> neutral
+    assert abs(adv[3].item()) < 1e-6  # g1's only finite reward -> centered to 0
+    assert torch.isfinite(adv).all()  # no NaN leaks into the gradient

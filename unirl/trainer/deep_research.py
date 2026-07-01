@@ -112,7 +112,10 @@ class DeepResearchTrainer(ARTrainer):
         #    answer-graded here (``<answer>`` -> reward backend), env-sourced in
         #    ``AgenticEnvTrainer`` (ALFWorld etc.).
         rewards, group_ids = self._rewards_and_groups(sample, trajs, rollout_id)
-        mean_reward = float(rewards.mean().item()) if rewards.numel() else 0.0
+        # A NaN reward marks a crashed trajectory (env bug, not a policy outcome) —
+        # excluded from the reported mean and from GRPO (see _group_advantages).
+        finite = torch.isfinite(rewards)
+        mean_reward = float(rewards[finite].mean().item()) if bool(finite.any()) else 0.0
 
         # 3) GROUP-relative GRPO advantage over the ``n`` siblings per prompt.
         advantages = self._group_advantages(rewards, group_ids)
@@ -233,15 +236,31 @@ class DeepResearchTrainer(ARTrainer):
         completion order is fine). ``adv_normalization_scope='global'`` z-scores the
         whole batch; ``normalize_adv_by_std=False`` mean-centers only."""
         r = rewards.to(torch.float32)
+        # NaN reward = crashed trajectory: excluded from the group's mean/std and given
+        # ZERO advantage (neutral), so an env crash neither rewards nor penalizes its
+        # actions. All-finite (the answer-graded path) is byte-identical to before.
+        finite = torch.isfinite(r)
         if self.adv_normalization_scope == "global":
-            centered = r - r.mean()
-            return centered / (r.std(unbiased=False) + 1e-8) if self.normalize_adv_by_std else centered
+            rf = r[finite]
+            mean = rf.mean() if rf.numel() else r.new_zeros(())
+            centered = torch.where(finite, r - mean, torch.zeros_like(r))
+            if self.normalize_adv_by_std:
+                std = rf.std(unbiased=False) if rf.numel() > 1 else r.new_ones(())
+                centered = centered / (std + 1e-8)
+            return torch.where(finite, centered, torch.zeros_like(centered))
         adv = torch.zeros_like(r)
         for idxs in build_group_index_map(group_ids).values():
             idx = torch.tensor(idxs, dtype=torch.long)
+            fin = finite[idx]
             g = r[idx]
-            centered = g - g.mean()
-            adv[idx] = centered / (g.std(unbiased=False) + 1e-8) if self.normalize_adv_by_std else centered
+            gf = g[fin]
+            if gf.numel() == 0:
+                continue  # whole group crashed -> zero advantage
+            centered = g - gf.mean()
+            if self.normalize_adv_by_std:
+                std = gf.std(unbiased=False) if gf.numel() > 1 else g.new_ones(())
+                centered = centered / (std + 1e-8)
+            adv[idx] = torch.where(fin, centered, torch.zeros_like(centered))
         return adv
 
     def _pad_to_dp_multiple(self, part: Part) -> Part:

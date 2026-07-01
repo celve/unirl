@@ -288,8 +288,10 @@ class AlfworldEnv:
             logger.warning("AlfworldEnv: env.step failed (%s: %s); ending episode.", type(exc).__name__, exc)
             with self._lock:
                 self._episodes.pop(eid, None)
-            # Drop (don't reuse) a template whose game engine just errored.
-            return None, True, {"reward": ep.reward, "success": 0.0, "steps": ep.steps, "error": True}
+            # NaN reward = "engine bug, not a policy failure": the trainer excludes it from
+            # the GRPO group (neutral, zero advantage) so a crash doesn't penalize the
+            # trajectory's actions. Drop (don't reuse) a template whose game just errored.
+            return None, True, {"reward": float("nan"), "success": 0.0, "steps": ep.steps, "error": True}
         ep.steps += 1
         ep.admissible = self._admissible(infos)
 
