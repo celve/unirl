@@ -51,6 +51,11 @@ def _build_reward_request(sample: Sample, preferred_input_kind: str) -> RewardRe
         )
 
     metadata = sample.root_metadata(-1)
+    logger.info(
+        "REWARD-REQ-DEBUG frontier_bs=%s root_bs=%s n_parts=%s root_meta_none=%s root_metadata=%s",
+        frontier.batch_size, sample.parts[0].batch_size, len(sample.parts),
+        sample.parts[0].metadata is None, metadata[:3],
+    )
     return RewardRequest(
         primitives=primitives,
         generated={preferred_input_kind: frontier.primitive},
