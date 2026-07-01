@@ -148,6 +148,18 @@ class DeepResearchTrainer(ARTrainer):
         rewards = hydrate(scoring.parts[-1].rewards).to(torch.float32)
         mean_reward = float(rewards.mean().item()) if rewards.numel() else 0.0
 
+        # Sanity sample (first rollout only): a few gold/prediction/reward triples so a
+        # dead reward (wrong data schema, unparsed answer, or root-id mismatch) is
+        # visible in the log rather than silently zero.
+        if rollout_id == 0:
+            logger.info("reward-sample req_roots=%s", list(root.sample_ids))
+            for _i in range(min(4, m)):
+                logger.info(
+                    "reward-sample[%d] group=%s gold=%r depth=%d reward=%.3f pred=%r",
+                    _i, group_ids[_i], answers[_i], len(trajs[_i].gen_parts()),
+                    float(rewards[_i].item()), predictions[_i][:160],
+                )
+
         # 4) GROUP-relative GRPO advantage over the ``n`` siblings per prompt.
         advantages = self._group_advantages(rewards, group_ids)
 
