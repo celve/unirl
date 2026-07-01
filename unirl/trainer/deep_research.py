@@ -124,6 +124,11 @@ class DeepResearchTrainer(ARTrainer):
             for gp in tr.gen_parts():
                 gp = _part_with_field(gp, "advantages", torch.full((gp.batch_size,), adv_i, dtype=torch.float32))
                 gp = _part_with_field(gp, "primitive", None)  # free decoded text before train
+                # Drop any per-trajectory env reward: it rides only the TERMINAL turn (a
+                # TensorRef on 1 of the trajectory's k gen parts), so concatenating turns
+                # would leave a short, misaligned rewards field that breaks DP scatter.
+                # The reward was already read into ``advantages`` (row-aligned across turns).
+                gp = _part_with_field(gp, "rewards", None)
                 train_parts.append(gp)
 
         depths = [len(tr.gen_parts()) for tr in trajs]
@@ -131,30 +136,8 @@ class DeepResearchTrainer(ARTrainer):
             logger.warning("DeepResearchTrainer rollout %d produced no trainable turns.", rollout_id)
             return TrainStepResult(0.0, 0.0, 0.0, False, [], {}), mean_reward
 
-        # DIAG (LIN-519): locate the row-count mismatch that breaks DP_SCATTER slice.
-        def _csz(v):
-            b = getattr(v, "batch_size", None)
-            if b is not None:
-                return b
-            ii = getattr(v, "input_ids", None)
-            return tuple(ii.shape) if ii is not None else type(v).__name__
-        g0 = trajs[0].gen_parts() if trajs else []
-        logger.warning(
-            "DIAG per-gen-part traj0 depths=%s fields=%s",
-            depths,
-            [(gp.batch_size, (gp.segment.batch_size if gp.segment is not None else None),
-              {k: _csz(v) for k, v in gp.conditions.items()}) for gp in g0],
-        )
-
         # 6) ONE training Part -> pad to a DP multiple (zero-advantage rows) -> ONE step.
         train_part = Part.concat(train_parts)
-        logger.warning(
-            "DIAG concat train_part: bs=%d segment=%s sample_ids=%d conditions=%s",
-            train_part.batch_size,
-            (train_part.segment.batch_size if train_part.segment is not None else None),
-            len(train_part.sample_ids),
-            {k: _csz(v) for k, v in train_part.conditions.items()},
-        )
         train_part = self._pad_to_dp_multiple(train_part)
         result = self.stack.train_track(train_part, training_progress=float(training_progress))
 
