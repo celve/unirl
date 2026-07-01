@@ -38,8 +38,13 @@ def main() -> None:
         raise SystemExit(
             "No ALFWorld games found. Set $ALFWORLD_DATA and run `alfworld-download` first."
         )
-    if args.limit:
-        games = games[: args.limit]
+    if args.limit and args.limit < len(games):
+        # Evenly spaced across the sorted games so a small fixed set spans task types
+        # (sorted games cluster by type). A fixed set that a rollout FULLY covers
+        # (prompts_per_rollout == #games) makes the per-rollout reward comparable across
+        # rollouts — the curve then reflects learning, not which games were drawn.
+        stride = max(1, len(games) // args.limit)
+        games = games[::stride][: args.limit]
 
     os.makedirs(args.out_dir, exist_ok=True)
     out_path = os.path.join(args.out_dir, f"{args.split}.jsonl")
