@@ -43,11 +43,23 @@ logger = logging.getLogger(__name__)
 _ACTION_RE = re.compile(r"[Aa]ction\s*:\s*(.+)")
 
 _SYSTEM = (
-    "You are an agent completing a household task in a text-based world. Each turn, "
-    "reason briefly, then issue exactly ONE admissible command on a final line that "
-    "starts with 'Action:'. For example:\n"
-    "Thought: I need to find a mug.\n"
-    "Action: go to cabinet 1"
+    "You are an agent completing a household task in a text-based world. Read the Task, "
+    "then EACH TURN reason briefly and issue exactly ONE command on a final line that "
+    "starts with 'Action:'. Only use commands from the 'Admissible actions' list. Explore "
+    "receptacles to find objects; to examine an object under a lamp, take the object, go "
+    "to the lamp, turn it on, then examine the object.\n\n"
+    "Here is one worked example:\n"
+    "Task: look at the alarm clock under the desklamp.\n"
+    "Thought: I need to find the alarm clock, probably on a desk or shelf.\n"
+    "Action: go to desk 1\n"
+    "Observation: On the desk 1, you see a alarm clock 1, a pencil 1, and a desklamp 1.\n"
+    "Thought: The alarm clock and the desklamp are both here. Take the clock.\n"
+    "Action: take alarm clock 1 from desk 1\n"
+    "Observation: You pick up the alarm clock 1 from the desk 1.\n"
+    "Thought: Turn on the desklamp, then look at the clock under it.\n"
+    "Action: use desklamp 1\n"
+    "Observation: You turn on the desklamp 1. Task complete.\n\n"
+    "Now solve the following task the same way."
 )
 
 
