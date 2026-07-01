@@ -84,13 +84,44 @@ def _parse_action(text: Optional[str]) -> str:
 class _Episode:
     """Per-trajectory ALFWorld episode: the live gym env, its pooled template, and state."""
 
-    __slots__ = ("env", "template", "reward", "steps")
+    __slots__ = ("env", "template", "reward", "steps", "admissible")
 
     def __init__(self, env: Any, template: Any) -> None:
         self.env = env
         self.template = template
         self.reward = 0.0
         self.steps = 0
+        self.admissible: List[str] = []
+
+
+def _match_admissible(action: str, admissible: List[str]) -> str:
+    """Snap the model's action to the closest ADMISSIBLE command (standard ALFWorld
+    practice): exact → substring-containment → best token-overlap (Jaccard ≥ 0.5). This
+    honors near-miss phrasings ("go to cabinet" → "go to cabinet 1") so a slightly-off
+    action isn't a wasted turn, and keeps malformed text out of TextWorld's parser.
+    Falls back to the raw action when nothing is close (env replies "Nothing happens.")."""
+    if not admissible:
+        return action
+    a = action.strip().lower()
+    if not a:
+        return action
+    for c in admissible:
+        if c.strip().lower() == a:
+            return c
+    for c in admissible:
+        cl = c.strip().lower()
+        if a in cl or cl in a:
+            return c
+    at = set(a.split())
+    best, best_score = action, 0.5  # threshold: only snap on a real overlap
+    for c in admissible:
+        ct = set(c.strip().lower().split())
+        if not ct:
+            continue
+        score = len(at & ct) / len(at | ct)
+        if score > best_score:
+            best, best_score = c, score
+    return best
 
 
 class AlfworldEnv:
@@ -195,7 +226,9 @@ class AlfworldEnv:
         with self._lock:
             self._counter += 1
             eid = f"{sid}#ep{self._counter}"
-            self._episodes[eid] = _Episode(tw, template)
+            ep = _Episode(tw, template)
+            ep.admissible = self._admissible(info)
+            self._episodes[eid] = ep
 
         control = dict(root.control or {})
         control["alfworld"] = {"episode_id": eid}
@@ -224,7 +257,8 @@ class AlfworldEnv:
             return None, True, {"reward": 0.0}
 
         frontier = sample.parts[-1].primitive
-        action = _parse_action(frontier.texts[0] if isinstance(frontier, Texts) and frontier.texts else "")
+        raw = _parse_action(frontier.texts[0] if isinstance(frontier, Texts) and frontier.texts else "")
+        action = _match_admissible(raw, ep.admissible)
         try:
             obs, scores, dones, infos = ep.env.step([action])
         except Exception as exc:  # noqa: BLE001 — TextWorld's PDDL parser raises on some states
@@ -234,6 +268,7 @@ class AlfworldEnv:
             # Drop (don't reuse) a template whose game engine just errored.
             return None, True, {"reward": ep.reward, "success": 0.0, "steps": ep.steps, "error": True}
         ep.steps += 1
+        ep.admissible = self._admissible(infos)
 
         success = self._success(scores, infos)
         ep.reward = success - self._step_penalty * ep.steps
@@ -272,6 +307,11 @@ class AlfworldEnv:
             return 1.0 if float(self._first(scores, 0.0)) >= 1.0 else 0.0
         except (TypeError, ValueError):
             return 0.0
+
+    def _admissible(self, info: Any) -> List[str]:
+        """The admissible commands for the current state (batch row 0), as a list."""
+        cmds = self._first(info.get("admissible_commands"), None) if isinstance(info, dict) else None
+        return [str(c) for c in cmds] if cmds else []
 
     def _format(self, obs: Any, info: Any, *, first: bool) -> str:
         text = str(self._first(obs, obs))[: self._max_obs_chars]

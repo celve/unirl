@@ -13,7 +13,7 @@ import pytest
 
 pytest.importorskip("torch")
 
-from unirl.rollout.loop.alfworld_env import AlfworldEnv, _parse_action  # noqa: E402
+from unirl.rollout.loop.alfworld_env import AlfworldEnv, _match_admissible, _parse_action  # noqa: E402
 from unirl.types.primitives import Texts  # noqa: E402
 from unirl.types.sample import Part, Sample  # noqa: E402
 from unirl.types.sampling import ARSamplingParams  # noqa: E402
@@ -61,6 +61,15 @@ def test_parse_action():
     assert _parse_action("Thought: I look around.\nAction: go to cabinet 1") == "go to cabinet 1"
     assert _parse_action("take mug 1") == "take mug 1"  # bare fallback
     assert _parse_action("") == ""
+
+
+def test_match_admissible():
+    adm = ["go to cabinet 1", "take mug 1", "put mug 1 in/on cabinet 1"]
+    assert _match_admissible("go to cabinet 1", adm) == "go to cabinet 1"  # exact
+    assert _match_admissible("go to the cabinet 1", adm) == "go to cabinet 1"  # token overlap
+    assert _match_admissible("take mug", adm) == "take mug 1"  # containment
+    assert _match_admissible("fly to the moon", adm) == "fly to the moon"  # no match -> raw
+    assert _match_admissible("look", []) == "look"  # no admissible -> raw
 
 
 def test_reset_builds_react_prompt_and_episode(monkeypatch):
