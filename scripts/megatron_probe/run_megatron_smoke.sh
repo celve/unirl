@@ -21,8 +21,8 @@ cd /root/unirl
 echo "=== Megatron smoke $(date): Qwen3-0.6B nd=8 ==="
 .venv-sglang/bin/python -m unirl.train_ar \
   --config-name=ar/qwen3_grpo_4b_megatron_sglang \
-  num_devices=8 num_rollouts=${NUM_ROLLOUTS:-80} \
-  batch_size=16 data_source.args.algorithm.prompts_per_rollout=16 \
+  num_devices=8 num_rollouts=${NUM_ROLLOUTS:-60} \
+  batch_size=${BS:-32} data_source.args.algorithm.prompts_per_rollout=${BS:-32} \
   sampling.max_new_tokens=1024 rollout.config.max_new_tokens=1024 \
   algorithm.horizon=1024 \
   stack.num_updates_per_batch=4 \
