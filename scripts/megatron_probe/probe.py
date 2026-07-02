@@ -149,6 +149,48 @@ def hf_to_mcore(model, hf_sd, hf):
     return filled, missing, unused
 
 
+def mcore_to_hf(name, param, hf):
+    """mcore param -> list of (hf_name, tensor). Inverse of hf_to_mcore (local spec)."""
+    import re
+    n_group = hf["num_key_value_heads"]
+    head_dim = hf.get("head_dim", hf["hidden_size"] // hf["num_attention_heads"])
+    hidden = hf["hidden_size"]
+    vpg = hf["num_attention_heads"] // n_group
+    if name == "embedding.word_embeddings.weight":
+        return [("model.embed_tokens.weight", param)]
+    if name == "decoder.final_layernorm.weight":
+        return [("model.norm.weight", param)]
+    if name == "output_layer.weight":
+        return [] if hf.get("tie_word_embeddings", False) else [("lm_head.weight", param)]
+    m = re.match(r"decoder\.layers\.(\d+)\.(.+)", name)
+    if not m:
+        return []
+    i, rest = m.groups()
+    L = f"model.layers.{i}."
+    if rest == "self_attention.linear_qkv.weight":
+        p = param.view(n_group, vpg + 2, head_dim, hidden)
+        q, k, v = torch.split(p, [vpg, 1, 1], dim=1)
+        return [(L + "self_attn.q_proj.weight", q.reshape(-1, hidden)),
+                (L + "self_attn.k_proj.weight", k.reshape(-1, hidden)),
+                (L + "self_attn.v_proj.weight", v.reshape(-1, hidden))]
+    if rest == "self_attention.linear_proj.weight":
+        return [(L + "self_attn.o_proj.weight", param)]
+    if rest == "self_attention.q_layernorm.weight":
+        return [(L + "self_attn.q_norm.weight", param)]
+    if rest == "self_attention.k_layernorm.weight":
+        return [(L + "self_attn.k_norm.weight", param)]
+    if rest == "input_layernorm.weight":
+        return [(L + "input_layernorm.weight", param)]
+    if rest == "pre_mlp_layernorm.weight":
+        return [(L + "post_attention_layernorm.weight", param)]
+    if rest == "mlp.linear_fc1.weight":
+        gate, up = param.chunk(2, dim=0)
+        return [(L + "mlp.gate_proj.weight", gate), (L + "mlp.up_proj.weight", up)]
+    if rest == "mlp.linear_fc2.weight":
+        return [(L + "mlp.down_proj.weight", param)]
+    raise ValueError(f"mcore_to_hf: unmapped {name}")
+
+
 def main():
     hf = json.load(open(os.path.join(MODEL, "config.json")))
     log("[cfg]", {k: hf[k] for k in ("hidden_size", "num_hidden_layers", "num_attention_heads",
@@ -192,9 +234,58 @@ def main():
     mc_arg = mc_logits[0, :, : hf_logits.shape[-1]].argmax(-1)
     agree = (hf_arg == mc_arg).float().mean().item()
     log(f"   argmax agreement mcore-vs-HF = {agree:.3f} (want ~1.0)")
-    log(f"   HF next-token ids: {hf_arg.tolist()}")
-    log(f"   mcore next-token ids: {mc_arg.tolist()}")
-    log("[done] probe complete." if agree > 0.9 else "[done] FORWARD MISMATCH — investigate.")
+    if agree <= 0.9:
+        log("[stage3] FORWARD MISMATCH — stopping.")
+        return
+
+    log("[stage4] mcore->HF export round-trip check...")
+    exported = {}
+    for n, p in model.named_parameters():
+        for hn, ht in mcore_to_hf(n, p.detach(), hf):
+            exported[hn] = ht
+    max_err, nbad = 0.0, 0
+    for k, orig in hf_sd.items():
+        if k == "lm_head.weight" and hf.get("tie_word_embeddings", False):
+            continue
+        if k not in exported:
+            log("   EXPORT MISSING:", k); nbad += 1; continue
+        e = (exported[k].float() - orig.float().cuda()).abs().max().item()
+        max_err = max(max_err, e)
+    log(f"   export keys={len(exported)} max_abs_err={max_err:.2e} missing={nbad} (want err=0, missing=0)")
+
+    log("[stage5] DDP wrap + dist-optimizer + one train step...")
+    from megatron.core.distributed import DistributedDataParallel as DDP, DistributedDataParallelConfig
+    from megatron.core.optimizer import get_megatron_optimizer, OptimizerConfig as McoreOptCfg
+    from megatron.core.pipeline_parallel import get_forward_backward_func
+    ddp_cfg = DistributedDataParallelConfig(use_distributed_optimizer=True, overlap_grad_reduce=False)
+    ddp = DDP(cfg, ddp_cfg, model)
+    opt_cfg = McoreOptCfg(optimizer="adam", lr=1e-5, weight_decay=0.0, bf16=True,
+                          use_distributed_optimizer=True, params_dtype=torch.bfloat16)
+    optimizer = get_megatron_optimizer(opt_cfg, [ddp])
+    log("   DDP + optimizer built")
+
+    def forward_step(data_iter, mdl):
+        batch = next(data_iter)
+        out = mdl(input_ids=batch["ids"], position_ids=batch["pos"], attention_mask=batch["mask"])
+
+        def loss_fn(logits):
+            lg = logits.transpose(0, 1) if logits.shape[0] == batch["ids"].shape[1] else logits
+            lp = torch.log_softmax(lg[:, :-1].float(), dim=-1)
+            tgt = batch["ids"][:, 1:]
+            nll = -lp.gather(-1, tgt.unsqueeze(-1)).squeeze(-1).mean()
+            return nll * 1.0, torch.tensor(1, device=logits.device), {"keys": [], "values": logits.new_zeros(1)}
+        return out, loss_fn
+
+    for chunk in [ddp]:
+        chunk.zero_grad_buffer()
+    optimizer.zero_grad()
+    data = iter([{"ids": ids, "pos": pos, "mask": amask}])
+    losses = get_forward_backward_func()(
+        forward_step_func=forward_step, data_iterator=data, model=[ddp],
+        num_microbatches=1, seq_length=S, micro_batch_size=1, forward_only=False)
+    ok, gnorm, nz = optimizer.step()
+    log(f"   train step: success={ok} grad_norm={float(gnorm):.4f} losses={losses}")
+    log("[done] ALL STAGES PASSED." if (max_err < 1e-2 and nbad == 0 and ok) else "[done] see failures above.")
 
 
 if __name__ == "__main__":
