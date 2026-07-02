@@ -234,6 +234,23 @@ class TrainStack(Remote):
         if not micros:
             raise ValueError(f"{type(self).__name__}._run_update: empty micros.")
 
+        # A training backend may own the whole forward/backward/optimizer-step loop:
+        # mcore's get_forward_backward_func is a monolithic scheduler that cannot be
+        # decomposed into the per-micro compute_loss_and_backward() calls the FSDP
+        # loop below drives (it runs backward internally and reduces grads via
+        # finalize_model_grads). Such a backend sets owns_update_loop=True and gets
+        # the update delegated wholesale — one optimizer step per call, so the outer
+        # num_updates_per_batch loop is unchanged. Inert for the FSDP/VeOmni backends
+        # (attribute absent → getattr False), so the path below is untouched.
+        if getattr(self.fsdp_backend, "owns_update_loop", False):
+            return self.fsdp_backend.run_update(
+                algorithm=self.algorithm,
+                resp_track=resp_track,
+                micros=micros,
+                training_progress=training_progress,
+                max_grad_norm=self.max_grad_norm,
+            )
+
         bs = int(resp_track.batch_size)
         self.fsdp_backend.zero_grad()
 

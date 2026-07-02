@@ -100,9 +100,52 @@ class FSDPConfig:
     sp_size: int = 1
 
 
+@dataclass
+class MegatronConfig:
+    """Megatron-Core training-backend config (M0: DP only).
+
+    Selected purely by Hydra ``_target_: unirl.train.backend.megatron.MegatronBackend``.
+    M0 requires ``tp=pp=vpp=ep=cp=1`` (``assert_supported_topology`` raises
+    otherwise); the parallelism fields exist so M1/M2 relax them without a schema
+    change. Cross-referenced against verl ``McoreEngineConfig``.
+    """
+
+    # HF checkpoint the AutoBridge derives the mcore GPTModel + initial weights from
+    # (``AutoBridge.from_hf_pretrained``). Required; supplied by the recipe.
+    hf_checkpoint: str
+    # Architecture key. Drives the hand-written converter dispatch on the M1 raw
+    # path; unused in M0 AutoBridge (bridge mode) but kept for forward-compat.
+    model_name: str = "qwen3"
+    # Parallelism degrees. M0: all 1 (DP only). vpp/etp None = unset.
+    tp_size: int = 1
+    pp_size: int = 1
+    vpp_size: Optional[int] = None
+    ep_size: int = 1
+    etp_size: Optional[int] = None
+    cp_size: int = 1
+    # Ulysses sequence-parallel degree (folded into the DP mesh, like
+    # ``FSDPConfig.sp_size``); 1 = disabled. Handled by the existing DP+SP rank_infos.
+    sp_size: int = 1
+    # mcore model / schedule knobs.
+    seq_length: int = 8192
+    # ZeRO distributed optimizer — forced on, matching slime ``arguments.py:149``.
+    use_distributed_optimizer: bool = True
+    bf16: bool = True
+    # Global-batch-mean loss normalization. The ``run_update`` loss closure cancels
+    # mcore's ``/num_microbatches`` and leaves the DP-average intact ONLY when this
+    # is False (see the M0 plan's loss_scale reconciliation); asserted at backend
+    # init so a pin flipping it to per-token loss fails loud rather than mis-scaling.
+    calculate_per_token_loss: bool = False
+    # M0 = synchronous checkpoint only (async + its finalize barrier are deferred).
+    checkpoint_async: bool = False
+    # M0 = AutoBridge for model build + HF<->mcore weight conversion.
+    use_bridge: bool = True
+
+
 __all__ = [
     "LoraConfig",
     "EmaLoraConfig",
     "EmaFullConfig",
     "FSDPConfig",
+    "MegatronConfig",
 ]

@@ -117,6 +117,42 @@ class GRPO(StageAlgorithm):
         new_logp = self.stage.replay(
             typed_conds, segment=segment, temperature=self.sampling_temperature
         )  # [total_tokens]
+        loss, metrics, n = self.compute_loss(
+            forward_output=new_logp,
+            conditions=conditions,
+            segment=segment,
+            advantages=advantages,
+            training_progress=training_progress,
+        )
+        (loss * loss_scale).backward()
+        return AlgorithmStepResult(
+            loss=float(loss.detach().item()),
+            metrics=metrics,
+            num_steps_or_tokens=n,
+            has_backward=True,
+        )
+
+    def compute_loss(
+        self,
+        *,
+        forward_output: torch.Tensor,
+        conditions: Mapping[str, Condition],
+        segment: "TextSegment",
+        advantages: torch.Tensor,
+        training_progress: float,
+    ) -> tuple[torch.Tensor, Mapping[str, Any], int]:
+        """Ratio-clip loss from per-token new log-probs — shared by the FSDP
+        backward path and the Megatron ``forward_step`` closure.
+
+        ``forward_output`` is the per-token new log-prob ``[total_tokens]``:
+        ``ARStage.replay``'s output on the FSDP path, or the mcore
+        per-token-logp extractor's output under Megatron. Returns
+        ``(loss_tensor, metrics, num_tokens)``; the caller owns ``.backward()``.
+        Math is byte-identical to the pre-split ``compute_loss_and_backward``.
+        """
+        new_logp = forward_output
+        if new_logp.numel() == 0:
+            return new_logp.sum(), {}, 0
         # old_logp = the rollout log-prob, frozen on the segment — the deliberate
         # rollout-anchored ratio across num_updates_per_batch steps (see the
         # supports_multi_update class comment; verl bypass_mode=True parity).
@@ -153,7 +189,6 @@ class GRPO(StageAlgorithm):
                 loss = torch.stack([p.mean() if p.numel() else p.new_zeros(()) for p in parts]).mean()
         else:
             loss = loss_per_elem.mean()
-        (loss * loss_scale).backward()
 
         metrics: Dict[str, Any] = {
             "policy_loss": float(loss.detach().item()),
@@ -161,12 +196,7 @@ class GRPO(StageAlgorithm):
             **rollout_replay_logp_absdiff(new_logp, old_logp),
             **{k: float(v.item()) for k, v in ratio_metrics.items()},
         }
-        return AlgorithmStepResult(
-            loss=float(loss.detach().item()),
-            metrics=metrics,
-            num_steps_or_tokens=int(new_logp.shape[0]),
-            has_backward=True,
-        )
+        return loss, metrics, int(new_logp.shape[0])
 
     @staticmethod
     def _expand_advantages_to_tokens(

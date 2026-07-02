@@ -239,6 +239,35 @@ class StageAlgorithm(Remote, ABC):
         """
         return False
 
+    def compute_loss(
+        self,
+        *,
+        forward_output: torch.Tensor,
+        conditions: Mapping[str, "Condition"],
+        segment: "Segment",
+        advantages: torch.Tensor,
+        training_progress: float,
+    ) -> Tuple[torch.Tensor, Mapping[str, Any], int]:
+        """Forward-output → ``(loss_tensor, metrics, num_steps_or_tokens)``.
+
+        The loss math split OUT of :meth:`compute_loss_and_backward` so the
+        *identical* clip math runs in both worlds: the FSDP path calls
+        ``stage.replay(...)`` then this; the Megatron ``forward_step`` closure
+        runs the mcore forward then this. ``forward_output`` is the per-token
+        new log-prob ``[total_tokens]`` — the exact return of ``ARStage.replay``
+        AND of the mcore per-token-logp extractor — which is what makes the two
+        entry points interchangeable. The caller owns ``.backward()``.
+
+        NON-ABSTRACT on purpose (mirrors :meth:`recomputes_anchor`): only
+        algorithms that run on the mcore ``forward_step`` path (M0: GRPO)
+        override it. An ``@abstractmethod`` here would break every concrete
+        subclass at instantiation.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} has no Megatron forward-split loss; "
+            "only needed for the mcore forward_step path."
+        )
+
     def prepare_segment(
         self,
         *,

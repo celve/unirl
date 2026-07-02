@@ -1,0 +1,168 @@
+# @package _global_
+# AR GRPO Qwen3-4B-Base on DAPO-Math — Megatron-Core backend (M0: DP only).
+#
+# Identical to qwen3_grpo_4b_veomni_sp_sglang EXCEPT the training backend: the
+# VeOmni FSDP2 backend is swapped for MegatronBackend (tp=pp=ep=cp=1, DP only).
+# Same model / data / SGLang colocate rollout / GRPO loss / advantage norm.
+#
+# M0 de-risks the seams (backend lifecycle, run_update control-inversion, mcore->HF
+# weight walk via AutoBridge, native dist_checkpointing). tp/pp/ep>1 and mode=adapter
+# RAISE (see _guards.py). Needs a GPU box with the pinned mcore + TransformerEngine
+# + bridge; this recipe does NOT run on CPU.
+#
+# Run (32 GPU, DP=32):
+#   DATA_PATH=data/dapo_math/train.jsonl EVAL_DATA_PATH=data/dapo_math/aime_eval.jsonl \
+#   python -m unirl.train_ar --config-name=ar/qwen3_grpo_4b_megatron_sglang num_devices=32
+
+num_devices: 32
+batch_size: 64 # prompts_per_rollout
+num_rollouts: 800
+weight_sync_interval: 1 # push the full dense weights into SGLang every rollout
+eval_interval: 10
+
+adv_normalization_scope: group
+normalize_adv_by_std: false
+
+logging:
+  report_to_wandb: true
+  project_name: unirl-grpo
+  run_name: grpo_qwen3-4b-base_dapo_sglang_megatron
+  entity: ${oc.env:WANDB_ENTITY,null}
+  tags: [grpo, qwen3, 4b-base, dapo, sglang, megatron, m0]
+
+bundle:
+  # The bundle/pipeline still build the HF Qwen3 module + ARStage (for conditions
+  # and the algorithm), but MegatronBackend builds its OWN mcore model from
+  # hf_checkpoint and never calls stage.replay — so meta_init_transformer keeps the
+  # HF transformer on the meta device (never materialized -> no 2x GPU memory).
+  _target_: unirl.models.qwen3.bundle.Qwen3Bundle.from_config
+  config:
+    _target_: unirl.models.qwen3.config.Qwen3PipelineConfig
+    pretrained_model_ckpt_path: ${oc.env:QWEN3_PATH,Qwen/Qwen3-4B-Base}
+    meta_init_transformer: true
+    model_precision: bf16
+    autocast_precision: bf16
+    logprob_precision: fp32
+    use_gradient_checkpointing: true
+
+pipeline:
+  _target_: unirl.models.qwen3.pipeline.Qwen3Pipeline.from_bundle
+  enable_thinking: true
+  autocast_precision: bf16
+  logprob_precision: fp32
+
+backend:
+  # Megatron-Core backend, DP only (M0). AutoBridge derives the mcore GPTModel and
+  # both HF<->mcore weight directions from hf_checkpoint, so no hand-written Qwen
+  # converter is needed. tp/pp/ep/cp>1 raise (assert_supported_topology).
+  _target_: unirl.train.backend.megatron.MegatronBackend
+  megatron_cfg:
+    _target_: unirl.train.configs.MegatronConfig
+    hf_checkpoint: ${oc.env:QWEN3_PATH,Qwen/Qwen3-4B-Base}
+    model_name: qwen3
+    tp_size: 1
+    pp_size: 1
+    ep_size: 1
+    cp_size: 1
+    sp_size: 1
+    seq_length: 8192
+    use_distributed_optimizer: true
+    bf16: true
+    # Load-bearing: the run_update loss-scale reconciliation cancels mcore's
+    # /num_microbatches and keeps the DP-average, matching the FSDP reference.
+    calculate_per_token_loss: false
+    checkpoint_async: false
+    use_bridge: true
+  optimizer_cfg:
+    _target_: unirl.train.backend.base.OptimizerConfig
+    learning_rate: 1.0e-6
+    adam_beta1: 0.9
+    adam_beta2: 0.999
+    adam_epsilon: 1.0e-8
+    weight_decay: 0.01
+  scheduler_cfg:
+    _target_: unirl.train.backend.base.LrSchedulerConfig
+    type: constant
+    warmup_steps: 0
+    total_steps: 1000
+
+rollout:
+  _target_: unirl.rollout.engine.sglang.engine.SGLangRolloutEngine
+  config:
+    _target_: unirl.rollout.engine.sglang.config.SGLangEngineConfig
+    backend: native
+    pretrained_model_ckpt_path: ${oc.env:QWEN3_PATH,Qwen/Qwen3-4B-Base}
+    tp_size: 1
+    max_new_tokens: 8192
+    temperature: 1.0
+    top_p: 1.0
+    concurrency: 16
+    samples_pre_expanded: true
+    chat_template_kwargs:
+      enable_thinking: true
+    engine_kwargs:
+      mem_fraction_static: 0.3
+      skip_server_warmup: true
+      attention_backend: triton
+      disable_cuda_graph: false
+      cuda_graph_max_bs: 16
+      enable_lora: false
+
+reward:
+  _target_: unirl.reward.service.RewardService
+  truncated_reward: keep
+  backend:
+    _target_: unirl.reward.local.mathverify.MathVerifyRewardScorer
+    base_device: cpu
+    config:
+      _target_: unirl.reward.local.mathverify.MathVerifySpec
+
+algorithm:
+  _target_: unirl.algorithms.grpo.GRPO
+  stage_attr: ar
+  clip_range: 0.2
+  clip_range_high: 0.28
+  clip_schedule: constant
+  loss_agg_mode: seq-mean-token-sum-norm
+  horizon: 8192
+  # Must equal sampling.temperature so the mcore replay logits/T match the SGLang
+  # sampler (ratio_mean ≈ 1 — enforced by the loss_bridge step-0 assert).
+  sampling_temperature: 1.0
+  conditions_cls:
+    _target_: hydra.utils.get_class
+    path: unirl.models.qwen3.conditions.Qwen3ARConditions
+
+sync:
+  # FULL-weight colocate sync: push the full dense mcore weights (exported to HF
+  # names by the AutoBridge walk) into the SGLang server each rollout. Qwen3's HF
+  # names match SGLang's weight map, so NO name_remap is needed.
+  _target_: unirl.distributed.weight_sync.full.tensor.TensorWeightSync
+  lora_merged: false
+  bucket_size_mb: 64
+  flush_cache: true
+
+stack:
+  _target_: unirl.train.stack.TrainStack
+  micro_batch_size: 1
+  max_grad_norm: 1.0
+  # 4 disjoint mini-batch optimizer steps per rollout (each delegated to run_update).
+  # dp=32 -> per-worker shard 16 samples, 16%4==0 OK.
+  num_updates_per_batch: 4
+
+data_source:
+  _target_: unirl.data.data_source.MultimodalRLDataSource
+  args:
+    run:
+      data_path: ${oc.env:DATA_PATH}
+      eval_data_path: ${oc.env:EVAL_DATA_PATH,${oc.env:DATA_PATH}}
+      seed: 42
+    algorithm:
+      prompts_per_rollout: 64
+
+sampling:
+  _target_: unirl.types.sampling.ARSamplingParams
+  samples_per_prompt: 8
+  temperature: 1.0
+  top_p: 1.0
+  top_k: 0
+  max_new_tokens: 8192

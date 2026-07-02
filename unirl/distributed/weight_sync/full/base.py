@@ -181,9 +181,28 @@ class FullWeightSync(Remote):
         happens shard-side before the redistribute and every consumer
         (``_iter_buckets`` sizing included) sees wire-width tensors.
         """
+        remap = self._name_remap
+
+        # A non-FSDP backend (e.g. Megatron) that manages its own sharding exposes
+        # iter_weight_sync_tensors(...): a single "1 mcore param in -> N HF tensors
+        # out" walk that owns any cross-rank gather (PP/EP broadcast, TP all-gather)
+        # — a shape the single-tensor _to_full_tensor seam cannot express. When
+        # present, delegate the whole walk to it; name_remap / wire_dtype / bucketing
+        # and the three transports stay orthogonal and untouched. Absent on the
+        # FSDP/VeOmni backends (getattr -> None), so the DTensor walk below is
+        # byte-identical.
+        walk = getattr(self._backend, "iter_weight_sync_tensors", None)
+        if walk is not None:
+            for name, tensor in walk(
+                lora_merged=self._lora_merged, adapter_name=self._adapter_name, dtype=self._wire_dtype
+            ):
+                out = _apply_name_remap(name, remap)
+                if out is not None:
+                    yield out, tensor
+            return
+
         from unirl.utils.peft_merge import merged_state_dict, raw_state_dict
 
-        remap = self._name_remap
         if self._lora_merged:
             for name, tensor in merged_state_dict(
                 self._backend.model, adapter_name=self._adapter_name, dtype=self._wire_dtype
