@@ -26,7 +26,7 @@ echo "=== Megatron smoke $(date): Qwen3-0.6B nd=8 ==="
   sampling.max_new_tokens=1024 rollout.config.max_new_tokens=1024 \
   algorithm.horizon=1024 \
   stack.num_updates_per_batch=1 \
-  eval_interval=0 save_interval=0 \
+  eval_interval=0 \
   logging.run_name=megatron_smoke_qwen3-0p6b \
   2>&1 | tee /root/unirl/megatron_smoke.log
 echo "=== exited ${PIPESTATUS[0]} $(date) ==="
