@@ -1,13 +1,13 @@
 """AgenticEnvTrainer — agentic multi-turn RL with ENV-SOURCED rewards (LIN-519).
 
-A thin subclass of :class:`~unirl.trainer.deep_research.DeepResearchTrainer` for
+A thin subclass of :class:`~unirl.trainer.agentic.AgenticTrainer` for
 interactive ENVIRONMENTS (ALFWorld, Sokoban, WebShop, …) where the reward is the
 environment's return per trajectory — the simulator's task-success / shaped signal,
 already attached to each trajectory's last generated Part by the
 :class:`~unirl.rollout.engine.agentic.engine.AgenticRolloutEngine` — not a grade of a
 final ``<answer>``.
 
-Only the reward SOURCE differs from the deep-research trainer: this reads the
+Only the reward SOURCE differs from the base ``AgenticTrainer``: this reads the
 per-trajectory reward off the frontier instead of building a scoring Sample and
 calling the reward backend (``RewardService`` even rejects precomputed rewards). The
 GRPO tail — group-relative advantage → ``Part.concat`` of every assistant turn → one
@@ -23,13 +23,13 @@ from typing import List, Optional, Tuple
 import torch
 
 from unirl.distributed.tensor import hydrate
-from unirl.trainer.deep_research import DeepResearchTrainer
+from unirl.trainer.agentic import AgenticTrainer
 from unirl.types.sample import Sample
 
 logger = logging.getLogger(__name__)
 
 
-class AgenticEnvTrainer(DeepResearchTrainer):
+class AgenticEnvTrainer(AgenticTrainer):
     """Agentic trainer whose reward is the environment's per-trajectory return.
 
     The recipe still carries a (built-but-unused) ``reward`` backend so the shared

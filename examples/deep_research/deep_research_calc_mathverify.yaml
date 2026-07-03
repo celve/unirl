@@ -1,5 +1,5 @@
 # @package _global_
-# M1 — Deep-research agentic RL: DeepResearchTrainer over the AgenticRolloutEngine,
+# M1 — Deep-research agentic RL: AgenticTrainer over the AgenticRolloutEngine,
 # validated WITHOUT external services (the existing CalculatorTool + a rule-based
 # MathVerify reward). This proves the whole agentic train loop end-to-end —
 # multi-turn rollout (List[Sample]) -> judge -> group GRPO advantage -> one
@@ -21,7 +21,7 @@ num_devices: 2
 batch_size: 4 # P prompts_per_rollout; P*n = 8 must be divisible by num_devices
 num_rollouts: 20
 weight_sync_interval: 1 # push full dense weights into the inner SGLang every rollout
-eval_interval: 0 # agentic eval not implemented yet (DeepResearchTrainer.evaluate raises)
+eval_interval: 0 # agentic eval not implemented yet (AgenticTrainer.evaluate raises)
 
 # rank-0 coordinator runs generate + its own drain + serves next_task pulls
 # concurrently on a threaded Worker — needs >=3 (smoke uses 8).

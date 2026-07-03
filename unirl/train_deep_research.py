@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """UniRL deep-research (multi-turn agentic) training entry point (LIN-519).
 
-Drives :class:`unirl.trainer.deep_research.DeepResearchTrainer` over the
+Drives :class:`unirl.trainer.agentic.AgenticTrainer` over the
 :class:`~unirl.rollout.engine.agentic.engine.AgenticRolloutEngine`. Sibling of
 ``train_ar.py``; a separate entrypoint because the agentic rollout returns a
 ``List[Sample]`` of variable-depth trajectories (the trainer is hard-coded per
@@ -17,12 +17,12 @@ from __future__ import annotations
 import hydra
 from omegaconf import DictConfig
 
-from unirl.trainer.deep_research import DeepResearchTrainer
+from unirl.trainer.agentic import AgenticTrainer
 
 
 @hydra.main(version_base=None, config_path="../examples", config_name="deep_research/deep_research_calc_mathverify")
 def main(cfg: DictConfig) -> None:
-    trainer = DeepResearchTrainer(
+    trainer = AgenticTrainer(
         cfg=cfg,
         batch_size=cfg.batch_size,
         bundle_cfg=cfg.bundle,

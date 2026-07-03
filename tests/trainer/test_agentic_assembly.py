@@ -1,4 +1,4 @@
-"""CPU contract tests for DeepResearchTrainer's assembly logic (LIN-519).
+"""CPU contract tests for AgenticTrainer's assembly logic (LIN-519).
 
 Exercises the pure, error-prone pieces of ``train_step`` in isolation — ``<answer>``
 extraction, group-relative GRPO advantage over a flat trajectory list (completion
@@ -16,7 +16,7 @@ pytest.importorskip("torch")  # the unirl types import torch at module load
 
 import torch  # noqa: E402
 
-from unirl.trainer.deep_research import DeepResearchTrainer, _extract_answer  # noqa: E402
+from unirl.trainer.agentic import AgenticTrainer, _extract_answer  # noqa: E402
 from unirl.types.sample import Part  # noqa: E402
 
 
@@ -42,7 +42,7 @@ def test_extract_answer_last_wins_and_fallback():
 
 def _adv(scope, by_std, rewards, group_ids):
     stub = SimpleNamespace(adv_normalization_scope=scope, normalize_adv_by_std=by_std)
-    return DeepResearchTrainer._group_advantages(stub, torch.tensor(rewards), group_ids)
+    return AgenticTrainer._group_advantages(stub, torch.tensor(rewards), group_ids)
 
 
 def test_group_advantages_group_zscore():
@@ -77,7 +77,7 @@ def test_group_advantages_global_is_mean_zero():
 
 def _pad(part, dp):
     stub = SimpleNamespace(stack=SimpleNamespace(dp_size=dp), num_devices=dp)
-    return DeepResearchTrainer._pad_to_dp_multiple(stub, part)
+    return AgenticTrainer._pad_to_dp_multiple(stub, part)
 
 
 def test_pad_to_dp_multiple_pads_with_zero_advantage():

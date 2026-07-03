@@ -1,5 +1,5 @@
 # @package _global_
-# M2 — Deep-research agentic RL: the REAL deep-research run. Same DeepResearchTrainer
+# M2 — Deep-research agentic RL: the REAL deep-research run. Same AgenticTrainer
 # + AgenticRolloutEngine as M1 (unchanged), swapping ONLY the tools (search + visit)
 # and the reward backend (LLM-as-judge). This is the proof that the design isolates
 # "what tools / what reward" from "how to train".

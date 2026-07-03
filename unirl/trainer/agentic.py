@@ -1,4 +1,4 @@
-"""DeepResearchTrainer — multi-turn agentic RL over the AgenticRolloutEngine (LIN-519).
+"""AgenticTrainer — multi-turn agentic RL over the AgenticRolloutEngine (LIN-519).
 
 A sibling of :class:`~unirl.trainer.ar.ARTrainer` for the AGENTIC path. The rollout is
 the rank-0-coordinated
@@ -52,7 +52,7 @@ def _extract_answer(text: Optional[str]) -> str:
     return matches[-1].group(1).strip() if matches else text.strip()
 
 
-class DeepResearchTrainer(ARTrainer):
+class AgenticTrainer(ARTrainer):
     """Agentic (multi-turn tool-use) RL trainer over the ``AgenticRolloutEngine``."""
 
     def __init__(self, *, stop: Optional[List[str]] = None, **kwargs) -> None:
@@ -136,7 +136,7 @@ class DeepResearchTrainer(ARTrainer):
 
         depths = [len(tr.gen_parts()) for tr in trajs]
         if not train_parts:  # pathological: every sampled trajectory failed to generate
-            logger.warning("DeepResearchTrainer rollout %d produced no trainable turns.", rollout_id)
+            logger.warning("AgenticTrainer rollout %d produced no trainable turns.", rollout_id)
             return TrainStepResult(0.0, 0.0, 0.0, False, [], {}), mean_reward
 
         # 6) ONE training Part -> pad to a DP multiple (zero-advantage rows) -> ONE step.
@@ -279,6 +279,6 @@ class DeepResearchTrainer(ARTrainer):
 
     def evaluate(self, rollout_id: int) -> float:
         raise NotImplementedError(
-            "DeepResearchTrainer.evaluate is not implemented: the agentic engine returns "
+            "AgenticTrainer.evaluate is not implemented: the agentic engine returns "
             "List[Sample], not a Sample. Set eval_interval=0 (agentic eval is a follow-up)."
         )
