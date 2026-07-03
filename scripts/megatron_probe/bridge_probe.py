@@ -34,7 +34,14 @@ log("[stage0] dist + mpu ok")
 
 from mbridge import AutoBridge
 bridge = AutoBridge.from_pretrained(MODEL)
-log("[stage1] bridge =", type(bridge).__name__)
+# transformers 5.x moved rope_theta off the top-level config; mbridge 0.15.1 reads
+# self.hf_config.rope_theta directly. Inject from config.json (the values still live there).
+import json as _json
+_hfj = _json.load(open(os.path.join(MODEL, "config.json")))
+for _k in ("rope_theta", "head_dim"):
+    if not hasattr(bridge.hf_config, _k) and _k in _hfj:
+        setattr(bridge.hf_config, _k, _hfj[_k])
+log("[stage1] bridge =", type(bridge).__name__, "| injected rope_theta =", getattr(bridge.hf_config, "rope_theta", None))
 
 # build + load
 try:
