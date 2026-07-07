@@ -19,21 +19,39 @@ from typing import Any, Dict, List, Tuple
 import torch
 
 
+# Column-parallel (shard output dim 0) vs row-parallel (shard input dim 1) mcore
+# params, keyed by NAME. We key by name — not the mcore ``tensor_model_parallel``
+# attribute — because DDP wrapping strips that attribute off the params returned by
+# ``model.named_parameters()`` (the load runs pre-DDP so it can use the attribute;
+# the weight-sync walk runs post-DDP so it cannot). Everything else (layernorms) is
+# replicated across TP.
+_TP_COLUMN = ("word_embeddings", "linear_qkv", "linear_fc1", "output_layer")
+_TP_ROW = ("linear_proj", "linear_fc2")
+
+
+def _tp_partition_dim(name: str):
+    if any(k in name for k in _TP_COLUMN):
+        return 0
+    if any(k in name for k in _TP_ROW):
+        return 1
+    return None  # replicated
+
+
 def all_gather_tp_param(name: str, param: torch.Tensor, *, tp_group, tp_size: int) -> torch.Tensor:
     """Reconstruct a full param from its TP shards (slime ``all_gather_param``).
 
-    Non-TP params are returned as-is. TP params all-gather across ``tp_group`` and
-    concat along ``partition_dim``; GLU ``linear_fc1`` needs the gate/up re-chunk
-    (each rank holds ``[gate_r; up_r]`` -> reassemble ``[gate; up]``). Inverse of
-    ``model_provider._tp_shard``.
+    Replicated params (layernorms) are returned as-is. TP params all-gather across
+    ``tp_group`` and concat along the by-name partition dim; GLU ``linear_fc1`` needs
+    the gate/up re-chunk (each rank holds ``[gate_r; up_r]`` -> reassemble
+    ``[gate; up]``). Inverse of ``model_provider._tp_shard``.
     """
-    if tp_size == 1 or not getattr(param, "tensor_model_parallel", False):
+    pdim = _tp_partition_dim(name)
+    if tp_size == 1 or pdim is None:
         return param.data
     import torch.distributed as dist
 
     parts = [torch.empty_like(param.data) for _ in range(tp_size)]
     dist.all_gather(parts, param.data.contiguous(), group=tp_group)
-    pdim = int(getattr(param, "partition_dim", 0))
     if "linear_fc1" in name:  # GLU: [gate_r; up_r] per rank -> [gate; up]
         halves = [p.chunk(2, dim=0) for p in parts]
         parts = [h[0] for h in halves] + [h[1] for h in halves]
