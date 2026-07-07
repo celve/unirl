@@ -95,6 +95,21 @@ def reset_role_name_counter() -> None:
     _role_name_counter.clear()
 
 
+def _cfg_get(cfg: Any, key: str, default: int) -> int:
+    """Read an int config field from a dict or an instantiated config.
+
+    parse_hydra_cfg runs OmegaConf.to_container, so nested ``_target_`` blocks
+    (e.g. ``fsdp_cfg`` / ``megatron_cfg``) arrive as PLAIN DICTS, not instantiated
+    configs — ``getattr(dict, "sp_size")`` would silently return the default. Read
+    the key for dicts and the attr for instantiated configs alike.
+    """
+    if isinstance(cfg, dict):
+        val = cfg.get(key, default)
+    else:
+        val = getattr(cfg, key, default)
+    return int(val or default)
+
+
 def _sp_size_from_init_kwargs(init_kwargs: Optional[Dict[str, Any]], world_size: int) -> int:
     """Ulysses ``sp_size`` for the rank layout.
 
@@ -113,17 +128,6 @@ def _sp_size_from_init_kwargs(init_kwargs: Optional[Dict[str, Any]], world_size:
     """
     if not init_kwargs:
         return 1
-
-    def _cfg_get(cfg: Any, key: str, default: int) -> int:
-        # parse_hydra_cfg runs OmegaConf.to_container, so nested _target_ blocks
-        # (e.g. fsdp_cfg) arrive here as PLAIN DICTS, not instantiated configs —
-        # getattr(dict, "sp_size") would silently return the default. Read the
-        # key for dicts and the attr for instantiated configs alike.
-        if isinstance(cfg, dict):
-            val = cfg.get(key, default)
-        else:
-            val = getattr(cfg, key, default)
-        return int(val or default)
 
     sp = 1
     fsdp_cfg = init_kwargs.get("fsdp_cfg")
