@@ -24,7 +24,7 @@ def read_hf_config(hf_checkpoint: str) -> Dict[str, Any]:
         return json.load(f)
 
 
-def build_transformer_config(hf: Dict[str, Any]):
+def build_transformer_config(hf: Dict[str, Any], tp_size: int = 1, pp_size: int = 1):
     from megatron.core.transformer.transformer_config import TransformerConfig
 
     return TransformerConfig(
@@ -46,8 +46,11 @@ def build_transformer_config(hf: Dict[str, Any]):
         bf16=True,
         params_dtype=torch.bfloat16,
         pipeline_dtype=torch.bfloat16,
-        tensor_model_parallel_size=1,
-        pipeline_model_parallel_size=1,
+        tensor_model_parallel_size=tp_size,
+        pipeline_model_parallel_size=pp_size,
+        # SP off: each TP rank computes the full (redundant) layernorm — correct,
+        # just less memory-efficient. SP is a later optimization.
+        sequence_parallel=False,
     )
 
 
@@ -66,12 +69,44 @@ def build_gpt_model(cfg, hf: Dict[str, Any]):
         share_embeddings_and_output_weights=hf.get("tie_word_embeddings", False),
         position_embedding_type="rope",
         rotary_base=hf.get("rope_theta", 10000),
+        # parallel_output=False -> the output layer all-gathers vocab-parallel logits
+        # to full [b,s,V] on every TP rank, so the loss bridge needs no vocab-parallel
+        # reduction (correctness-first; vocab-parallel logp is a later memory win).
+        parallel_output=False,
     )
     return model.cuda().bfloat16()
 
 
-def load_hf_weights(model, hf_checkpoint: str, hf: Dict[str, Any]) -> None:
-    """Fill mcore params from HF safetensors (validated: 226/226, err 0)."""
+def _tp_shard(p: torch.Tensor, full: torch.Tensor, *, tp_rank: int, tp_size: int, glu: bool) -> torch.Tensor:
+    """Slice a full HF-equivalent tensor into this TP rank's shard.
+
+    Non-TP params (layernorms, etc.) are replicated (returned whole). TP params
+    slice along the mcore param's ``partition_dim``. GLU ``linear_fc1`` is special:
+    mcore stores it as ``[gate; up]`` but shards each half so every rank holds
+    ``[gate_r; up_r]`` — a naive dim-0 slice would give one rank all-gate.
+    """
+    if tp_size == 1 or not getattr(p, "tensor_model_parallel", False):
+        return full
+    if glu:
+        gate, up = full.chunk(2, dim=0)
+        return torch.cat([gate.chunk(tp_size, 0)[tp_rank], up.chunk(tp_size, 0)[tp_rank]], dim=0).contiguous()
+    dim = int(getattr(p, "partition_dim", 0))
+    # mcore may pad the vocab (dim 0) to a multiple of make_vocab_size_divisible_by;
+    # pad the full tensor up to the mcore full size before slicing.
+    mcore_full = p.shape[dim] * tp_size
+    if full.shape[dim] < mcore_full:
+        pad = [0, 0] * full.dim()
+        pad[-(2 * dim + 1)] = mcore_full - full.shape[dim]  # pad the end of `dim`
+        full = torch.nn.functional.pad(full, pad)
+    return full.chunk(tp_size, dim=dim)[tp_rank].contiguous()
+
+
+def load_hf_weights(model, hf_checkpoint: str, hf: Dict[str, Any], *, tp_rank: int = 0, tp_size: int = 1) -> None:
+    """Fill mcore params from HF safetensors, TP-sharded per rank.
+
+    Validated at tp=1 (226/226, err 0). Under tp>1 each mcore param is this rank's
+    shard: build the full fused HF-equivalent tensor (same as tp=1), then slice.
+    """
     from safetensors.torch import load_file
 
     hf_sd: Dict[str, torch.Tensor] = {}
@@ -85,13 +120,14 @@ def load_hf_weights(model, hf_checkpoint: str, hf: Dict[str, Any]) -> None:
     md = dict(model.named_parameters())
     filled = set()
 
-    def put(mname: str, tensor: torch.Tensor) -> bool:
+    def put(mname: str, full: torch.Tensor, glu: bool = False) -> bool:
         p = md.get(mname)
         if p is None:
             return False
-        assert p.shape == tensor.shape, f"{mname}: mcore {tuple(p.shape)} != {tuple(tensor.shape)}"
+        shard = _tp_shard(p, full, tp_rank=tp_rank, tp_size=tp_size, glu=glu)
+        assert p.shape == shard.shape, f"{mname}: mcore {tuple(p.shape)} != {tuple(shard.shape)}"
         with torch.no_grad():
-            p.copy_(tensor.to(p.dtype).to(p.device))
+            p.copy_(shard.to(p.dtype).to(p.device))
         filled.add(mname)
         return True
 
@@ -112,7 +148,7 @@ def load_hf_weights(model, hf_checkpoint: str, hf: Dict[str, Any]) -> None:
         put(M + "self_attention.linear_proj.weight", g(H + "self_attn.o_proj.weight"))
         put(M + "self_attention.q_layernorm.weight", g(H + "self_attn.q_norm.weight"))
         put(M + "self_attention.k_layernorm.weight", g(H + "self_attn.k_norm.weight"))
-        put(M + "mlp.linear_fc1.weight", torch.cat([g(H + "mlp.gate_proj.weight"), g(H + "mlp.up_proj.weight")], dim=0))
+        put(M + "mlp.linear_fc1.weight", torch.cat([g(H + "mlp.gate_proj.weight"), g(H + "mlp.up_proj.weight")], dim=0), glu=True)
         put(M + "mlp.linear_fc2.weight", g(H + "mlp.down_proj.weight"))
         put(M + "input_layernorm.weight", g(H + "input_layernorm.weight"))
         put(M + "pre_mlp_layernorm.weight", g(H + "post_attention_layernorm.weight"))
@@ -122,10 +158,11 @@ def load_hf_weights(model, hf_checkpoint: str, hf: Dict[str, Any]) -> None:
         raise RuntimeError(f"load_hf_weights: {len(missing)} mcore params unfilled: {missing[:8]}")
 
 
-def build_model_and_load(cfg_hf_checkpoint: str) -> Tuple[Any, Any, Dict[str, Any]]:
-    """Returns (gpt_model, transformer_config, hf_config) with weights loaded."""
-    hf = read_hf_config(cfg_hf_checkpoint)
-    tconf = build_transformer_config(hf)
+def build_model_and_load(hf_checkpoint: str, *, tp_size: int = 1, pp_size: int = 1,
+                         tp_rank: int = 0) -> Tuple[Any, Any, Dict[str, Any]]:
+    """Returns (gpt_model, transformer_config, hf_config) with TP-sharded weights loaded."""
+    hf = read_hf_config(hf_checkpoint)
+    tconf = build_transformer_config(hf, tp_size=tp_size, pp_size=pp_size)
     model = build_gpt_model(tconf, hf)
-    load_hf_weights(model, cfg_hf_checkpoint, hf)
+    load_hf_weights(model, hf_checkpoint, hf, tp_rank=tp_rank, tp_size=tp_size)
     return model, tconf, hf

@@ -26,15 +26,14 @@ def assert_supported_topology(cfg: "MegatronConfig", milestone: str = "M0") -> N
     ``(dp,tp,pp,ep)`` dispatch mesh (M2). Raising here is the whole point — a
     silently-partial axis would ship fragment weights / a wrong loss.
     """
-    if milestone != "M0":
+    if milestone not in ("M0", "M1"):
         raise ValueError(f"assert_supported_topology: unknown milestone {milestone!r}")
-    if cfg.tp_size > 1 or cfg.pp_size > 1 or cfg.ep_size > 1 or cfg.cp_size > 1 or (cfg.vpp_size or 1) > 1:
+    # M1 supports DP + TP (raw-path tensor parallelism). pp/ep/cp/vpp still gated.
+    if cfg.pp_size > 1 or cfg.ep_size > 1 or cfg.cp_size > 1 or (cfg.vpp_size or 1) > 1:
         raise NotImplementedError(
-            "MegatronBackend M0 supports DP only "
-            f"(got tp={cfg.tp_size}, pp={cfg.pp_size}, vpp={cfg.vpp_size}, "
-            f"ep={cfg.ep_size}, cp={cfg.cp_size}; all must be 1). "
-            "tp>1 needs the vocab-parallel loss + TP reshard (M1); "
-            "pp/ep/vpp>1 need the PP/EP walk + dispatch mesh (M2)."
+            "MegatronBackend supports DP + TP only "
+            f"(got pp={cfg.pp_size}, vpp={cfg.vpp_size}, ep={cfg.ep_size}, cp={cfg.cp_size}; "
+            "all must be 1). pp/ep/vpp>1 need the PP/EP walk + dispatch mesh (M2)."
         )
 
 

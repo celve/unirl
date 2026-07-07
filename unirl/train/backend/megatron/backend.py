@@ -51,7 +51,7 @@ class MegatronBackend(Remote):
         rank: int = 0,
     ) -> None:
         super().__init__()
-        assert_supported_topology(megatron_cfg, "M0")
+        assert_supported_topology(megatron_cfg, "M1")
         self._cfg = megatron_cfg
         self._bundle = bundle  # trainer injects it; mcore builds its own model from hf_checkpoint
 
@@ -65,9 +65,17 @@ class MegatronBackend(Remote):
         self._device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self._init_model_parallel()
 
-        # Build mcore model + load HF weights (validated recipe).
-        self._gpt, self._tconf, self._hf = build_model_and_load(megatron_cfg.hf_checkpoint)
-        self.model = self._gpt  # single chunk at M0 (trainable_module / weight walk)
+        # Build mcore model + load TP-sharded HF weights.
+        from megatron.core import parallel_state as mpu
+
+        tp_rank = mpu.get_tensor_model_parallel_rank()
+        self._gpt, self._tconf, self._hf = build_model_and_load(
+            megatron_cfg.hf_checkpoint,
+            tp_size=megatron_cfg.tp_size,
+            pp_size=megatron_cfg.pp_size,
+            tp_rank=tp_rank,
+        )
+        self.model = self._gpt  # single chunk (trainable_module / weight walk)
 
         # DDP wrap + distributed optimizer.
         self.model_chunks = [self._wrap_ddp(self._gpt)]
@@ -182,9 +190,20 @@ class MegatronBackend(Remote):
     # ------------------------------------------------------------------
 
     def iter_weight_sync_tensors(self, *, lora_merged: bool, adapter_name: Optional[str], dtype):
-        assert not lora_merged and adapter_name in (None, "default"), "M0: no mcore LoRA fold"
+        assert not lora_merged and adapter_name in (None, "default"), "no mcore LoRA fold"
+        # Under tp>1 each param is a shard; all-gather to the full tensor (lockstep
+        # across the TP group) before converting to HF names. Inverse of the load
+        # shard. At tp=1 this is a no-op. Colocate ships each rank's full model to
+        # its own local engine, so no transport guard is needed.
+        from megatron.core import parallel_state as mpu
+
+        from unirl.train.backend.megatron.megatron_to_hf import all_gather_tp_param
+
+        tp_size = mpu.get_tensor_model_parallel_world_size()
+        tp_group = mpu.get_tensor_model_parallel_group()
         for name, param in self._gpt.named_parameters():
-            for hf_name, t in convert_mcore_to_hf(name, param.detach(), self._hf):
+            full = all_gather_tp_param(name, param.detach(), tp_group=tp_group, tp_size=tp_size)
+            for hf_name, t in convert_mcore_to_hf(name, full, self._hf):
                 if dtype is not None and t.is_floating_point() and t.dtype != dtype:
                     t = t.to(dtype)
                 yield hf_name, t.contiguous()
@@ -244,7 +263,10 @@ class MegatronBackend(Remote):
         from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
 
         if not mpu.model_parallel_is_initialized():
-            mpu.initialize_model_parallel(1, 1)
+            mpu.initialize_model_parallel(
+                tensor_model_parallel_size=self._cfg.tp_size,
+                pipeline_model_parallel_size=self._cfg.pp_size,
+            )
         model_parallel_cuda_manual_seed(1234)
 
     def _wrap_ddp(self, model):

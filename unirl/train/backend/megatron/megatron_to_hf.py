@@ -19,6 +19,28 @@ from typing import Any, Dict, List, Tuple
 import torch
 
 
+def all_gather_tp_param(name: str, param: torch.Tensor, *, tp_group, tp_size: int) -> torch.Tensor:
+    """Reconstruct a full param from its TP shards (slime ``all_gather_param``).
+
+    Non-TP params are returned as-is. TP params all-gather across ``tp_group`` and
+    concat along ``partition_dim``; GLU ``linear_fc1`` needs the gate/up re-chunk
+    (each rank holds ``[gate_r; up_r]`` -> reassemble ``[gate; up]``). Inverse of
+    ``model_provider._tp_shard``.
+    """
+    if tp_size == 1 or not getattr(param, "tensor_model_parallel", False):
+        return param.data
+    import torch.distributed as dist
+
+    parts = [torch.empty_like(param.data) for _ in range(tp_size)]
+    dist.all_gather(parts, param.data.contiguous(), group=tp_group)
+    pdim = int(getattr(param, "partition_dim", 0))
+    if "linear_fc1" in name:  # GLU: [gate_r; up_r] per rank -> [gate; up]
+        halves = [p.chunk(2, dim=0) for p in parts]
+        parts = [h[0] for h in halves] + [h[1] for h in halves]
+        pdim = 0
+    return torch.cat(parts, dim=pdim)
+
+
 def convert_mcore_to_hf(name: str, param: torch.Tensor, hf: Dict[str, Any]) -> List[Tuple[str, torch.Tensor]]:
     n_group = hf["num_key_value_heads"]
     head_dim = hf.get("head_dim", hf["hidden_size"] // hf["num_attention_heads"])

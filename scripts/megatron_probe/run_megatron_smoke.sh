@@ -27,7 +27,8 @@ echo "=== Megatron smoke $(date): Qwen3-0.6B nd=8 ==="
   algorithm.horizon=1024 \
   stack.num_updates_per_batch=4 \
   backend.optimizer_cfg.learning_rate=${LR:-2e-6} \
+  backend.megatron_cfg.tp_size=${TP:-1} \
   eval_interval=0 \
-  logging.run_name=megatron_smoke_qwen3-0p6b \
+  logging.run_name=megatron_smoke_qwen3-0p6b_tp${TP:-1} \
   2>&1 | tee /root/unirl/megatron_smoke.log
 echo "=== exited ${PIPESTATUS[0]} $(date) ==="

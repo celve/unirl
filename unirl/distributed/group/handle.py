@@ -138,27 +138,58 @@ def _sp_size_from_init_kwargs(init_kwargs: Optional[Dict[str, Any]], world_size:
     return sp if (sp > 1 and world_size % sp == 0) else 1
 
 
-def _build_rank_infos(world_size: int, sp_size: int = 1) -> List[RankInfo]:
-    """Contiguous (dp, sp) rank layout: rank ``i`` -> ``dp_rank i//sp``, ``sp_rank i%sp``.
+def _tp_size_from_init_kwargs(init_kwargs: Optional[Dict[str, Any]], world_size: int) -> int:
+    """Megatron tensor-parallel ``tp_size`` for the rank layout — the TP analogue of
+    ``_sp_size_from_init_kwargs``.
 
-    Matches VeOmni's ``init_sequence_parallel`` SP grouping
-    (``range(j*sp, (j+1)*sp)``) so the controller's data dispatch and VeOmni's
-    sequence-parallel groups agree: ranks in one SP group share a ``dp_rank``
-    (DP_SCATTER feeds them the same shard) and only ``sp_rank==0`` is collected.
-    ``sp_size=1`` reproduces the flat one-rank-per-dp layout exactly.
+    A role takes the TP layout if (a) it is the Megatron training backend, created
+    with a ``megatron_cfg`` carrying ``tp_size``, or (b) it holds a sibling
+    ``HandleRef`` to a TP-enabled role (the train stack via ``fsdp_backend=<mcore
+    backend>``, or a trainside rollout). Case (b) is essential: the stack's
+    ``DP_SCATTER`` must shard over the SAME ``dp_size`` as mcore's DP mesh
+    (``world/tp``), else the ``tp`` ranks of one group get different shards and the
+    TP all-reduce trains on mismatched data (or NCCL-hangs on shape mismatch).
     """
-    dp_size = world_size // sp_size
-    return [
-        RankInfo(
-            rank=i,
-            world_size=world_size,
-            dp_rank=i // sp_size,
-            dp_size=dp_size,
-            sp_rank=i % sp_size,
-            sp_size=sp_size,
+    if not init_kwargs:
+        return 1
+    tp = 1
+    mcfg = init_kwargs.get("megatron_cfg")
+    if mcfg is not None:
+        tp = _cfg_get(mcfg, "tp_size", 1)
+    for value in init_kwargs.values():
+        if isinstance(value, HandleRef):
+            tp = max(tp, int(getattr(value, "tp_size", 1) or 1))
+    return tp if (tp > 1 and world_size % tp == 0) else 1
+
+
+def _build_rank_infos(world_size: int, sp_size: int = 1, tp_size: int = 1) -> List[RankInfo]:
+    """Contiguous ``(dp, [sp|tp])`` rank layout. Ranks sharing a ``dp_rank`` form
+    one inner (``sp_size * tp_size``) group; ``DP_SCATTER`` feeds them the same
+    shard and only ``sp_rank==0 && tp_rank==0`` is collected.
+
+    Within the inner group, ``tp`` is the fastest-varying axis — matching mcore's
+    default ``tp-cp-ep-dp-pp`` order (``initialize_model_parallel``), so the
+    controller's dispatch mesh and mcore's TP groups agree. VeOmni uses ``sp``
+    (``tp=1``); Megatron uses ``tp`` (``sp=1``); ``(1,1)`` is the flat layout.
+    """
+    inner = sp_size * tp_size
+    dp_size = world_size // inner
+    infos = []
+    for i in range(world_size):
+        inner_rank = i % inner
+        infos.append(
+            RankInfo(
+                rank=i,
+                world_size=world_size,
+                dp_rank=i // inner,
+                dp_size=dp_size,
+                tp_rank=inner_rank % tp_size,
+                tp_size=tp_size,
+                sp_rank=inner_rank // tp_size,
+                sp_size=sp_size,
+            )
         )
-        for i in range(world_size)
-    ]
+    return infos
 
 
 @dataclass(frozen=True)
@@ -183,6 +214,7 @@ class HandleRef:
 
     role_name: str
     sp_size: int = 1
+    tp_size: int = 1
 
 
 class Handle:
@@ -247,13 +279,15 @@ class Handle:
         # ``sp_size=`` layout hint) inherit it; everything else stays flat
         # (sp=1). See _build_rank_infos / _sp_size_from_init_kwargs.
         sp_size = _sp_size_from_init_kwargs(init_kwargs, self.world_size)
-        self.rank_infos = _build_rank_infos(self.world_size, sp_size)
+        tp_size = _tp_size_from_init_kwargs(init_kwargs, self.world_size)
+        self.rank_infos = _build_rank_infos(self.world_size, sp_size, tp_size)
         logger.info(
-            "Handle layout: role=%s world=%d dp_size=%d sp_size=%d",
+            "Handle layout: role=%s world=%d dp_size=%d sp_size=%d tp_size=%d",
             self.role_name,
             self.world_size,
             self.rank_infos[0].dp_size,
             self.rank_infos[0].sp_size,
+            self.rank_infos[0].tp_size,
         )
         # ``sp_size`` is a reserved handle-layout hint, not a role constructor
         # arg (e.g. the trainside rollout, whose model is SP-parallelized but
@@ -292,6 +326,16 @@ class Handle:
         Read by ``_to_marker`` when this handle is passed as a sibling so the
         dependent role inherits the same (dp, sp) layout (see ``HandleRef``)."""
         return self.rank_infos[0].sp_size if self.rank_infos else 1
+
+    @property
+    def tp_size(self) -> int:
+        """Megatron tensor-parallel degree of this handle's rank layout (1 = none).
+
+        Read by ``_to_marker`` so a dependent role (the train stack via
+        ``fsdp_backend=<mcore backend>``) inherits the same (dp, tp) layout — its
+        ``DP_SCATTER`` then shards over ``world/tp`` and feeds the TP ranks of a
+        group the SAME shard (see ``HandleRef.tp_size``)."""
+        return self.rank_infos[0].tp_size if self.rank_infos else 1
 
     # ── User-facing initialize ──
 

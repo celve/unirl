@@ -168,7 +168,7 @@ def _to_marker(value):
     from unirl.distributed.group.handle import Handle, HandleRef
 
     if isinstance(value, Handle):
-        return HandleRef(role_name=value.role_name, sp_size=value.sp_size)
+        return HandleRef(role_name=value.role_name, sp_size=value.sp_size, tp_size=value.tp_size)
     return value
 
 
