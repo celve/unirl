@@ -86,6 +86,15 @@ class AgenticRolloutEngine(BaseRolloutEngine):
         self._sp = config.episode_sampling  # per-turn sampling params; carries n via samples_per_prompt
         self._n = total_samples_per_prompt(self._sp)  # GRPO group size
         self._max_turns = int(config.max_turns)
+        # Guard: the env's own turn bound (set independently in the recipe under
+        # ``env.max_turns``) must agree with the engine's ``config.max_turns``, else
+        # the drain loop and the env disagree on when a trajectory is done.
+        _env_mt = getattr(self._env, "max_turns", None)
+        require(
+            _env_mt is None or int(_env_mt) == self._max_turns,
+            f"env.max_turns ({_env_mt}) must equal config.max_turns ({self._max_turns}); "
+            "they are set independently in the recipe and must agree.",
+        )
         # Per-worker trajectory cap = the pull gate (distinct from the inner backend's
         # per-request semaphore; see design §5). A trajectory holds a cap slot across
         # its whole life, incl. tool-wait between turns — so siblings keep the GPU busy.
