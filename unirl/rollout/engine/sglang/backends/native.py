@@ -124,8 +124,10 @@ class NativeBackend:
         concurrency: int,
         runtime: Dict[str, Any],
         participant: bool = False,
+        tp_size: int = 1,
     ) -> None:
         self._engine: Optional[Any] = engine
+        self._tp_size = int(tp_size or 1)
         self._concurrency = int(concurrency)
         self._rt = runtime
         self._logged_first_response = False
@@ -215,6 +217,7 @@ class NativeBackend:
         # otherwise ``Handle.add_remote``'s ``ray.get`` on every worker would hang.
         # The Engine's own scheduler subprocesses hold this worker's GPU and follow
         # the group head; this backend is inert (all driving verbs no-op).
+        tp_size = int(engine_kwargs.get("tp_size", 1) or 1)
         node_rank = int(engine_kwargs.get("node_rank", 0) or 0)
         if node_rank > 0:
             logger.info(
@@ -230,7 +233,7 @@ class NativeBackend:
                     logger.exception("SGLang grouped-TP participant Engine thread exited")
 
             threading.Thread(target=_boot_participant, name="sglang-tp-participant", daemon=True).start()
-            return cls(None, concurrency=concurrency, runtime=rt, participant=True)
+            return cls(None, concurrency=concurrency, runtime=rt, participant=True, tp_size=tp_size)
 
         engine = rt["Engine"](**engine_kwargs)
 
@@ -243,7 +246,7 @@ class NativeBackend:
             getattr(settled, "port", None),
             getattr(settled, "nccl_port", None),
         )
-        return cls(engine, concurrency=concurrency, runtime=rt)
+        return cls(engine, concurrency=concurrency, runtime=rt, tp_size=tp_size)
 
     # ------------------------------------------------------------------ #
     # The single loop seam — every coroutine runs on engine.loop
@@ -464,8 +467,16 @@ class NativeBackend:
         if self._participant:  # head drives weight sync; SGLang broadcasts the update to node_rank>0 intra-group
             return
         self._require_alive("update_from_tensor")
+        # sglang's tp_worker deserializes ``serialized_named_tensors[tp_rank]`` (tp_worker.py),
+        # so a grouped-TP head must ship one bag PER TP rank. unirl's TensorWeightSync sends a
+        # length-1 list (the TP=1 path); fan it out to ``tp_size``. Every bag references the same
+        # GPU memory via the same CUDA-IPC handle, so replication is sound (sglang's own
+        # Engine.update_weights_from_tensor likewise makes tp_size bags for one tensor set).
+        bags = list(serialized_named_tensors)
+        if self._tp_size > 1 and len(bags) == 1:
+            bags = bags * self._tp_size
         obj = self._rt["UpdateWeightsFromTensorReqInput"](
-            serialized_named_tensors=serialized_named_tensors,
+            serialized_named_tensors=bags,
             load_format=load_format,
             flush_cache=flush_cache,
         )
