@@ -123,11 +123,21 @@ class NativeBackend:
         *,
         concurrency: int,
         runtime: Dict[str, Any],
+        participant: bool = False,
     ) -> None:
         self._engine: Optional[Any] = engine
         self._concurrency = int(concurrency)
         self._rt = runtime
         self._logged_first_response = False
+        # Participant backend: node_rank>0 of a multi-node (grouped-TP) rollout. It
+        # owns no drivable Engine — a daemon thread holds the blocking Engine that
+        # serves this worker's TP shard (see ``boot``). It still needs a loop for the
+        # rollout engine to adopt (engine.py ``_init_async_loop``); give it an idle
+        # one. Every driving verb below is inert on a participant: the group HEAD
+        # (node_rank==0) drives every request / memory / weight op across the whole
+        # SGLang TP group, and SGLang fans those to the participant's schedulers.
+        self._participant = bool(participant)
+        self._participant_loop = asyncio.new_event_loop() if self._participant else None
         # Serializes every call that DRIVES engine.loop (run_until_complete + the
         # Engine sync verbs) so a threaded Worker (worker_max_concurrency>1) cannot
         # drive the one loop from two threads at once. ``async_generate`` / abort
@@ -198,6 +208,30 @@ class NativeBackend:
         # ``set_start_method`` is process-global; matches the HTTP impl so
         # torch CUDA init in the scheduler children happens cleanly.
         multiprocessing.set_start_method("spawn", force=True)
+
+        # Grouped-TP participant: sglang's ``Engine(node_rank>0)`` runs the participant
+        # scheduler loop and NEVER returns (confirmed by the LIN-535 cross-process
+        # probe). Boot it in a daemon thread so this worker's ``__init__`` returns —
+        # otherwise ``Handle.add_remote``'s ``ray.get`` on every worker would hang.
+        # The Engine's own scheduler subprocesses hold this worker's GPU and follow
+        # the group head; this backend is inert (all driving verbs no-op).
+        node_rank = int(engine_kwargs.get("node_rank", 0) or 0)
+        if node_rank > 0:
+            logger.info(
+                "SGLang grouped-TP participant (node_rank=%s tp=%s): booting Engine in a daemon thread",
+                node_rank,
+                engine_kwargs.get("tp_size"),
+            )
+
+            def _boot_participant() -> None:
+                try:
+                    rt["Engine"](**engine_kwargs)  # blocks, holding this worker's TP shard
+                except Exception:
+                    logger.exception("SGLang grouped-TP participant Engine thread exited")
+
+            threading.Thread(target=_boot_participant, name="sglang-tp-participant", daemon=True).start()
+            return cls(None, concurrency=concurrency, runtime=rt, participant=True)
+
         engine = rt["Engine"](**engine_kwargs)
 
         # Bind-mapping gate twin: the settled ServerArgs must echo the
@@ -218,6 +252,8 @@ class NativeBackend:
     @property
     def loop(self) -> Any:
         """The engine's asyncio loop (the rollout engine adopts it as ``self._loop``)."""
+        if self._participant:
+            return self._participant_loop
         return self._engine.loop
 
     def _run(self, coro: Any) -> Any:
@@ -232,6 +268,8 @@ class NativeBackend:
 
     def generate(self, requests: List[Dict[str, Any]]) -> List[Any]:
         """Fan the per-prompt payloads out on engine.loop; flatten prompt-major."""
+        if self._participant:  # participant: the group head serves every request
+            return []
         self._require_alive("generate")
         t0 = time.perf_counter()
         results = self._run(self._generate_async(requests))
@@ -346,6 +384,8 @@ class NativeBackend:
         retry up to 60 × 1s. Precondition for sleep so release actually frees
         the KV pool.
         """
+        if self._participant:  # participant: memory ops are group-wide, driven by the head
+            return
         self._require_alive("flush cache")
         last: Any = None
         for _ in range(60):
@@ -356,11 +396,15 @@ class NativeBackend:
         raise TimeoutError(f"sglang NativeBackend: flush_cache did not succeed after 60 attempts (last result: {last})")
 
     def release_memory(self, *, tags: Optional[Sequence[str]] = None) -> None:
+        if self._participant:  # head drives release across the whole TP group
+            return
         self._require_alive("release memory")
         result = self._engine.release_memory_occupation(tags=list(tags) if tags is not None else None)
         self._check_result(result, "release_memory")
 
     def resume_memory(self, *, tags: Optional[Sequence[str]] = None) -> None:
+        if self._participant:  # head drives resume across the whole TP group
+            return
         self._require_alive("resume memory")
         result = self._engine.resume_memory_occupation(tags=list(tags) if tags is not None else None)
         self._check_result(result, "resume_memory")
@@ -372,6 +416,8 @@ class NativeBackend:
         generation probe) — acceptable because health_check() short-circuits
         while offloaded and a wedged-but-alive scheduler surfaces in generate.
         """
+        if self._participant:
+            return True  # participant is alive: its daemon-thread Engine holds the TP shard
         if self._engine is None:
             return False
         try:
