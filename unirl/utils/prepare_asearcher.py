@@ -46,7 +46,10 @@ def _iter_source(source: Optional[str], hf_name: str, split: str) -> Iterator[Di
         return
     from datasets import load_dataset  # lazy: only needed when downloading
 
-    for row in load_dataset(hf_name, split=split):
+    # streaming=True yields raw rows and skips the arrow schema cast that fails when
+    # building the full DatasetDict (the sibling ASearcherLRM35k split has an
+    # inconsistent schema), and avoids downloading the whole set up front.
+    for row in load_dataset(hf_name, split=split, streaming=True):
         yield dict(row)
 
 
