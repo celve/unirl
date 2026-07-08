@@ -116,6 +116,16 @@ class SGLangEngineConfig(BaseEngineConfig):
 
     # --- Parallelism & GPU ---
     tp_size: Optional[int] = None
+    # Multi-node TP coordinates for a grouped-TP rollout. The controller (Handle)
+    # stamps these PER RANK so the runtime forms its own ``tp_size``-way NCCL group
+    # across ``tp_size`` 1-GPU workers (the slime pattern): ``nnodes==tp_size``,
+    # ``node_rank`` is this worker's index within its group, ``dist_init_addr`` is the
+    # group head's ``ip:port`` rendezvous, and ``base_gpu_id==0`` (each worker sees one
+    # GPU as ``cuda:0``). All ``None`` for the single-process default.
+    nnodes: Optional[int] = None
+    node_rank: Optional[int] = None
+    dist_init_addr: Optional[str] = None
+    base_gpu_id: Optional[int] = None
 
     # --- SGLang network ---
     # ``host`` is the SRT bind address (default 0.0.0.0 so the server accepts
@@ -246,6 +256,17 @@ class SGLangEngineConfig(BaseEngineConfig):
         intent["model_path"] = self.pretrained_model_ckpt_path
         if self.tp_size is not None:
             intent["tp_size"] = int(self.tp_size)
+        # Multi-node TP coords (grouped-TP rollout); real ServerArgs fields, so the
+        # backend's field-name filter passes them straight to SGLang. The runtime
+        # forms its own group — nothing here touches NCCL.
+        if self.nnodes is not None:
+            intent["nnodes"] = int(self.nnodes)
+        if self.node_rank is not None:
+            intent["node_rank"] = int(self.node_rank)
+        if self.dist_init_addr is not None:
+            intent["dist_init_addr"] = str(self.dist_init_addr)
+        if self.base_gpu_id is not None:
+            intent["base_gpu_id"] = int(self.base_gpu_id)
         if self.host is not None:
             intent["host"] = str(self.host)
 

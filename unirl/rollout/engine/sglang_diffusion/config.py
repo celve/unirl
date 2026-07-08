@@ -68,6 +68,14 @@ class SGLangDiffusionEngineConfig(BaseEngineConfig):
     num_gpus: int = 1
     tp_size: Optional[int] = None
     sp_degree: Optional[int] = None
+    # Multi-node TP coordinates for a grouped-TP rollout, stamped PER RANK by the
+    # controller (Handle) so the diffusion runtime forms its own group across 1-GPU
+    # workers (slime pattern; same shape as the LLM engine). All ``None`` for the
+    # single-process default.
+    nnodes: Optional[int] = None
+    node_rank: Optional[int] = None
+    dist_init_addr: Optional[str] = None
+    base_gpu_id: Optional[int] = None
 
     # --- SGLang engine behaviour ---
     local_mode: bool = True
@@ -165,6 +173,16 @@ class SGLangDiffusionEngineConfig(BaseEngineConfig):
             intent["tp_size"] = int(self.tp_size)
         if self.sp_degree is not None:
             intent["sp_degree"] = int(self.sp_degree)
+        # Multi-node TP coords (grouped-TP rollout); real ServerArgs fields → the
+        # backend field-name filter passes them straight to the runtime.
+        if self.nnodes is not None:
+            intent["nnodes"] = int(self.nnodes)
+        if self.node_rank is not None:
+            intent["node_rank"] = int(self.node_rank)
+        if self.dist_init_addr is not None:
+            intent["dist_init_addr"] = str(self.dist_init_addr)
+        if self.base_gpu_id is not None:
+            intent["base_gpu_id"] = int(self.base_gpu_id)
         intent["disable_autocast"] = bool(self.disable_autocast)
 
         if self.lora_merge_mode is not None:

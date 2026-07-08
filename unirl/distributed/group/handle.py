@@ -27,6 +27,7 @@ Usage:
 
 from __future__ import annotations
 
+import copy
 import logging
 from dataclasses import dataclass
 from itertools import count
@@ -39,6 +40,7 @@ from unirl.distributed.group.dispatch import (
     DISTRIBUTED_CONFIG_ATTR,
     Dispatch,
     Execute,
+    _is_dp_head,
     resolve_backward_dispatch_mode,
 )
 from unirl.distributed.group.remote import RankInfo, Remote
@@ -138,24 +140,58 @@ def _sp_size_from_init_kwargs(init_kwargs: Optional[Dict[str, Any]], world_size:
     return sp if (sp > 1 and world_size % sp == 0) else 1
 
 
-def _build_rank_infos(world_size: int, sp_size: int = 1) -> List[RankInfo]:
-    """Contiguous (dp, sp) rank layout: rank ``i`` -> ``dp_rank i//sp``, ``sp_rank i%sp``.
+def _tp_size_from_init_kwargs(init_kwargs: Optional[Dict[str, Any]], world_size: int) -> int:
+    """Rollout tensor-parallel degree for the (dp, tp) grouped layout.
 
-    Matches VeOmni's ``init_sequence_parallel`` SP grouping
-    (``range(j*sp, (j+1)*sp)``) so the controller's data dispatch and VeOmni's
-    sequence-parallel groups agree: ranks in one SP group share a ``dp_rank``
-    (DP_SCATTER feeds them the same shard) and only ``sp_rank==0`` is collected.
-    ``sp_size=1`` reproduces the flat one-rank-per-dp layout exactly.
+    Unlike SP (a training-model property), TP here is a property of the *rollout
+    engine*: the inference runtime forms a TP group of ``tp_size`` consecutive
+    workers. Read it off the engine config the recipe already carries —
+    ``config.tp_size`` for a plain sglang/diffusion engine, or
+    ``config.inner.tp_size`` for the agentic engine (whose inner single-turn
+    engine is the one that actually parallelizes). Configs arrive as plain dicts
+    (``parse_hydra_cfg`` ran ``OmegaConf.to_container``), so read the key from a
+    dict or the attr from an instance alike. Returns 1 unless ``tp > 1`` and it
+    evenly divides ``world_size``.
     """
-    dp_size = world_size // sp_size
+    if not init_kwargs:
+        return 1
+
+    def _get(cfg: Any, key: str) -> Any:
+        if cfg is None:
+            return None
+        return cfg.get(key) if isinstance(cfg, dict) else getattr(cfg, key, None)
+
+    cfg = init_kwargs.get("config")
+    tp = _get(cfg, "tp_size")
+    if tp is None:  # agentic: the inner single-turn engine carries tp_size
+        tp = _get(_get(cfg, "inner"), "tp_size")
+    tp = int(tp or 1)
+    return tp if (tp > 1 and world_size % tp == 0) else 1
+
+
+def _build_rank_infos(world_size: int, sp_size: int = 1, tp_size: int = 1) -> List[RankInfo]:
+    """Contiguous (dp, sp|tp) rank layout: rank ``i`` -> ``dp_rank i//g``, within-group ``i%g``.
+
+    SP and TP are mutually exclusive here (SP is a training-model layout, TP is a
+    rollout-engine layout), so the group size is ``g = sp_size * tp_size`` with one
+    factor always 1. Ranks in one group share a ``dp_rank`` (``DP_SCATTER`` feeds
+    them the same shard); only the group head (``sp_rank==0`` / ``tp_rank==0``) is
+    collected / executed on. ``sp=tp=1`` reproduces the flat one-rank-per-dp layout
+    exactly. Matches VeOmni's ``init_sequence_parallel`` grouping for the SP arm and
+    the slime-style consecutive-worker TP group for the TP arm.
+    """
+    group = sp_size * tp_size
+    dp_size = world_size // group
     return [
         RankInfo(
             rank=i,
             world_size=world_size,
-            dp_rank=i // sp_size,
+            dp_rank=i // group,
             dp_size=dp_size,
-            sp_rank=i % sp_size,
+            sp_rank=(i % group) if sp_size > 1 else 0,
             sp_size=sp_size,
+            tp_rank=(i % group) if tp_size > 1 else 0,
+            tp_size=tp_size,
         )
         for i in range(world_size)
     ]
@@ -247,26 +283,36 @@ class Handle:
         # ``sp_size=`` layout hint) inherit it; everything else stays flat
         # (sp=1). See _build_rank_infos / _sp_size_from_init_kwargs.
         sp_size = _sp_size_from_init_kwargs(init_kwargs, self.world_size)
-        self.rank_infos = _build_rank_infos(self.world_size, sp_size)
+        # Rollout tensor parallelism (slime pattern): ``tp_size`` consecutive workers
+        # form one TP group; the controller tells each runtime its coords (below) and
+        # the runtime forms its own NCCL group. SP (training) and TP (rollout) are
+        # mutually exclusive, so passing both is safe (one is always 1).
+        tp_size = _tp_size_from_init_kwargs(init_kwargs, self.world_size)
+        self.rank_infos = _build_rank_infos(self.world_size, sp_size, tp_size)
         logger.info(
-            "Handle layout: role=%s world=%d dp_size=%d sp_size=%d",
+            "Handle layout: role=%s world=%d dp_size=%d sp_size=%d tp_size=%d",
             self.role_name,
             self.world_size,
             self.rank_infos[0].dp_size,
             self.rank_infos[0].sp_size,
+            self.rank_infos[0].tp_size,
         )
         # ``sp_size`` is a reserved handle-layout hint, not a role constructor
         # arg (e.g. the trainside rollout, whose model is SP-parallelized but
         # whose __init__ takes no sp_size) — consume it before forwarding.
         if init_kwargs:
             init_kwargs.pop("sp_size", None)
+        # Per-rank init_kwargs: for a grouped-TP rollout the controller stamps each
+        # worker's engine config with its runtime TP coords (node_rank / dist_init /
+        # base_gpu_id). tp==1 shares one dict (unchanged path).
+        per_rank_kwargs = self._assign_tp_coords(init_kwargs or {}, tp_size)
         ray.get(
             [
                 w.add_remote.remote(
                     self.role_name,
                     role_cls,
                     self.rank_infos[i],
-                    init_kwargs=init_kwargs or {},
+                    init_kwargs=per_rank_kwargs[i],
                     dist_env={"RANK": str(i), **self._dist_env_base},
                 )
                 for i, w in enumerate(self.workers)
@@ -279,6 +325,46 @@ class Handle:
         # Counter for unique call_id generation within enable_grad contexts.
         # Single-threaded training loop assumption: no concurrent handle calls.
         self._grad_call_counter = count()
+
+    def _assign_tp_coords(self, init_kwargs: Dict[str, Any], tp_size: int) -> List[Dict[str, Any]]:
+        """Per-rank ``init_kwargs`` carrying each runtime's TP coordinates (slime).
+
+        ``tp_size==1`` → every rank shares the one dict (the existing flat path).
+        ``tp_size>1`` → the controller reserves one dist-init address per group head
+        (rank ``g*tp``; reserve-then-close so the runtime can bind it inside the
+        engine ``__init__``) and deep-copies the engine config per rank, stamping the
+        multi-node coords onto it: ``nnodes=tp``, ``node_rank=i%tp``,
+        ``dist_init_addr=<group head ip:port>``, ``base_gpu_id=0`` (each worker sees
+        exactly one GPU as ``cuda:0``). The coords go on the config that launches the
+        runtime — ``config`` for a plain engine, ``config.inner`` for the agentic
+        engine. Nothing else in the framework touches NCCL; the runtime forms its own
+        group from these coords.
+        """
+        if tp_size <= 1:
+            return [init_kwargs for _ in self.workers]
+
+        dp = self.world_size // tp_size
+        group_addr: Dict[int, str] = {}
+        for g in range(dp):
+            head = self.workers[g * tp_size]
+            ip = ray.get(head.get_node_ip.remote())
+            port = ray.get(head._reserve_port.remote())
+            ray.get(head._release_port.remote(port))  # close so the runtime binds it
+            group_addr[g] = f"{ip}:{port}"
+
+        per_rank: List[Dict[str, Any]] = []
+        for i in range(self.world_size):
+            kw = copy.deepcopy(init_kwargs)
+            cfg = kw.get("config")
+            # The runtime-launching config: the inner engine for agentic, else config.
+            target = cfg.get("inner") if (isinstance(cfg, dict) and isinstance(cfg.get("inner"), dict)) else cfg
+            if isinstance(target, dict):
+                target["nnodes"] = tp_size
+                target["node_rank"] = i % tp_size
+                target["dist_init_addr"] = group_addr[i // tp_size]
+                target["base_gpu_id"] = 0
+            per_rank.append(kw)
+        return per_rank
 
     @property
     def dp_size(self) -> int:
@@ -335,6 +421,8 @@ class Handle:
 
             if config["execute_mode"] == Execute.ALL:
                 execute_fn = self._execute_all
+            elif config["execute_mode"] == Execute.DP_HEAD:
+                execute_fn = self._execute_dp_head
             else:
                 execute_fn = self._execute_rank_zero
 
@@ -432,6 +520,26 @@ class Handle:
         return [
             self.workers[0].call.remote(self.role_name, method_name, shards[0][0], shards[0][1], grad_mode, call_id)
         ]
+
+    def _execute_dp_head(self, method_name: str, shards: List, grad_mode: bool = False, call_id=None) -> List:
+        """Send RPC to DP-head ranks only (``tp_rank==pp_rank==sp_rank==0``), full width.
+
+        One head per replica actually runs the method; every other rank gets a
+        resolved ``[]`` placeholder ObjectRef so the returned list stays aligned with
+        ``self.workers`` / ``self.rank_infos``. That alignment is load-bearing: the
+        positional rebind (``_make_handle_fn``) and ``_collect_dp_merge`` (which keeps
+        only head results and flattens) then work unchanged at ``tp>1`` — a compacted
+        head-only list would misattribute results to the wrong worker. A grouped-TP
+        rollout uses this so only each TP group's head drives the call; its participant
+        ranks stay idle (their runtime participates in the group's own collective).
+        """
+        refs = []
+        for i, (w, (s_args, s_kwargs)) in enumerate(zip(self.workers, shards)):
+            if _is_dp_head(self.rank_infos[i]):
+                refs.append(w.call.remote(self.role_name, method_name, s_args, s_kwargs, grad_mode, call_id))
+            else:
+                refs.append(ray.put([]))  # placeholder: dropped by _collect_dp_merge, keeps positions aligned
+        return refs
 
     # ── TensorHandle rebinding ──
 

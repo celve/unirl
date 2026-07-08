@@ -72,6 +72,7 @@ class Execute(Enum):
 
     ALL = auto()  # All workers execute
     RANK_ZERO = auto()  # Only rank 0 executes
+    DP_HEAD = auto()  # Only DP-head ranks (tp_rank==pp_rank==sp_rank==0) execute — one per replica
 
 
 # ── Dispatch functions (wg, args, kwargs, batch_size) → List[(args_i, kwargs_i)] ──

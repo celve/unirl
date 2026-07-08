@@ -7,7 +7,9 @@ returns a FLAT ``List[Sample]`` of variable-depth, independently terminated
 trajectories (one per GRPO sibling) — not a single batched Sample. So this trainer
 overrides only:
 
-- ``__init__`` — wire the rank-0 coordinator (``set_workers``);
+- ``train_step`` — drive the rollout as ``set_batch`` (rank 0 fills the queue) + a
+  ``run_drain`` dispatched to the DP heads (``Execute.DP_HEAD``), collected to one flat
+  ``List[Sample]``;
 - ``_build_request_sample`` — emit JUST the prompts (no ``fork``: the engine fans the
   ``n`` GRPO siblings internally) with the per-turn ``stop`` on the root control bag;
 - ``train_step`` — consume the trajectory list: judge each trajectory's ``<answer>``
@@ -61,10 +63,6 @@ class AgenticTrainer(ARTrainer):
         # tool; a final-answer turn runs to EOS. Rides the request root's control bag
         # (``resolve_sampling`` reads ``control["ar"]``).
         self._stop = list(stop) if stop else ["</tool_call>"]
-        # Wire the rank-0 coordinator (``AgenticRolloutEngine.set_workers`` — the
-        # ``NCCLWeightSync.set_rollout_targets`` shape). ``.workers`` / ``.role_name``
-        # are ``Handle`` attributes.
-        self.rollout.set_workers(self.rollout.workers, self.rollout.role_name)
 
     def _build_request_sample(
         self,
@@ -101,11 +99,14 @@ class AgenticTrainer(ARTrainer):
         """
         t0 = time.perf_counter()
 
-        # 1) Rollout — the barrier multi-turn generate. On-policy: sync first.
+        # 1) Rollout — the barrier multi-turn drain. On-policy: sync first.
         self.rollout.wake_up()
         if sync_weights and self.weight_sync is not None:
             self.weight_sync.sync()
-        trajs: List[Sample] = self.rollout.generate(sample)[0]  # BROADCAST+RANK_ZERO -> [List[Sample]]
+        # rank 0 fills the queue; DP-head workers drain it. run_drain is dispatched to
+        # the heads (Execute.DP_HEAD) and its collect flattens to one List[Sample].
+        self.rollout.set_batch(sample)
+        trajs: List[Sample] = self.rollout.run_drain(self.rollout.workers[0], self.rollout.role_name)
         self.rollout.sleep()
 
         # 2) Per-trajectory scalar reward + GRPO group id (root id). Overridable:

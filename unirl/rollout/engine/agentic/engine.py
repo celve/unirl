@@ -8,21 +8,23 @@ queue and runs each as a multi-turn agent loop on the inner engine's event loop.
 
 Two roles, one class:
 
-- **Coordinator = rank 0** (``set_workers`` + ``generate``, ``BROADCAST + RANK_ZERO`` —
-  the ``NCCLWeightSync`` pattern): rank 0 receives the whole batch, fans it into
-  ``n × P`` single-trajectory tasks, fires one ``run_drain`` per worker (raw
-  ``Worker.call``), serves ``next_task`` pulls from a FIFO queue, and flattens the
-  per-worker ``List[Sample]`` returns. The trainer calls ``handle.generate(batch)[0]``.
-- **Worker = every instance** (``run_drain`` / ``_drain`` / ``_run_one`` / ``_pull``):
-  the persistent drain loop is the always-on driver of the inner engine's loop, so
-  concurrent trajectories continuous-batch through the inner backend's shared
-  semaphore, and control RPCs (``abort``/``pause``) reliably ride the driven loop.
+- **Coordinator = rank 0** (``set_batch``, ``BROADCAST + RANK_ZERO``): rank 0 receives
+  the whole batch and fans it into ``n × P`` single-trajectory tasks on a FIFO queue,
+  then serves ``next_task`` pulls (raw ``Worker.call``) from the draining heads.
+- **Driver = each DP head** (``run_drain`` / ``_drain`` / ``_run_one`` / ``_pull``,
+  ``DP_SCATTER_HEAD + DP_HEAD``): the dispatch layer routes ``run_drain`` to the DP-head
+  ranks (``tp_rank==0``) — with ``tp=1`` that is every worker (flat DP), with a
+  grouped-TP rollout one head per TP group (participant ranks stay idle; their inner
+  runtime participates in the group's own collective). The persistent drain loop is the
+  always-on driver of the inner engine's loop, so concurrent trajectories continuous-
+  batch through the inner backend's shared semaphore, and control RPCs (``abort`` /
+  ``pause``) reliably ride the driven loop. ``_collect_dp_merge`` flattens the per-head
+  ``List[Sample]`` into one list — the trainer calls ``set_batch`` then ``run_drain``.
 
-Weight sync is unchanged (design §8): ``generate`` is a full barrier (returns only
-when every trajectory finished), and ``run_drain`` holds the inner backend's
-loop-lock for the batch — so the trainer syncs weights into the inner engines
-*between* ``generate`` calls, against a quiesced rollout. Delegated verbs below
-forward to the inner engine.
+Weight sync is unchanged (design §8): the drain is a full barrier (returns only when
+every trajectory finished), and ``run_drain`` holds the inner backend's loop-lock for
+the batch — so the trainer syncs weights into the inner engines *between* rollout
+steps, against a quiesced rollout. Delegated verbs below forward to the inner engine.
 """
 
 from __future__ import annotations
@@ -96,9 +98,9 @@ class AgenticRolloutEngine(BaseRolloutEngine):
         # ONE lock — the quiesce boundary (design §6/§8).
         self._init_async_loop(self._inner._loop)
 
-        # Coordinator state (populated on rank 0 only, by set_workers).
-        self._workers: List[Any] = []
-        self._role: str = ""
+        # Coordinator state: rank 0 owns the FIFO queue (filled by set_batch, drained
+        # by the DP-head workers via next_task). No cached worker list — the dispatch
+        # layer routes run_drain to the heads, and the coordinator handle is passed in.
         self._queue: Deque[Sample] = deque()
         self._qlock = threading.Lock()
 
@@ -124,39 +126,19 @@ class AgenticRolloutEngine(BaseRolloutEngine):
     # ------------------------------------------------------------------
 
     @distributed(dispatch_mode=Dispatch.BROADCAST, execute_mode=Execute.RANK_ZERO)
-    def set_workers(self, actor_handles: List[Any], role_name: str) -> None:
-        """Rank 0 caches the slab's Worker actor handles (incl. its own) + role name.
-
-        Wired once by the builder: ``handle.set_workers(handle.workers, handle.role_name)``
-        (the ``NCCLWeightSync.set_rollout_targets`` shape). The handles are plain
-        picklable Ray actor handles, so they survive the ``Worker.call`` arg path.
-        """
-        self._workers = list(actor_handles)
-        self._role = str(role_name)
-
-    @distributed(dispatch_mode=Dispatch.BROADCAST, execute_mode=Execute.RANK_ZERO)
-    def generate(self, request: Sample) -> List[Sample]:
-        """Rank-0 coordinator: whole batch in, a flat list of trajectories out.
+    def set_batch(self, request: Sample) -> None:
+        """Rank 0 fills the trajectory queue for one rollout batch.
 
         Fans ``request`` into ``n × P`` single-trajectory tasks (the ``n`` GRPO
-        siblings of a prompt share its slash-free root id — design §3.1), fires one
-        ``run_drain`` per worker (passing rank 0's own handle + role so they can
-        pull), and flattens the per-worker ``List[Sample]`` returns. A full barrier:
-        returns only when every worker's queue has drained.
-
-        Reached via ``handle.generate(batch)`` → ``[List[Sample]]`` (BROADCAST
-        passthrough collect, rank-0 only); the caller unwraps ``[0]``.
+        siblings of a prompt share its slash-free root id — design §3.1) onto rank 0's
+        FIFO. The DP-head workers then pull from rank 0 via :meth:`next_task` while
+        draining (:meth:`run_drain`). Paired at the trainer:
+        ``handle.set_batch(batch); trajs = handle.run_drain(handle.workers[0], role)``.
         """
-        require(bool(self._workers), "AgenticRolloutEngine.generate: call set_workers() first (rank 0)")
         # n sibling tasks per prompt; siblings share the prompt's root id (group-by-root downstream).
         tasks = [prompt for prompt in request.split() for _ in range(self._n)]
         with self._qlock:
             self._queue = deque(tasks)
-
-        coordinator = self._workers[0]  # rank 0's own Worker actor handle (workers pull from it)
-        refs = [w.call.remote(self._role, "run_drain", (coordinator, self._role), {}) for w in self._workers]
-        shards: List[List[Sample]] = ray.get(refs)
-        return [traj for shard in shards for traj in shard]
 
     def next_task(self, worker_rank: int) -> Optional[Sample]:
         """Hand out the next trajectory task, or ``None`` when the queue is drained.
@@ -173,14 +155,23 @@ class AgenticRolloutEngine(BaseRolloutEngine):
     # Per-worker execution — the persistent drain loop (the loop driver)
     # ------------------------------------------------------------------
 
+    @distributed(dispatch_mode=Dispatch.DP_SCATTER_HEAD, execute_mode=Execute.DP_HEAD)
     def run_drain(self, coordinator: Any, role_name: str) -> List[Sample]:
-        """Drive this worker's drain loop for the whole batch; return its trajectories.
+        """Drive one DP-head's drain loop for the whole batch; return its trajectories.
 
-        Reached by raw ``Worker.call`` (rank 0 fires one per worker). Sync at the RPC
-        boundary; internally one ``run_until_complete`` (via the inner's ``_run_coro``)
-        is the single driver of the inner engine's loop — so concurrent trajectories
-        are coroutines on one loop (continuous batching) and hold the inner backend's
-        loop-lock for the batch (the quiesce boundary).
+        Dispatched to DP heads only (``Execute.DP_HEAD``): with ``tp=1`` that is every
+        worker (the flat-DP path, unchanged); with a grouped-TP rollout it is one head
+        per TP group — participant ranks stay idle while their inner runtime
+        participates in the group's own collective. ``coordinator`` (rank 0's Worker
+        handle = the queue owner) + ``role_name`` are broadcast to the heads by
+        ``DP_SCATTER_HEAD``; each head pulls tasks from ``coordinator`` via
+        :meth:`next_task`. ``_collect_dp_merge`` flattens the per-head ``List[Sample]``
+        into one flat list, so the trainer needs no ``[0]`` unwrap.
+
+        Sync at the RPC boundary; internally one ``run_until_complete`` (via the
+        inner's ``_run_coro``) is the single driver of the inner engine's loop — so
+        concurrent trajectories are coroutines on one loop (continuous batching) and
+        hold the inner backend's loop-lock for the batch (the quiesce boundary).
         """
         return self._run_coro(self._drain(coordinator, role_name))
 
