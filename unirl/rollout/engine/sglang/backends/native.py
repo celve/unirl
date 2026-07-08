@@ -461,6 +461,8 @@ class NativeBackend:
         constructs the io_struct and calls the tokenizer_manager coroutine
         directly (exactly what the HTTP endpoint does server-side).
         """
+        if self._participant:  # head drives weight sync; SGLang broadcasts the update to node_rank>0 intra-group
+            return
         self._require_alive("update_from_tensor")
         obj = self._rt["UpdateWeightsFromTensorReqInput"](
             serialized_named_tensors=serialized_named_tensors,
@@ -480,6 +482,8 @@ class NativeBackend:
         group_name: str,
         backend: str,
     ) -> None:
+        if self._participant:  # node_rank>0 joins via the head's broadcast (rank = rank_offset + tp_rank)
+            return
         self._require_alive("init_weights_group")
         result = self._engine.init_weights_update_group(
             master_address=master_address,
@@ -514,6 +518,8 @@ class NativeBackend:
             names[-1] if names else "<empty>",
             flush_cache,
         )
+        if self._participant:  # head drives; SGLang broadcasts the pull to node_rank>0 intra-group
+            return
         self._require_alive("update_from_distributed")
         result = self._engine.update_weights_from_distributed(
             names=list(names),
@@ -525,6 +531,8 @@ class NativeBackend:
         self._check_result(result, "update_from_distributed")
 
     def destroy_weights_group(self, *, group_name: str) -> None:
+        if self._participant:
+            return
         self._require_alive("destroy_weights_group")
         result = self._engine.destroy_weights_update_group(group_name=str(group_name))
         self._check_result(result, "destroy_weights_group")
@@ -543,6 +551,8 @@ class NativeBackend:
         POSTed (the /load_lora_adapter_from_tensors endpoint does exactly
         this server-side).
         """
+        if self._participant:
+            return
         self._require_alive("set_lora")
         serialized = self._rt["MultiprocessingSerializer"].serialize(lora_tensors, output_str=True)
         obj = self._rt["LoadLoRAAdapterFromTensorsReqInput"](
