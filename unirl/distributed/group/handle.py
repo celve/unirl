@@ -352,17 +352,32 @@ class Handle:
             ray.get(head._release_port.remote(port))  # close so the runtime binds it
             group_addr[g] = f"{ip}:{port}"
 
+        # Read/write a config field on either a plain dict (the hydra recipe path,
+        # where nested _target_ blocks arrive as dicts) or an instantiated config
+        # (direct construction / smokes) — mirrors _tp_size_from_init_kwargs's reader.
+        def _get(cfg: Any, key: str) -> Any:
+            if cfg is None:
+                return None
+            return cfg.get(key) if isinstance(cfg, dict) else getattr(cfg, key, None)
+
+        def _set(cfg: Any, key: str, val: Any) -> None:
+            if isinstance(cfg, dict):
+                cfg[key] = val
+            else:
+                setattr(cfg, key, val)
+
         per_rank: List[Dict[str, Any]] = []
         for i in range(self.world_size):
             kw = copy.deepcopy(init_kwargs)
             cfg = kw.get("config")
             # The runtime-launching config: the inner engine for agentic, else config.
-            target = cfg.get("inner") if (isinstance(cfg, dict) and isinstance(cfg.get("inner"), dict)) else cfg
-            if isinstance(target, dict):
-                target["nnodes"] = tp_size
-                target["node_rank"] = i % tp_size
-                target["dist_init_addr"] = group_addr[i // tp_size]
-                target["base_gpu_id"] = 0
+            inner = _get(cfg, "inner")
+            target = inner if inner is not None else cfg
+            if target is not None:
+                _set(target, "nnodes", tp_size)
+                _set(target, "node_rank", i % tp_size)
+                _set(target, "dist_init_addr", group_addr[i // tp_size])
+                _set(target, "base_gpu_id", 0)
             per_rank.append(kw)
         return per_rank
 
