@@ -8,12 +8,16 @@ transfer (serialize already done; ``collective_rpc`` fans to the stage workers).
 
 Full-weight analogue of ``weight_sync/lora/local.py:LocalLoraWeightSync`` and the v2
 transport-mate of v1 ``distributed/weight_sync/tensor.py``. Colocate only:
-``backend`` and ``rollout`` arrive as LOCAL siblings (same Worker process), so
-the v1 cross-rank ``gather_object``/gloo-subgroup logic is unnecessary — each
-train rank ships to its own co-located engine, and (TP=1) the worker picks
-``serialized_named_tensors[0]``.
+``backend`` and ``rollout`` arrive as LOCAL siblings (same Worker process). At TP=1
+each train rank ships to its own co-located engine, which picks
+``serialized_named_tensors[0]``. At TP>1 (grouped-TP rollout) sglang's tp_worker
+picks ``bag[tp_rank]`` and each bag is a CUDA-IPC handle that must live on that
+rank's own GPU, so ``sync`` relays the per-rank handle strings within each TP group
+to the group head (a scoped revival of the v1 ``gather_object``), which issues the
+single update with the full per-rank window; each rank then reconstructs the full
+tensors and ``model.load_weights`` slices its own shard.
 
-Scope: single-node, TP=1; a single-model engine, or one child of a
+Scope: single-node, TP>=1; a single-model engine, or one child of a
 ``ComposedRolloutEngine`` (via ``track_prefix``). All model / sglang imports are
 deferred so the driver can import this module for ``remote(...)``.
 """
@@ -63,6 +67,7 @@ class TensorWeightSync(FullWeightSync):
         its own co-located engine, so no cross-rank gather is needed.
         """
         import torch
+        import torch.distributed as dist
 
         # Use sglang's NATIVE serializer (not unirl's vendored sgl_compat copy):
         # sglang 0.5.12's SafeUnpickler (CVE-2025-10164 guard) runs in the SRT
@@ -96,15 +101,47 @@ class TensorWeightSync(FullWeightSync):
                 serialized.append(MultiprocessingSerializer.serialize(payload, output_str=True))
 
             n_dtypes = len(serialized)
-            for i, payload in enumerate(serialized):
-                # TP=1 → the worker picks serialized_named_tensors[0], so ship a
-                # single-element list. flush only on the very last payload.
-                self._rollout.update_weights_from_tensor(
-                    serialized_named_tensors=[payload],
-                    load_format="flattened_bucket",
-                    flush_cache=(self._flush_cache and is_last and i == n_dtypes - 1),
-                    track_prefix=self._track_prefix,
-                )
+            ri = self._rollout.rank_info
+            tp = int(getattr(ri, "tp_size", 1) or 1)
+            if tp <= 1:
+                # TP=1 (the common path): each train rank ships to its own co-located
+                # engine, which picks serialized_named_tensors[0]. flush on the last payload.
+                for i, payload in enumerate(serialized):
+                    self._rollout.update_weights_from_tensor(
+                        serialized_named_tensors=[payload],
+                        load_format="flattened_bucket",
+                        flush_cache=(self._flush_cache and is_last and i == n_dtypes - 1),
+                        track_prefix=self._track_prefix,
+                    )
+            else:
+                # Colocate grouped-TP: sglang's tp_worker deserializes bag[tp_rank], and each
+                # bag is a CUDA-IPC handle that MUST live on that rank's own GPU (a GPU-0 handle
+                # is unopenable by node_rank>0 → 'Invalid device_uuid'). Every train rank already
+                # holds the full weights on its own GPU, so relay the small handle strings within
+                # each TP group to the group HEAD, which issues the one update per dtype with the
+                # per-rank window [bag_gpu(base+0), bag_gpu(base+1), ...]. Each rank then
+                # reconstructs the full tensors and model.load_weights slices its shard.
+                if ri.rank != dist.get_rank():
+                    raise RuntimeError(
+                        "grouped-TP weight sync assumes co-located train rank == rollout worker "
+                        f"rank (contiguous 1-GPU placement), but rollout rank_info.rank={ri.rank} "
+                        f"!= train rank {dist.get_rank()}"
+                    )
+                all_ser: list = [None] * dist.get_world_size()
+                dist.all_gather_object(all_ser, serialized)  # tiny per-dtype handle strings
+                if ri.tp_rank == 0:  # group head drives the single update per dtype
+                    base = ri.dp_rank * tp  # first train rank / GPU of this TP group
+                    for i in range(n_dtypes):
+                        window = [all_ser[base + t][i] for t in range(tp)]  # index t == tp_rank
+                        self._rollout.update_weights_from_tensor(
+                            serialized_named_tensors=window,
+                            load_format="flattened_bucket",
+                            flush_cache=(self._flush_cache and is_last and i == n_dtypes - 1),
+                            track_prefix=self._track_prefix,
+                        )
+                # Lifetime barrier: a non-head must not free its GPU weights until the head's
+                # update (which opened that rank's handle on node_rank>0) has returned.
+                dist.barrier()
             # Release the all-gathered full tensors + IPC payloads for this bucket
             # before gathering the next — else the full model (~13GB) accumulates
             # in the caching allocator and OOMs the colocated SRT server.

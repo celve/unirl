@@ -467,16 +467,17 @@ class NativeBackend:
         if self._participant:  # head drives weight sync; SGLang broadcasts the update to node_rank>0 intra-group
             return
         self._require_alive("update_from_tensor")
-        # sglang's tp_worker deserializes ``serialized_named_tensors[tp_rank]`` (tp_worker.py),
-        # so a grouped-TP head must ship one bag PER TP rank. unirl's TensorWeightSync sends a
-        # length-1 list (the TP=1 path); fan it out to ``tp_size``. Every bag references the same
-        # GPU memory via the same CUDA-IPC handle, so replication is sound (sglang's own
-        # Engine.update_weights_from_tensor likewise makes tp_size bags for one tensor set).
-        bags = list(serialized_named_tensors)
-        if self._tp_size > 1 and len(bags) == 1:
-            bags = bags * self._tp_size
+        # sglang's tp_worker deserializes ``serialized_named_tensors[tp_rank]`` (tp_worker.py), so a
+        # grouped-TP head must be handed one bag PER TP rank — each a CUDA-IPC handle on that rank's
+        # OWN GPU (a replicated GPU-0 handle fails node_rank>0 with 'Invalid device_uuid'). The
+        # colocate handle-relay in TensorWeightSync assembles that per-rank window; assert its length.
+        if self._tp_size > 1 and len(serialized_named_tensors) != self._tp_size:
+            raise RuntimeError(
+                f"update_from_tensor: expected {self._tp_size} per-TP-rank bags, got "
+                f"{len(serialized_named_tensors)} — the colocate handle-relay must supply one per rank"
+            )
         obj = self._rt["UpdateWeightsFromTensorReqInput"](
-            serialized_named_tensors=bags,
+            serialized_named_tensors=serialized_named_tensors,
             load_format=load_format,
             flush_cache=flush_cache,
         )
