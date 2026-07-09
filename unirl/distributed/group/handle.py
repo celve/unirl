@@ -414,7 +414,8 @@ class Handle:
                         _set(target, "num_gpus", tp_size)
                         _set(target, "tp_size", tp_size)
                         _set(target, "visible_devices", ",".join(str(d) for d in grp))
-                        _set(target, "base_gpu_id", 0)
+                        if _declares(target, "base_gpu_id"):  # diffusion has it; omni doesn't
+                            _set(target, "base_gpu_id", 0)
                         _set(target, "is_tp_participant", False)
                     else:  # participant: skip boot; its GPU is driven by the head
                         _set(target, "is_tp_participant", True)
