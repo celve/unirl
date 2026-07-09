@@ -56,6 +56,15 @@ def patch_platform_device() -> None:
             if rank < torch.cuda.device_count():
                 device_id = rank
 
+        # Grouped-TP fat head: this parent is a 1-GPU DevicePool worker whose CUDA
+        # context was bound to a single GPU at worker init, yet the diffusion auto-tuner
+        # queries EVERY group device (0..num_gpus-1) to size the pool. The group's GPUs
+        # are identical (same DevicePool allocation), so proxy an out-of-range id to the
+        # local device — the real per-GPU work runs in the spawned scheduler subprocesses,
+        # each of which sees its own GPU via CUDA_VISIBLE_DEVICES.
+        if device_id >= torch.cuda.device_count():
+            device_id = torch.cuda.current_device()
+
         device_props = torch.cuda.get_device_properties(device_id)
         if device_props.is_integrated:
             free_gpu_memory = psutil.virtual_memory().available
