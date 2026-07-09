@@ -149,17 +149,13 @@ class SD3DiffusionStep(DiffusionStep[SD3Bundle, SD3Conditions]):
             return_dict=False,
         )[0]
         if _dbg:
-            import logging as _logging
-
             from unirl.kernels.sd3 import parity_debug_sha as _sha
 
-            _logging.getLogger(__name__).info(
-                "[sd3-parity-dbg] TRAINER t=%.6f x=%s enc=%s pool=%s out=%s",
-                float(timestep.reshape(-1)[0]),
-                _sha(sample),
-                _sha(prompt_embeds),
-                _sha(pooled_prompt_embeds),
-                _sha(noise_pred),
+            print(
+                f"[sd3-parity-dbg] TRAINER t={float(timestep.reshape(-1)[0]):.6f} "
+                f"x={_sha(sample)} enc={_sha(prompt_embeds)} "
+                f"pool={_sha(pooled_prompt_embeds)} out={_sha(noise_pred)}",
+                flush=True,
             )
         return noise_pred
 
