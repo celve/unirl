@@ -111,6 +111,10 @@ class SD3DiffusionStep(DiffusionStep[SD3Bundle, SD3Conditions]):
             # upcasts internally, so only the VALUE rounding changes.
             timestep = timestep.to(dtype=model_dtype)
 
+        import os as _os
+
+        _dbg = _os.path.exists("/tmp/unirl_parity_debug")
+
         if guidance_scale > 1.0:
             neg = conditions.negative_text
             if neg is not None and neg.embeds is not None:
@@ -137,13 +141,27 @@ class SD3DiffusionStep(DiffusionStep[SD3Bundle, SD3Conditions]):
             noise_pred_uncond, noise_pred_cond = noise_pred.chunk(2, dim=0)
             return noise_pred_uncond + guidance_scale * (noise_pred_cond - noise_pred_uncond)
 
-        return model.transformer(
+        noise_pred = model.transformer(
             hidden_states=sample,
             encoder_hidden_states=prompt_embeds,
             timestep=timestep,
             pooled_projections=pooled_prompt_embeds,
             return_dict=False,
         )[0]
+        if _dbg:
+            import logging as _logging
+
+            from unirl.kernels.sd3 import parity_debug_sha as _sha
+
+            _logging.getLogger(__name__).info(
+                "[sd3-parity-dbg] TRAINER t=%.6f x=%s enc=%s pool=%s out=%s",
+                float(timestep.reshape(-1)[0]),
+                _sha(sample),
+                _sha(prompt_embeds),
+                _sha(pooled_prompt_embeds),
+                _sha(noise_pred),
+            )
+        return noise_pred
 
     # ---- Protocol surface ---------------------------------------------------
 

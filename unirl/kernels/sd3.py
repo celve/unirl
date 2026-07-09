@@ -91,6 +91,20 @@ def _resolve_flash_entries_fallback() -> Tuple[Optional[Callable], Optional[Call
     return dense, varlen
 
 
+def parity_debug_sha(t: Optional[torch.Tensor]) -> str:
+    """Short content hash for cross-process tensor comparison (debug only).
+
+    Upcasts to fp32 first (lossless from bf16) so the hash is dtype-portable,
+    then hashes raw bytes — equal hash ⇔ bitwise-equal values.
+    """
+    if t is None:
+        return "none"
+    import hashlib
+
+    data = t.detach().to(torch.float32).contiguous().cpu().numpy().tobytes()
+    return hashlib.sha1(data).hexdigest()[:10]
+
+
 def kernel_fingerprint() -> Dict[str, str]:
     """Identify the resolved attention build — stamp into logs/RolloutResp so
     a tripped parity gate is attributable to a concrete binary."""

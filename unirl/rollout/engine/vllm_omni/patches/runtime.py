@@ -707,19 +707,22 @@ def patch_sd3_shared_kernels() -> None:
 
     # One-shot geometry log — the actual forward batch is the parity contract
     # the trainer's replay must match (micro_batch_size == this batch dim).
+    # With /tmp/unirl_parity_debug present, also SHA-log the first calls'
+    # inputs/outputs for cross-process divergence hunting (see
+    # unirl.kernels.sd3.parity_debug_sha; trainer counterpart in
+    # SD3DiffusionStep.predict_noise).
     try:
         from vllm_omni.diffusion.models.sd3.sd3_transformer import SD3Transformer2DModel
 
         if not getattr(SD3Transformer2DModel.forward, "_diffrl_sd3_parity", False):
             _orig_dit_forward = SD3Transformer2DModel.forward
-            _logged = {"done": False}
+            _logged = {"count": 0}
 
             def _logged_forward(self, *args, _orig=_orig_dit_forward, **kwargs):
-                if not _logged["done"]:
-                    _logged["done"] = True
-                    hs = kwargs.get("hidden_states", args[0] if args else None)
-                    ehs = kwargs.get("encoder_hidden_states")
-                    ts = kwargs.get("timestep")
+                hs = kwargs.get("hidden_states", args[0] if args else None)
+                ehs = kwargs.get("encoder_hidden_states")
+                ts = kwargs.get("timestep")
+                if _logged["count"] == 0:
                     logger.info(
                         "[sd3-parity] engine DiT forward: hidden=%s %s | encoder=%s | timestep=%s %s | %s",
                         tuple(hs.shape) if hs is not None else None,
@@ -729,7 +732,25 @@ def patch_sd3_shared_kernels() -> None:
                         ts.dtype if ts is not None else None,
                         kernel_fingerprint(),
                     )
-                return _orig(self, *args, **kwargs)
+                out = _orig(self, *args, **kwargs)
+                import os as _os2
+
+                if _logged["count"] < 14 and _os2.path.exists("/tmp/unirl_parity_debug"):
+                    from unirl.kernels.sd3 import parity_debug_sha as _sha
+
+                    pooled = kwargs.get("pooled_projections")
+                    sample = out[0] if isinstance(out, tuple) else getattr(out, "sample", out)
+                    logger.info(
+                        "[sd3-parity-dbg] ENGINE call=%d t=%.6f x=%s enc=%s pool=%s out=%s",
+                        _logged["count"],
+                        float(ts.reshape(-1)[0]) if ts is not None else -1.0,
+                        _sha(hs),
+                        _sha(ehs),
+                        _sha(pooled),
+                        _sha(sample),
+                    )
+                _logged["count"] += 1
+                return out
 
             _logged_forward._diffrl_sd3_parity = True  # type: ignore[attr-defined]
             SD3Transformer2DModel.forward = _logged_forward
