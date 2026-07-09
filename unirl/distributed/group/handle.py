@@ -327,34 +327,28 @@ class Handle:
         self._grad_call_counter = count()
 
     def _assign_tp_coords(self, init_kwargs: Dict[str, Any], tp_size: int) -> List[Dict[str, Any]]:
-        """Per-rank ``init_kwargs`` carrying each runtime's TP coordinates (slime).
+        """Per-rank ``init_kwargs`` carrying each runtime's grouped-TP coordinates.
 
-        ``tp_size==1`` → every rank shares the one dict (the existing flat path).
-        ``tp_size>1`` → the controller reserves one dist-init address per group head
-        (rank ``g*tp``; reserve-then-close so the runtime can bind it inside the
-        engine ``__init__``) and deep-copies the engine config per rank, stamping the
-        multi-node coords onto it: ``nnodes=tp``, ``node_rank=i%tp``,
-        ``dist_init_addr=<group head ip:port>``, ``base_gpu_id=0`` (each worker sees
-        exactly one GPU as ``cuda:0``). The coords go on the config that launches the
-        runtime — ``config`` for a plain engine, ``config.inner`` for the agentic
-        engine. Nothing else in the framework touches NCCL; the runtime forms its own
-        group from these coords.
+        ``tp_size==1`` → every rank shares the one dict (the flat path). ``tp_size>1``
+        deep-copies the runtime-launching config per rank (``config``, or
+        ``config.inner`` for the agentic engine) and stamps grouped-TP coords onto it.
+        Two modes, chosen by whether that config carries a ``num_gpus`` field:
+
+        * **slime** (LLM — no ``num_gpus``): each 1-GPU worker is a "node". The
+          controller reserves one dist-init address per group head and stamps
+          ``nnodes=tp``, ``node_rank=i%tp``, ``dist_init_addr=<head ip:port>``,
+          ``base_gpu_id=0``; the runtime forms its own NCCL group across the workers.
+        * **fat** (diffusion / omni — has ``num_gpus``): the runtime can only fan ONE
+          driver over ``num_gpus`` LOCAL GPUs (no cross-process rendezvous), so the
+          group HEAD becomes a fat driver over the group's ``tp`` DevicePool-allocated
+          GPUs — ``num_gpus=tp``, ``visible_devices=<group's device_ids>`` (the head
+          sets CUDA_VISIBLE_DEVICES to exactly those allocated GPUs), ``base_gpu_id=0``.
+          Non-head members are marked ``is_tp_participant`` and skip the boot; their GPU
+          is driven by the head. Allocation stays 1-GPU-per-worker either way.
         """
         if tp_size <= 1:
             return [init_kwargs for _ in self.workers]
 
-        dp = self.world_size // tp_size
-        group_addr: Dict[int, str] = {}
-        for g in range(dp):
-            head = self.workers[g * tp_size]
-            ip = ray.get(head.get_node_ip.remote())
-            port = ray.get(head._reserve_port.remote())
-            ray.get(head._release_port.remote(port))  # close so the runtime binds it
-            group_addr[g] = f"{ip}:{port}"
-
-        # Read/write a config field on either a plain dict (the hydra recipe path,
-        # where nested _target_ blocks arrive as dicts) or an instantiated config
-        # (direct construction / smokes) — mirrors _tp_size_from_init_kwargs's reader.
         def _get(cfg: Any, key: str) -> Any:
             if cfg is None:
                 return None
@@ -366,18 +360,50 @@ class Handle:
             else:
                 setattr(cfg, key, val)
 
+        def _has(cfg: Any, key: str) -> bool:
+            if cfg is None:
+                return False
+            return (key in cfg) if isinstance(cfg, dict) else hasattr(cfg, key)
+
+        # Pick the grouping mode from the runtime-launching config.
+        peek = init_kwargs.get("config")
+        peek_inner = _get(peek, "inner")
+        peek_target = peek_inner if peek_inner is not None else peek
+        fat = _has(peek_target, "num_gpus")  # diffusion/omni fan one driver over num_gpus GPUs
+
+        dp = self.world_size // tp_size
+        group_addr: Dict[int, str] = {}
+        if not fat:  # slime needs a per-group rendezvous address
+            for g in range(dp):
+                head = self.workers[g * tp_size]
+                ip = ray.get(head.get_node_ip.remote())
+                port = ray.get(head._reserve_port.remote())
+                ray.get(head._release_port.remote(port))  # close so the runtime binds it
+                group_addr[g] = f"{ip}:{port}"
+
         per_rank: List[Dict[str, Any]] = []
         for i in range(self.world_size):
             kw = copy.deepcopy(init_kwargs)
             cfg = kw.get("config")
-            # The runtime-launching config: the inner engine for agentic, else config.
             inner = _get(cfg, "inner")
             target = inner if inner is not None else cfg
+            g, t = i // tp_size, i % tp_size
             if target is not None:
-                _set(target, "nnodes", tp_size)
-                _set(target, "node_rank", i % tp_size)
-                _set(target, "dist_init_addr", group_addr[i // tp_size])
-                _set(target, "base_gpu_id", 0)
+                if fat:
+                    if t == 0:  # group head: fat driver over the group's tp allocated GPUs
+                        grp = self.device_ids[g * tp_size : (g + 1) * tp_size]
+                        _set(target, "num_gpus", tp_size)
+                        _set(target, "tp_size", tp_size)
+                        _set(target, "visible_devices", ",".join(str(d) for d in grp))
+                        _set(target, "base_gpu_id", 0)
+                        _set(target, "is_tp_participant", False)
+                    else:  # participant: skip boot; its GPU is driven by the head
+                        _set(target, "is_tp_participant", True)
+                else:  # slime: each worker is a node; the runtime rendezvouses the group
+                    _set(target, "nnodes", tp_size)
+                    _set(target, "node_rank", t)
+                    _set(target, "dist_init_addr", group_addr[g])
+                    _set(target, "base_gpu_id", 0)
             per_rank.append(kw)
         return per_rank
 

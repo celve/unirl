@@ -68,14 +68,18 @@ class SGLangDiffusionEngineConfig(BaseEngineConfig):
     num_gpus: int = 1
     tp_size: Optional[int] = None
     sp_degree: Optional[int] = None
-    # Multi-node TP coordinates for a grouped-TP rollout, stamped PER RANK by the
-    # controller (Handle) so the diffusion runtime forms its own group across 1-GPU
-    # workers (slime pattern; same shape as the LLM engine). All ``None`` for the
-    # single-process default.
-    nnodes: Optional[int] = None
-    node_rank: Optional[int] = None
-    dist_init_addr: Optional[str] = None
     base_gpu_id: Optional[int] = None
+    # Grouped-TP is a FAT DRIVER, not slime. The diffusion runtime does tensor
+    # parallelism as ONE driver fanning out ``num_gpus`` local subprocesses (its
+    # ServerArgs has no nnodes/node_rank/dist_init — no cross-process rendezvous). So
+    # the controller (Handle) makes each TP group's HEAD a fat driver over the group's
+    # ``tp`` GPUs: it stamps ``num_gpus=tp`` + ``visible_devices`` (the group's physical
+    # GPU ids, straight from unirl's DevicePool allocation), and the head sets
+    # CUDA_VISIBLE_DEVICES to exactly those before boot. Non-head group members are
+    # participants that skip the boot (their GPU is driven by the head). Both fields are
+    # consumed by the engine and are NOT ServerArgs fields (filtered out of the intent).
+    visible_devices: Optional[str] = None
+    is_tp_participant: bool = False
 
     # --- SGLang engine behaviour ---
     local_mode: bool = True
@@ -173,14 +177,10 @@ class SGLangDiffusionEngineConfig(BaseEngineConfig):
             intent["tp_size"] = int(self.tp_size)
         if self.sp_degree is not None:
             intent["sp_degree"] = int(self.sp_degree)
-        # Multi-node TP coords (grouped-TP rollout); real ServerArgs fields → the
-        # backend field-name filter passes them straight to the runtime.
-        if self.nnodes is not None:
-            intent["nnodes"] = int(self.nnodes)
-        if self.node_rank is not None:
-            intent["node_rank"] = int(self.node_rank)
-        if self.dist_init_addr is not None:
-            intent["dist_init_addr"] = str(self.dist_init_addr)
+        # Grouped-TP fat driver: ``num_gpus`` (=tp on the head, above) + ``base_gpu_id``
+        # are real ServerArgs fields and flow through; ``visible_devices`` /
+        # ``is_tp_participant`` are consumed by the engine (CVD-set / boot-skip), not
+        # the runtime, so they are deliberately NOT emitted into the intent.
         if self.base_gpu_id is not None:
             intent["base_gpu_id"] = int(self.base_gpu_id)
         intent["disable_autocast"] = bool(self.disable_autocast)

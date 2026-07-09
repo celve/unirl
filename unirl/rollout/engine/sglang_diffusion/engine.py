@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from typing import Any, Dict, List, Optional
 
 import torch
@@ -76,6 +77,9 @@ class SGLangDiffusionRolloutEngine(BaseRolloutEngine):
         self.rank = rank
         self._device = device if device is not None else torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self._is_offloaded = False
+        # Grouped-TP (fat driver) participant: the group HEAD's fat driver owns this
+        # worker's GPU, so this worker skips the runtime boot and only reserves its slot.
+        self._is_tp_participant = bool(getattr(config, "is_tp_participant", False))
 
         # Adapter (the only read of a model knob) — owns the conversion + schedule.
         self.adapter = get_adapter(config.model_family)(config, model_config, strategy=strategy)
@@ -96,24 +100,41 @@ class SGLangDiffusionRolloutEngine(BaseRolloutEngine):
         if config.local_mode and ports is None:
             ports = SGLangDiffusionPorts.reserve()
 
-        # Backend (the seam) — booted from the config-spelled intent (ports overlaid).
-        intent = config.server_intent(
-            model_config=model_config,
-            ports=ports,
-            extra=self.adapter.boot_kwargs(),
-        )
-        self._backend = SGLangBackend.boot(
-            intent,
-            local_mode=bool(config.local_mode),
-        )
+        # Backend (the seam). Grouped-TP participant: skip the boot — the group HEAD's
+        # fat driver drives this GPU; this worker only reserves its slot + colocates.
+        if self._is_tp_participant:
+            logger.info("sglang_diffusion grouped-TP participant (rank=%s): skipping runtime boot", rank)
+            self._backend = None
+            self._weight_sync = None
+        else:
+            # Grouped-TP head (or plain single-GPU). For a fat group the controller
+            # (Handle._assign_tp_coords) handed this driver the group's DevicePool-
+            # allocated GPUs via ``visible_devices``; pin CUDA_VISIBLE_DEVICES to exactly
+            # those so the fat driver (``num_gpus=tp``) fans its subprocesses over only
+            # the allocated GPUs — unirl's placement, not a pop-to-all bypass.
+            if getattr(config, "visible_devices", None):
+                os.environ["CUDA_VISIBLE_DEVICES"] = str(config.visible_devices)
+                logger.info(
+                    "sglang_diffusion grouped-TP head (rank=%s): CUDA_VISIBLE_DEVICES=%s num_gpus=%s tp_size=%s",
+                    rank, config.visible_devices, config.num_gpus, config.tp_size,
+                )
+            intent = config.server_intent(
+                model_config=model_config,
+                ports=ports,
+                extra=self.adapter.boot_kwargs(),
+            )
+            self._backend = SGLangBackend.boot(
+                intent,
+                local_mode=bool(config.local_mode),
+            )
 
-        # Weight sync — owns all sync/LoRA state, over the live seam.
-        self._weight_sync = WeightSync(
-            self._backend,
-            pipeline_prefix=pipeline_prefix,
-            target_modules=target_modules,
-            uses_lora=bool(model_config.use_lora),
-        )
+            # Weight sync — owns all sync/LoRA state, over the live seam.
+            self._weight_sync = WeightSync(
+                self._backend,
+                pipeline_prefix=pipeline_prefix,
+                target_modules=target_modules,
+                uses_lora=bool(model_config.use_lora),
+            )
 
         # σ schedule policy comes from the adapter (absorbs the generic-vs-factory branch).
         self.schedule_policy = self.adapter.schedule_policy()
