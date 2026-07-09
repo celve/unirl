@@ -360,16 +360,35 @@ class Handle:
             else:
                 setattr(cfg, key, val)
 
-        def _has(cfg: Any, key: str) -> bool:
+        def _declares(cfg: Any, key: str) -> bool:
+            """True if the config declares ``key``. For a hydra dict we resolve the
+            ``_target_`` dataclass, so a DEFAULTED field (present on the class but not
+            spelled in the recipe YAML) still counts — fat detection must not depend on
+            a recipe explicitly setting ``num_gpus``."""
             if cfg is None:
                 return False
-            return (key in cfg) if isinstance(cfg, dict) else hasattr(cfg, key)
+            if not isinstance(cfg, dict):
+                return hasattr(cfg, key)
+            if key in cfg:
+                return True
+            target = cfg.get("_target_")
+            if not target:
+                return False
+            try:
+                import dataclasses
+                import importlib
+
+                mod_name, cls_name = str(target).rsplit(".", 1)
+                klass = getattr(importlib.import_module(mod_name), cls_name)
+                return any(f.name == key for f in dataclasses.fields(klass))
+            except Exception:
+                return False
 
         # Pick the grouping mode from the runtime-launching config.
         peek = init_kwargs.get("config")
         peek_inner = _get(peek, "inner")
         peek_target = peek_inner if peek_inner is not None else peek
-        fat = _has(peek_target, "num_gpus")  # diffusion/omni fan one driver over num_gpus GPUs
+        fat = _declares(peek_target, "num_gpus")  # diffusion/omni fan one driver over num_gpus GPUs
 
         dp = self.world_size // tp_size
         group_addr: Dict[int, str] = {}
