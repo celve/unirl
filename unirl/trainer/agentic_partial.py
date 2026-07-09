@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections import Counter
 from typing import Dict, List, Optional, Tuple
 
 import torch
@@ -159,6 +160,17 @@ class AgenticPartialTrainer(AgenticTrainer):
         carried = self.rollout.abort()[0]  # checkpoint the in-flight tail (turn boundary) → decode-idle, still awake
         self._pump()  # grab trajectories that completed DURING the quiesce (before next submit resets buffers)
         self.rollout.sleep()  # engine quiesced → safe to offload → frees GPU for the train step
+        # Diagnostic (LIN-531): the tail we cut — its turn depths show whether the commit-N actually
+        # skipped stragglers (wide tail depth) or just wasted uniform-depth over-sample.
+        tail_depths = [len(t.gen_parts()) for t in carried]
+        logger.info(
+            "rollout %d partial: committed %d groups; %s tail=%d trajectories, turns=%s",
+            rollout_id,
+            len(groups),
+            self._tail_policy,
+            len(carried),
+            dict(sorted(Counter(tail_depths).items())),
+        )
         # Tail policy: carry (resume history-preserving envs) or drop (stateful envs restart, so discard).
         self._carried = carried if self._tail_policy == "carry" else []
         return groups

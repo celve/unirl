@@ -25,6 +25,7 @@ from __future__ import annotations
 import logging
 import re
 import time
+from collections import Counter
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
@@ -159,6 +160,17 @@ class AgenticTrainer(ARTrainer):
                 train_parts.append(gp)
 
         depths = [len(tr.gen_parts()) for tr in trajs]
+        # Per-trajectory turn distribution — the workload's depth VARIANCE (a straggler-cut only
+        # pays when this is wide; ~uniform means over-sample-and-drop is pure waste). LIN-531.
+        logger.info(
+            "rollout %d trajectory turns: n=%d mean=%.2f min=%d max=%d hist=%s",
+            rollout_id,
+            len(depths),
+            (sum(depths) / len(depths)) if depths else 0.0,
+            min(depths, default=0),
+            max(depths, default=0),
+            dict(sorted(Counter(depths).items())),
+        )
         if not train_parts:  # pathological: every sampled trajectory failed to generate
             logger.warning("AgenticTrainer rollout %d produced no trainable turns.", rollout_id)
             return TrainStepResult(0.0, 0.0, 0.0, False, [], {}), mean_reward
