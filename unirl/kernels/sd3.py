@@ -242,49 +242,60 @@ def shared_rms_norm(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.
 
 
 # ---------------------------------------------------------------------------
-# pos_embed buffer canonicalization
+# pos_embed buffer restore (seam: engine buffer is fp32(checkpoint), trainer's
+# was cast to bf16 by from_pretrained)
 # ---------------------------------------------------------------------------
 
 
-def canonicalize_fp32_pos_embed(patch_embed: torch.nn.Module) -> None:
-    """Install a deterministic CPU-computed fp32 sincos table on a diffusers
-    ``PatchEmbed`` — applied to BOTH the trainer transformer and the engine
-    worker's transformer so the buffers are bit-identical.
+def restore_fp32_pos_embed(transformer: torch.nn.Module, pretrained_path: str, subfolder: str = "transformer") -> None:
+    """Reload ``pos_embed.pos_embed`` from the checkpoint and hold it in fp32.
 
-    Why this exists: the buffer's bits depend on how the module was built.
-    The vLLM-Omni loader constructs the model under a CUDA default-device
-    context (sincos computed on GPU, kept fp32), while diffusers
-    ``from_pretrained(torch_dtype=bf16)`` computes it on CPU and casts the
-    buffer to bf16 — three different bit patterns for the "same" table
-    (CUDA-fp32 vs CPU-fp32 vs CPU-bf16). Recomputing on CPU in fp32 via the
-    same diffusers helper, on both sides, removes the whole class of drift.
-    Values differ from either original by at most fp32-transcendental ulps.
+    SD3.5 checkpoints DO carry the sincos table (``pos_embed_max_size`` makes
+    the buffer persistent), and its values differ wholesale from what the
+    current diffusers helper would recompute (different export-time
+    convention — measured maxabs 2.0 on SD3.5-medium). Both sides must
+    therefore use the CHECKPOINT value:
+
+    - engine (vLLM-Omni): loads it via ``default_weight_loader`` into an
+      fp32 buffer (the loader never casts buffers) → holds fp32(stored);
+    - trainer (diffusers ``from_pretrained(torch_dtype=bf16)``): casts the
+      buffer to bf16 → holds bf16(stored).
+
+    Restoring fp32(stored) on the trainer reproduces the engine bits exactly.
+    Raises if the key is missing — parity cannot be silently approximated.
     """
-    from diffusers.models.embeddings import get_2d_sincos_pos_embed
+    import glob
+    import os
 
-    grid_size = getattr(patch_embed, "pos_embed_max_size", None)
-    if not grid_size:
-        raise RuntimeError(
-            "canonicalize_fp32_pos_embed: PatchEmbed.pos_embed_max_size is unset — "
-            "SD3 checkpoints always set it; refusing to guess the grid size."
-        )
-    embed_dim = int(patch_embed.pos_embed.shape[-1])
-    pos = get_2d_sincos_pos_embed(
-        embed_dim,
-        int(grid_size),
-        base_size=patch_embed.base_size,
-        interpolation_scale=patch_embed.interpolation_scale,
-        device=torch.device("cpu"),
-        output_type="pt",
+    from safetensors import safe_open
+
+    key = "pos_embed.pos_embed"
+    folder = os.path.join(pretrained_path, subfolder)
+    shards = sorted(glob.glob(os.path.join(folder, "*.safetensors")))
+    if not shards:
+        raise FileNotFoundError(f"restore_fp32_pos_embed: no .safetensors under {folder!r}")
+    for shard in shards:
+        with safe_open(shard, framework="pt", device="cpu") as f:
+            if key in f.keys():
+                stored = f.get_tensor(key)
+                buf = transformer.pos_embed.pos_embed
+                if tuple(stored.shape) != tuple(buf.shape):
+                    raise RuntimeError(
+                        f"restore_fp32_pos_embed: checkpoint {key} shape "
+                        f"{tuple(stored.shape)} != module buffer {tuple(buf.shape)}"
+                    )
+                transformer.pos_embed.pos_embed = stored.to(torch.float32).to(buf.device)
+                return
+    raise KeyError(
+        f"restore_fp32_pos_embed: {key!r} not found in {folder!r} — this SD3 "
+        f"checkpoint layout is unexpected; parity install refuses to guess."
     )
-    device = patch_embed.pos_embed.device
-    patch_embed.pos_embed = pos.float().unsqueeze(0).to(device)
 
 
 __all__ = [
-    "canonicalize_fp32_pos_embed",
     "kernel_fingerprint",
     "resolve_flash_entries",
+    "restore_fp32_pos_embed",
     "shared_attention",
     "shared_rms_norm",
 ]

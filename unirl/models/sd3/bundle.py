@@ -120,7 +120,7 @@ class SD3Bundle(Bundle):
                 # rollout/engine/vllm_omni/patches/runtime.py::patch_sd3_shared_kernels.
                 from unirl.models.sd3.parity import install_shared_kernels
 
-                install_shared_kernels(transformer)
+                install_shared_kernels(transformer, path)
 
         vae = AutoencoderKL.from_pretrained(path, subfolder="vae", torch_dtype=vae_dtype).to(device).eval()
         vae.requires_grad_(False)

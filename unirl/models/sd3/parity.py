@@ -194,21 +194,22 @@ class SharedKernelJointAttnProcessor:
         return _plain_linear(attn.to_out[0], out)
 
 
-def install_shared_kernels(transformer: torch.nn.Module) -> None:
+def install_shared_kernels(transformer: torch.nn.Module, pretrained_path: str) -> None:
     """Put the trainer's SD3 transformer on the shared numerics contract.
 
     Called by ``SD3Bundle.from_config`` (eager path, ``shared_kernels: true``)
     BEFORE FSDP wrapping. Parameter-free: sets the engine-parity attention
-    processor on every attention module and canonicalizes the fp32 pos_embed
-    buffer. State-dict keys are untouched, so LoRA injection, FSDP wrap, and
-    weight sync all see the stock module tree.
+    processor on every attention module and restores the fp32
+    checkpoint-value pos_embed buffer (the engine holds fp32(checkpoint)
+    natively; diffusers cast it to bf16). State-dict keys are untouched, so
+    LoRA injection, FSDP wrap, and weight sync all see the stock module tree.
     """
     import logging
 
-    from unirl.kernels.sd3 import canonicalize_fp32_pos_embed, kernel_fingerprint
+    from unirl.kernels.sd3 import kernel_fingerprint, restore_fp32_pos_embed
 
     transformer.set_attn_processor(SharedKernelJointAttnProcessor())
-    canonicalize_fp32_pos_embed(transformer.pos_embed)
+    restore_fp32_pos_embed(transformer, pretrained_path)
     logging.getLogger(__name__).info(
         "SD3 shared kernels installed (trainer side): %s", kernel_fingerprint()
     )
