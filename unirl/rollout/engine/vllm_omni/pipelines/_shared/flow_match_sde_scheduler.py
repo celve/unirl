@@ -299,6 +299,21 @@ class FlowMatchSDEDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
         sigma = self.sigmas[sigma_idx]
         sigma_prev = self.sigmas[sigma_idx + 1]
         sigma_max = self.sigmas[1]
+        # Broadcast-shape parity with the trainer (unirl.sde.kernels
+        # StepStrategy.denoise unsqueezes σ to sample rank BEFORE the math).
+        # A 0-dim σ here routes elementwise ops through PyTorch's
+        # scalar-specialized CUDA kernels, where division by a scalar is
+        # computed as multiply-by-reciprocal — a value-dependent 1-ulp
+        # difference vs the trainer's tensor-division path (measured: identical
+        # mean/std/prev SHAs, differing per-element logp). Matching the
+        # trainer's [1,1,...,1] shape makes both sides take the identical
+        # kernels and round identically.
+        if sigma.dim() == 0:
+            sigma = sigma.unsqueeze(0)
+            sigma_prev = sigma_prev.unsqueeze(0)
+        while sigma.dim() < sample_f32.dim():
+            sigma = sigma.unsqueeze(-1)
+            sigma_prev = sigma_prev.unsqueeze(-1)
         dt = sigma_prev - sigma
 
         # SDE vs ODE per step: gated entirely on ``_sde_indices_set``.
