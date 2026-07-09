@@ -26,6 +26,20 @@ class Sd3InputAdapter(DitInputAdapter):
     """SD3 request builder using vLLM-Omni's native multi-output prompt shape."""
 
     def _spp(self, req: RolloutReq) -> int:
+        # Parity mode (UNIRL_VLLM_OMNI_PARITY=1, set by VLLMOmniBackend.boot):
+        # UNGROUPED requests — one request per sample, num_outputs_per_prompt=1.
+        # Grouped mode fans spp outputs from one request, whose [1, L, D] text
+        # stream AdaLN-broadcasts against a [spp, ...] hidden stream inside the
+        # DiT; the trainer's per-sample replay (micro_batch_size=1 with
+        # repeat-interleaved conditions) runs different GEMM shapes and cannot
+        # match it bitwise. Ungrouping makes both sides batch-1 with identical
+        # per-sample text rows. Noise-recipe slicing degenerates correctly
+        # (interception.resolve_request_noise spans [i:i+1]) and the output
+        # adapter's repeat factor becomes 1.
+        import os
+
+        if os.environ.get("UNIRL_VLLM_OMNI_PARITY") == "1":
+            return 1
         diff_params = req.sampling_params.get("diffusion")
         return int(getattr(diff_params, "samples_per_prompt", 1) or 1)
 

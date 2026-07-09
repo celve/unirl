@@ -184,6 +184,13 @@ class VLLMOmniBackend:
         :func:`_assemble_omni_kwargs`), so there is no YAML rewrite and no
         temp file. See the module docstring for the load-bearing boot order.
         """
+        # 0. Parity env BEFORE the patch install and any spawn: the hijack's
+        #    patch_sd3_shared_kernels gates on it in this process AND in every
+        #    spawn child (children inherit os.environ), and the driver-side
+        #    SD3 adapter reads it to switch to ungrouped requests.
+        if intent.get("parity_mode"):
+            os.environ["UNIRL_VLLM_OMNI_PARITY"] = "1"
+
         # 1. Patches first: install() wraps mp.Process so spawn children
         #    re-run the hijack at startup — the primary mechanism for
         #    propagating patches across the spawn boundary.

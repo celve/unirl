@@ -59,6 +59,17 @@ class RLStableDiffusion3Pipeline(StableDiffusion3Pipeline):
 
     def __init__(self, *, od_config: OmniDiffusionConfig, prefix: str = "") -> None:
         super().__init__(od_config=od_config, prefix=prefix)
+        # Shared-kernel parity: the attention/qk-norm class patches were
+        # installed pre-model-build by patch_sd3_shared_kernels (hijack);
+        # the pos_embed buffer is per-instance state, so canonicalize it here
+        # post-build — the trainer install does the identical recompute, so
+        # both sides hold bit-equal fp32 sincos tables.
+        import os
+
+        if os.environ.get("UNIRL_VLLM_OMNI_PARITY") == "1":
+            from unirl.kernels.sd3 import canonicalize_fp32_pos_embed
+
+            canonicalize_fp32_pos_embed(self.transformer.pos_embed)
         # Upstream ``__init__`` constructs ``self.scheduler`` at
         # ``pipeline_sd3.py:191``; stash it as the config donor for the SDE
         # swap. We never swap back — our scheduler is installed for the

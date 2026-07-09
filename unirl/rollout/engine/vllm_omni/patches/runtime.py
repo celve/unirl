@@ -638,6 +638,107 @@ def patch_hi3_flow_alignment() -> None:
         _DecoderLayer.forward = _patched_decoder_forward
 
 
+def patch_sd3_shared_kernels() -> None:
+    """Engine half of SD3 shared-kernel parity. Gated on
+    ``UNIRL_VLLM_OMNI_PARITY=1`` (set by ``VLLMOmniBackend.boot`` when the
+    engine config enables ``parity_mode``; spawn children inherit it).
+
+    Runs pre-model-build in every worker child (hijack order), so class-attr
+    patches land before ``Attention.__init__`` binds impl instances:
+
+    - ``FlashAttentionImpl.forward_cuda`` → ``unirl.kernels.sd3.shared_attention``
+      for the unmasked case (SD3 never passes a mask); masked callers fall
+      through to the original implementation.
+    - vllm ``RMSNorm.forward_cuda`` / ``forward_native`` (no-residual case) →
+      ``shared_rms_norm`` — the DiT qk-norms. The fused-add residual path is
+      not used by the SD3 DiT and passes through untouched.
+    - Pins ``DIFFUSION_ATTENTION_BACKEND=FLASH_ATTN`` so platform selection
+      cannot silently fall back to SDPA (missing FA then fails loudly).
+    - One-shot DiT forward shape/dtype log for geometry verification against
+      the trainer replay logs.
+
+    Trainer-side counterpart: ``unirl/models/sd3/parity.py`` (installed by
+    ``SD3Bundle`` under ``shared_kernels: true``). Both sides import the SAME
+    ``unirl.kernels.sd3`` functions — one kernel set, two hosts.
+    """
+    import os as _os
+
+    if _os.environ.get("UNIRL_VLLM_OMNI_PARITY") != "1":
+        return
+    _os.environ.setdefault("DIFFUSION_ATTENTION_BACKEND", "FLASH_ATTN")
+
+    from vllm.model_executor.layers.layernorm import RMSNorm as _VllmRMSNorm
+    from vllm_omni.diffusion.attention.backends.flash_attn import FlashAttentionImpl
+
+    from unirl.kernels.sd3 import kernel_fingerprint, shared_attention, shared_rms_norm
+
+    if not getattr(FlashAttentionImpl.forward_cuda, "_diffrl_sd3_parity", False):
+        _orig_fa_forward = FlashAttentionImpl.forward_cuda
+
+        def _parity_attn_forward(self, query, key, value, attn_metadata=None, *, _orig=_orig_fa_forward):
+            mask = attn_metadata.attn_mask if attn_metadata is not None else None
+            if mask is not None:
+                return _orig(self, query, key, value, attn_metadata)
+            return shared_attention(
+                query, key, value, softmax_scale=self.softmax_scale, causal=self.causal
+            )
+
+        _parity_attn_forward._diffrl_sd3_parity = True  # type: ignore[attr-defined]
+        FlashAttentionImpl.forward_cuda = _parity_attn_forward
+
+    if not getattr(_VllmRMSNorm.forward_cuda, "_diffrl_sd3_parity", False):
+        _orig_rms_cuda = _VllmRMSNorm.forward_cuda
+        _orig_rms_native = _VllmRMSNorm.forward_native
+
+        def _parity_rms_cuda(self, x, residual=None, *, _orig=_orig_rms_cuda):
+            if residual is not None:
+                return _orig(self, x, residual)
+            return shared_rms_norm(x, self.weight, float(self.variance_epsilon))
+
+        def _parity_rms_native(self, x, residual=None, *, _orig=_orig_rms_native):
+            if residual is not None:
+                return _orig(self, x, residual)
+            return shared_rms_norm(x, self.weight, float(self.variance_epsilon))
+
+        _parity_rms_cuda._diffrl_sd3_parity = True  # type: ignore[attr-defined]
+        _parity_rms_native._diffrl_sd3_parity = True  # type: ignore[attr-defined]
+        _VllmRMSNorm.forward_cuda = _parity_rms_cuda
+        _VllmRMSNorm.forward_native = _parity_rms_native
+
+    # One-shot geometry log — the actual forward batch is the parity contract
+    # the trainer's replay must match (micro_batch_size == this batch dim).
+    try:
+        from vllm_omni.diffusion.models.sd3.sd3_transformer import SD3Transformer2DModel
+
+        if not getattr(SD3Transformer2DModel.forward, "_diffrl_sd3_parity", False):
+            _orig_dit_forward = SD3Transformer2DModel.forward
+            _logged = {"done": False}
+
+            def _logged_forward(self, *args, _orig=_orig_dit_forward, **kwargs):
+                if not _logged["done"]:
+                    _logged["done"] = True
+                    hs = kwargs.get("hidden_states", args[0] if args else None)
+                    ehs = kwargs.get("encoder_hidden_states")
+                    ts = kwargs.get("timestep")
+                    logger.info(
+                        "[sd3-parity] engine DiT forward: hidden=%s %s | encoder=%s | timestep=%s %s | %s",
+                        tuple(hs.shape) if hs is not None else None,
+                        hs.dtype if hs is not None else None,
+                        tuple(ehs.shape) if ehs is not None else None,
+                        tuple(ts.shape) if ts is not None else None,
+                        ts.dtype if ts is not None else None,
+                        kernel_fingerprint(),
+                    )
+                return _orig(self, *args, **kwargs)
+
+            _logged_forward._diffrl_sd3_parity = True  # type: ignore[attr-defined]
+            SD3Transformer2DModel.forward = _logged_forward
+    except Exception:  # noqa: BLE001 — the log is diagnostic, never block boot
+        logger.warning("patch_sd3_shared_kernels: shape-log install failed", exc_info=True)
+
+    logger.info("[sd3-parity] engine shared kernels installed: %s", kernel_fingerprint())
+
+
 class VLLMOmniHijack:
     """Monkey-patches vllm-omni internals to support in-memory LoRA tensors.
 
@@ -671,6 +772,7 @@ class VLLMOmniHijack:
         patch_sigmas_passthrough()
         patch_hi3_flow_alignment()
         patch_master_port_unstrip()
+        patch_sd3_shared_kernels()
 
 
 __all__ = [
@@ -678,5 +780,6 @@ __all__ = [
     "VLLMOmniHijack",
     "patch_hi3_flow_alignment",
     "patch_per_request_ar_seed",
+    "patch_sd3_shared_kernels",
     "patch_sigmas_passthrough",
 ]

@@ -72,6 +72,17 @@ class VLLMOmniEngineConfig(BaseEngineConfig):
     # Required for ``cfg.training.execution.offload_rollout = True``.
     enable_sleep_mode: bool = True
 
+    # Shared-kernel parity mode (rollout↔train numerics unification, SD3).
+    # Boot sets ``UNIRL_VLLM_OMNI_PARITY=1`` before spawning workers, which
+    # (a) installs the shared attention/qk-norm kernels in every worker child
+    # (``patches/runtime.py::patch_sd3_shared_kernels``), (b) switches the
+    # SD3 adapter to UNGROUPED requests (one request per sample,
+    # ``num_outputs_per_prompt=1``) so the engine's DiT forward geometry
+    # matches the trainer's ``micro_batch_size=1`` replay, and (c) makes the
+    # RL pipeline canonicalize the fp32 pos_embed buffer. Pair with the
+    # trainer-side ``model.shared_kernels: true`` recipe flag.
+    parity_mode: bool = False
+
     # Passthrough for advanced ``Omni`` kwargs not surfaced as typed fields.
     omni_extra: Dict[str, Any] = field(default_factory=dict)
 
@@ -120,6 +131,7 @@ class VLLMOmniEngineConfig(BaseEngineConfig):
             "model_path": str(self.model_path),
             "enable_sleep_mode": bool(self.enable_sleep_mode),
             "ports": ports,
+            "parity_mode": bool(self.parity_mode),
         }
         # Adapter boot extras: stage_yaml / stage_yaml_source /
         # needs_driver_tokenizer / clear_cuda_visible.
