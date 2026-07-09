@@ -153,6 +153,35 @@ def _assemble_omni_kwargs(intent: Dict[str, Any]) -> Dict[str, Any]:
     return omni_kwargs
 
 
+def _write_grouped_tp_stage_yaml(pristine_path: str, tp_size: int) -> str:
+    """Return a TEMP copy of the stage YAML with every diffusion stage fanned over
+    ``tp_size`` GPUs — ``engine_args.parallel_config.tensor_parallel_size = tp_size`` and
+    ``runtime.devices = "0,1,..,tp-1"`` (relative to the head's group CVD, so the fat
+    driver's stage workers land on exactly the group's allocated GPUs). The stage TP lives
+    in the YAML (which wins over the ctor ``base_engine_args`` channel), so a grouped-TP
+    rollout must override it here rather than via ``Omni`` kwargs. The pristine asset is
+    never mutated; AR stages keep their YAML values (SD3 is a single diffusion stage).
+    """
+    import tempfile
+
+    import yaml
+
+    with open(pristine_path) as f:
+        cfg = yaml.safe_load(f)
+    devices = ",".join(str(i) for i in range(tp_size))
+    for stage in cfg.get("stage_args", []) or []:
+        if str(stage.get("stage_type", "")).lower() != "diffusion":
+            continue
+        stage.setdefault("runtime", {})["devices"] = devices
+        stage.setdefault("engine_args", {}).setdefault("parallel_config", {})[
+            "tensor_parallel_size"
+        ] = int(tp_size)
+    fd, path = tempfile.mkstemp(prefix="omni_grouped_tp_", suffix=".yaml")
+    with os.fdopen(fd, "w") as f:
+        yaml.safe_dump(cfg, f)
+    return path
+
+
 class VLLMOmniBackend:
     """The native ``Backend`` impl over the ``Omni`` orchestrator."""
 
@@ -201,12 +230,17 @@ class VLLMOmniBackend:
 
         rt = _import_omni_runtime()
 
-        # 3. Scoped-env last resort: HI3 multi-GPU stages need to see ALL
-        #    physical GPUs so vllm-omni can pin each stage to its yaml
-        #    ``runtime.devices``. Permanent pop, matching v1 (a restore-after-
-        #    boot is a post-parity follow-up; see _HI3 colocate landmine note
-        #    in the adapter).
-        if intent.get("clear_cuda_visible"):
+        # 3. Scoped-env last resort: vllm-omni reads CUDA_VISIBLE_DEVICES for
+        #    per-stage device pinning and has no arg for it.
+        #    - Grouped-TP fat head: the Handle stamped this head's group of allocated
+        #      GPUs onto ``visible_devices``; pin CVD to EXACTLY those (the temp stage
+        #      YAML's devices are relative 0..tp-1 within this set), so each TP group's
+        #      fat driver lands on its own allocated GPUs. unirl placement, not pop-to-all.
+        #    - Else HI3 multi-GPU stages need to see ALL physical GPUs to pin each stage
+        #      to its yaml ``runtime.devices``. Permanent pop, matching v1.
+        if intent.get("visible_devices"):
+            os.environ["CUDA_VISIBLE_DEVICES"] = str(intent["visible_devices"])
+        elif intent.get("clear_cuda_visible"):
             os.environ.pop("CUDA_VISIBLE_DEVICES", None)
 
         # 4. Spawn Omni off the pristine YAML asset + the assembled kwargs.
@@ -240,6 +274,11 @@ class VLLMOmniBackend:
             pass
 
         yaml_path = _resolve_stage_yaml(str(intent["stage_yaml"]), str(intent.get("stage_yaml_source", "local")))
+        # Grouped-TP fat rollout: override the diffusion stage's TP + device span in a
+        # temp YAML (the stage TP lives in the YAML, which wins over ctor kwargs).
+        _tp = int(intent.get("tp_size", 1) or 1)
+        if _tp > 1:
+            yaml_path = _write_grouped_tp_stage_yaml(yaml_path, _tp)
         serialize = os.environ.get("DIFFRL_OMNI_BOOT_SERIALIZE", "1") != "0"
         lock_file = open("/tmp/diffrl_omni_boot.lock", "a+") if serialize else None
         try:

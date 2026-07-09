@@ -75,6 +75,21 @@ class VLLMOmniEngineConfig(BaseEngineConfig):
     # Passthrough for advanced ``Omni`` kwargs not surfaced as typed fields.
     omni_extra: Dict[str, Any] = field(default_factory=dict)
 
+    # --- Grouped-TP (fat driver, unirl allocation) ---
+    # Same model as the sglang_diffusion engine: the vllm-omni runtime is a fat driver
+    # (mp executor) fanning stage workers over local GPUs, so for a grouped-TP rollout the
+    # controller (Handle) makes each TP group's HEAD a fat driver over the group's ``tp``
+    # DevicePool-allocated GPUs. ``num_gpus`` selects the Handle's fat branch (it resolves
+    # this config's _target_ dataclass and keys off the field's presence); ``tp_size`` sets
+    # the diffusion stage's ``tensor_parallel_size`` + device span via a temp stage-YAML at
+    # boot; ``visible_devices`` is the group's physical GPU ids the head pins CVD to (in
+    # place of the HI3 pop-to-all); participants skip the boot. All default to the
+    # single-GPU path, so tp==1 is byte-identical to today.
+    num_gpus: int = 1
+    tp_size: int = 1
+    visible_devices: Optional[str] = None
+    is_tp_participant: bool = False
+
     def __post_init__(self) -> None:
         self.modality = str(self.modality or "").strip().lower()
         # Validate against the live adapter registry (importing it registers them).
@@ -124,6 +139,12 @@ class VLLMOmniEngineConfig(BaseEngineConfig):
         # Adapter boot extras: stage_yaml / stage_yaml_source /
         # needs_driver_tokenizer / clear_cuda_visible.
         intent.update(extra)
+        # Grouped-TP (fat driver): the backend fans the diffusion stage over ``tp_size``
+        # GPUs (temp stage-YAML override) and — when the Handle stamped a group's GPUs onto
+        # this head — pins CUDA_VISIBLE_DEVICES to exactly those instead of the HI3 pop.
+        intent["tp_size"] = int(self.tp_size)
+        if self.visible_devices:
+            intent["visible_devices"] = str(self.visible_devices)
 
         omni_kwargs: Dict[str, Any] = dict(
             # HI3 weights are ~150GB; loading from cephfs over the network

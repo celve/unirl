@@ -24,6 +24,7 @@ worker partitions.
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any, Dict, List, Optional
 
 import torch
@@ -37,6 +38,39 @@ from unirl.rollout.engine.vllm_omni.config import VLLMOmniEngineConfig, VLLMOmni
 from unirl.rollout.engine.vllm_omni.weight_sync import WeightSync
 from unirl.types.sample import Sample
 from unirl.types.sampling import DiffusionSamplingParams
+
+
+logger = logging.getLogger(__name__)
+
+
+class _InertComponent:
+    """No-op stand-in for a grouped-TP participant's ``backend`` / ``weight_sync``.
+
+    A fat-driver participant boots no runtime — its GPU is driven by the group HEAD's
+    fat Omni driver — but the ``Handle`` still registers the role on it and broadcasts
+    lifecycle / weight verbs (``sleep``/``wake_up``/``update_weights_*``/…). Every such
+    verb must be a harmless no-op. ``ping``/``tp_per_stage``/``lora_*``/checksums return
+    benign defaults; all other verbs no-op. ``generate`` is never reached — it is routed
+    to the head via ``Execute.DP_HEAD``.
+    """
+
+    lora_dirty = False
+    lora_loaded = False
+
+    def ping(self) -> bool:
+        return True
+
+    def tp_per_stage(self) -> Dict[int, int]:
+        return {}
+
+    def loaded_param_checksums(self, **kwargs: Any) -> Dict[int, Any]:
+        return {}
+
+    def loaded_lora_checksums(self, **kwargs: Any) -> Dict[int, Any]:
+        return {}
+
+    def __getattr__(self, name: str):
+        return lambda *args, **kwargs: None
 
 
 class VLLMOmniRolloutEngine(BaseRolloutEngine):
@@ -62,6 +96,9 @@ class VLLMOmniRolloutEngine(BaseRolloutEngine):
         self.rank = rank
         self.model_config = model_config
         self._is_offloaded = False
+        # Grouped-TP (fat driver) participant: the group HEAD's fat Omni driver owns this
+        # worker's GPU, so this worker skips the runtime boot and only reserves its slot.
+        self._is_tp_participant = bool(getattr(config, "is_tp_participant", False))
 
         # Adapter (the only read of the modality knob) — owns the conversion,
         # topology knobs, and the σ schedule. ``tokenize_fn`` is late-bound to
@@ -76,23 +113,30 @@ class VLLMOmniRolloutEngine(BaseRolloutEngine):
         if ports is None:
             ports = VLLMOmniPorts.reserve()
 
-        # Backend (the seam) — booted from the config-spelled intent (adapter
-        # boot extras + reserved ports overlaid). Patches, spawn start method,
-        # the CVD quirk, the stage-YAML temp file, and the tokenizer all live
-        # behind this call.
-        intent = config.server_intent(
-            model_config=model_config,
-            ports=ports,
-            extra=self.adapter.boot_kwargs(),
-        )
-        self._backend = VLLMOmniBackend.boot(intent)
+        # Backend (the seam). Grouped-TP participant: skip the boot — the group HEAD's
+        # fat Omni driver drives this GPU; this worker only reserves its slot + colocates.
+        if self._is_tp_participant:
+            logger.info("vllm_omni grouped-TP participant (rank=%s): skipping runtime boot", rank)
+            self._backend = _InertComponent()
+            self._weight_sync = _InertComponent()
+        else:
+            # Booted from the config-spelled intent (adapter boot extras + reserved ports
+            # overlaid). Patches, spawn start method, the CVD pin (to the group's allocated
+            # GPUs for a fat head), the temp grouped-TP stage YAML, and the tokenizer all
+            # live behind this call.
+            intent = config.server_intent(
+                model_config=model_config,
+                ports=ports,
+                extra=self.adapter.boot_kwargs(),
+            )
+            self._backend = VLLMOmniBackend.boot(intent)
 
-        # Weight sync — owns all sync/LoRA state, over the live seam.
-        self._weight_sync = WeightSync(
-            self._backend,
-            uses_lora=bool(getattr(model_config, "use_lora", False)),
-            lora_copy_transport=self.adapter.lora_copy_transport,
-        )
+            # Weight sync — owns all sync/LoRA state, over the live seam.
+            self._weight_sync = WeightSync(
+                self._backend,
+                uses_lora=bool(getattr(model_config, "use_lora", False)),
+                lora_copy_transport=self.adapter.lora_copy_transport,
+            )
 
         # σ schedule policy comes from the adapter; ``ensure_req_sigmas``
         # consumes it in ``generate`` (gated on the adapter's needs_sigmas).
