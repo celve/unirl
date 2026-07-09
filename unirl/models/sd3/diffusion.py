@@ -534,14 +534,30 @@ class SD3DiffusionStage(DiffusionStage[SD3Conditions]):
                 import os as _os
 
                 if _os.path.exists("/tmp/unirl_parity_debug") and log_prob is not None:
+                    import math as _math
+
+                    from unirl.kernels.sd3 import parity_debug_sha as _psha
+
                     _dt = (sigma_next - sigma).reshape(-1)[0]
                     _sv = self.strategy._std_dev_t(
                         sigma=sigma, sigma_next=sigma_next, eta=float(params.eta), sigma_max=sigma_max
                     ) * torch.sqrt(-_dt)
+                    # Reproduce the strategy's per-element logp expression on the
+                    # returned mean (same ops, same order) to compare with the
+                    # engine's pre-reduction tensor.
+                    _prev_f32 = prev_sample.to(dtype=self.trajectory_dtype).float()
+                    _sv_full = _sv if _sv.dim() > 0 else _sv.reshape(1, 1, 1, 1)
+                    _perelem = (
+                        -((_prev_f32.detach() - prev_mean) ** 2) / (2 * _sv_full**2)
+                        - torch.log(_sv_full)
+                        - 0.5 * _math.log(2 * _math.pi)
+                    )
                     print(
                         f"[sd3-parity-dbg] TRAINER-SDE i={step_idx} "
                         f"sigma={float(sigma):.9e}/{float(sigma).hex()} "
                         f"dt={float(_dt):.9e} std_var={float(_sv.reshape(-1)[0]).hex()} "
+                        f"mean={_psha(prev_mean)} perelem={_psha(_perelem)} "
+                        f"prev={_psha(_prev_f32)} "
                         f"logp0={float(log_prob.reshape(-1)[0]).hex()}",
                         flush=True,
                     )

@@ -373,11 +373,15 @@ class FlowMatchSDEDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
             import os as _os
 
             if _os.path.exists("/tmp/unirl_parity_debug"):
+                from unirl.kernels.sd3 import parity_debug_sha as _psha
+
                 _std_var = (std_dev_t * torch.sqrt(-dt)).reshape(-1)[0]
                 print(
                     f"[sd3-parity-dbg] ENGINE-SDE i={int(sigma_idx)} "
                     f"sigma={float(sigma):.9e}/{float(sigma).hex()} "
                     f"dt={float(dt):.9e} std_var={float(_std_var).hex()} "
+                    f"mean={_psha(prev_sample_mean)} perelem={_psha(log_prob_per_elem)} "
+                    f"prev={_psha(prev_sample_for_logp)} "
                     f"logp0={float(log_prob.reshape(-1)[0]).hex()}",
                     flush=True,
                 )
