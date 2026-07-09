@@ -31,6 +31,7 @@ from .base import (
     _resolve_reference_model,
     _transition_sigma,
     gather_sde_field,
+    rollout_replay_logp_absdiff,
     typed_conditions,
 )
 
@@ -43,6 +44,13 @@ class FlowGRPOConfig(BaseAlgorithmConfig):
     clip_schedule: str = "constant"
     beta: float = 0.0
     old_logp_source: str = "rollout"
+    # Shared-kernel parity gate: when set, assert that on the FIRST micro-step
+    # after each rollout, max|new_logp - old_logp| <= tol. Under
+    # old_logp_source='rollout' that first replay runs at pre-update weights
+    # and micro geometry, so the difference IS the rollout-vs-train engine gap
+    # (0.0 = bitwise mode). None (default) disables the assert; the
+    # rollout_replay_logp_absdiff_{mean,max} metrics are emitted regardless.
+    parity_assert_tol: Optional[float] = None
     params: Any = dc_field(default=None)
 
 
@@ -106,6 +114,7 @@ class FlowGRPO(StageAlgorithm):
         clip_schedule: str = "constant",
         beta: float = 0.0,
         old_logp_source: str = "rollout",
+        parity_assert_tol: Optional[float] = None,
         backend: Any = None,
         conditions_cls: Optional[Type[Any]] = None,
     ) -> None:
@@ -125,6 +134,11 @@ class FlowGRPO(StageAlgorithm):
             self.old_logp_source in ("rollout", "replay"),
             f"FlowGRPO: old_logp_source must be 'rollout' or 'replay'; got {old_logp_source!r}",
         )
+        self.parity_assert_tol = None if parity_assert_tol is None else float(parity_assert_tol)
+        # Armed by prepare_segment, consumed by the first compute_loss micro —
+        # that micro replays at pre-update weights and micro geometry, so its
+        # |Δlogp| is exactly the rollout-vs-train engine gap.
+        self._parity_pending = False
         self.conditions_cls = conditions_cls
 
     def prepare_segment(
@@ -160,11 +174,13 @@ class FlowGRPO(StageAlgorithm):
                     "None). Pin a rollout build that emits trajectory log-probs, or set "
                     "old_logp_source='replay'."
                 )
+            self._parity_pending = self.parity_assert_tol is not None
             return
         typed_conds = typed_conditions(conditions, self.conditions_cls)
         with torch.no_grad():
             result = self.stage.replay(typed_conds, segment=segment, params=self.params, step_indices=target_steps)
         segment.sde_logp = result.log_probs.detach().cpu()
+        self._parity_pending = self.parity_assert_tol is not None
 
     def compute_loss_and_backward(
         self,
@@ -205,11 +221,32 @@ class FlowGRPO(StageAlgorithm):
         )
         policy_loss = loss_per_elem.mean()
         loss = policy_loss
+        # Direct rollout↔replay drift gauge. On the first micro after a rollout
+        # (pre-update weights, micro geometry) under old_logp_source='rollout'
+        # this is exactly the engine gap; later micros add genuine policy drift.
+        absdiff_metrics = rollout_replay_logp_absdiff(new_logp.detach(), old_logp)
         metrics: Dict[str, Any] = {
             "policy_loss": float(policy_loss.detach().item()),
             "clip_range": float(clip_range),
             **{k: float(v.item()) for k, v in ratio_metrics.items()},
+            **absdiff_metrics,
         }
+        if self._parity_pending:
+            self._parity_pending = False
+            gap_max = absdiff_metrics["rollout_replay_logp_absdiff_max"]
+            if gap_max > self.parity_assert_tol:
+                per_step = (new_logp.detach() - old_logp).abs().amax(dim=0)
+                detail = ", ".join(
+                    f"step[{int(s)}]={float(g):.3e}" for s, g in zip(target_steps, per_step.tolist())
+                )
+                raise RuntimeError(
+                    f"[sd3-parity] rollout↔replay logp gap {gap_max:.3e} exceeds "
+                    f"parity_assert_tol={self.parity_assert_tol:.1e} on the first micro "
+                    f"(pre-update weights). Per-step max|Δlogp|: {detail}. The shared-"
+                    f"kernel contract is violated — check kernel fingerprints in the "
+                    f"engine/trainer logs, forward geometry (engine batch vs "
+                    f"micro_batch_size), autocast_precision, and weight-sync freshness."
+                )
 
         # Optional reference-policy KL penalty (Flow-GRPO eq.5): pull pi_theta toward
         # pi_ref (LoRA-disabled base model).

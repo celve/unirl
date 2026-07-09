@@ -88,9 +88,11 @@ def rollout_replay_logp_absdiff(new_logp: torch.Tensor, old_logp: torch.Tensor) 
     single on-policy update the two differ only by the rollout-vs-replay *engine*
     gap (a temperature/logprob misconfig, a broken SGLang weight sync, or bf16
     KV-cache-vs-full-forward drift). ``mean|Δlogp|`` reports that gap directly and
-    symmetrically — more legible than the exp-biased ``ratio_mean``. AR-only: the
-    diffusion algorithms self-record or recompute ``old_logp`` with the same
-    model, so their gap is ~0 by construction and they do not emit this metric.
+    symmetrically — more legible than the exp-biased ``ratio_mean``. Emitted by
+    the AR algorithms and by ``FlowGRPO`` (diffusion), where under
+    ``old_logp_source='rollout'`` the first post-rollout micro measures the
+    rollout-vs-train engine gap directly — the quantity the shared-kernel
+    parity mode drives to zero (``FlowGRPO.parity_assert_tol``).
 
     Assumes non-empty inputs, mirroring ``_grpo_clip_loss`` — the AR callers
     early-return on a zero-token segment before this runs.
