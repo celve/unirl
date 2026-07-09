@@ -360,7 +360,13 @@ class FlowMatchSDEDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
             log_prob_per_elem = (
                 -((prev_sample_for_logp.detach() - prev_sample_mean) ** 2) / (2 * ((std_dev_t * torch.sqrt(-dt)) ** 2))
                 - torch.log(std_dev_t * torch.sqrt(-dt))
-                - torch.log(torch.sqrt(2 * torch.as_tensor(math.pi)))
+                # Python-scalar constant, NOT a torch tensor chain: the tensor form
+                # (log(sqrt(2*as_tensor(pi)))) rounds at every fp32 step and lands
+                # 1-2 ulp away from the trainer's `0.5 * math.log(2 * math.pi)`
+                # (sde/kernels.py FlowSDEStrategy.compute_log_prob). The scalar is
+                # rounded once at the subtraction, matching the trainer bitwise —
+                # required for rollout logp ≡ replay logp.
+                - 0.5 * math.log(2 * math.pi)
             )
             # Mean over all non-batch dims → shape [B]
             log_prob: Optional[torch.Tensor] = log_prob_per_elem.mean(dim=tuple(range(1, log_prob_per_elem.ndim)))
