@@ -25,7 +25,7 @@ from __future__ import annotations
 import logging
 import re
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 
@@ -112,15 +112,39 @@ class AgenticTrainer(ARTrainer):
         #    answer-graded here (``<answer>`` -> reward backend), env-sourced in
         #    ``AgenticEnvTrainer`` (ALFWorld etc.).
         rewards, group_ids = self._rewards_and_groups(sample, trajs, rollout_id)
+
+        # 3-6) GROUP-relative advantage -> assign to every turn -> ONE step -> log.
+        return self._advantage_train_and_log(
+            trajs, rewards, group_ids, rollout_id=rollout_id, training_progress=training_progress, t0=t0
+        )
+
+    def _advantage_train_and_log(
+        self,
+        trajs: List[Sample],
+        rewards: torch.Tensor,
+        group_ids: List[str],
+        *,
+        rollout_id: int,
+        training_progress: float,
+        t0: float,
+        extra_metrics: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[TrainStepResult, float]:
+        """GROUP-relative GRPO advantage → assign each trajectory's scalar advantage to ALL
+        its assistant turns → ONE padded ``train_track`` step → log. Shared by the barrier
+        ``train_step`` and the colocate partial-rollout trainer
+        (:class:`~unirl.trainer.agentic_partial.AgenticPartialTrainer`); the reward SOURCE
+        (answer vs env) is already resolved into ``rewards``/``group_ids`` by the caller.
+        ``extra_metrics`` are merged into the logged ``agent/*`` metrics (e.g. the partial
+        trainer's committed/carried/dropped counts)."""
         # A NaN reward marks a crashed trajectory (env bug, not a policy outcome) —
         # excluded from the reported mean and from GRPO (see _group_advantages).
         finite = torch.isfinite(rewards)
         mean_reward = float(rewards[finite].mean().item()) if bool(finite.any()) else 0.0
 
-        # 3) GROUP-relative GRPO advantage over the ``n`` siblings per prompt.
+        # GROUP-relative GRPO advantage over the ``n`` siblings per prompt.
         advantages = self._group_advantages(rewards, group_ids)
 
-        # 5) Assign each trajectory's scalar advantage to ALL its assistant turns; gather.
+        # Assign each trajectory's scalar advantage to ALL its assistant turns; gather.
         train_parts: List[Part] = []
         for i, tr in enumerate(trajs):
             adv_i = float(advantages[i].item())
@@ -139,7 +163,7 @@ class AgenticTrainer(ARTrainer):
             logger.warning("AgenticTrainer rollout %d produced no trainable turns.", rollout_id)
             return TrainStepResult(0.0, 0.0, 0.0, False, [], {}), mean_reward
 
-        # 6) ONE training Part -> pad to a DP multiple (zero-advantage rows) -> ONE step.
+        # ONE training Part -> pad to a DP multiple (zero-advantage rows) -> ONE step.
         train_part = Part.concat(train_parts)
         train_part = self._pad_to_dp_multiple(train_part)
         result = self.stack.train_track(train_part, training_progress=float(training_progress))
@@ -148,17 +172,20 @@ class AgenticTrainer(ARTrainer):
         # advantage (compute_rollout_sample_metrics reads gen_parts). Built from the
         # computed tensors so it is independent of the reward SOURCE (answer vs env).
         log_sample = self._build_log_sample(trajs, rewards, advantages, rollout_id)
+        metrics: Dict[str, Any] = {
+            "agent/mean_turns": (sum(depths) / len(depths)) if depths else 0.0,
+            "agent/max_turns": max(depths) if depths else 0,
+            "agent/genless_trajectories": sum(1 for d in depths if d == 0),
+            "agent/train_rows": int(train_part.batch_size),
+        }
+        if extra_metrics:
+            metrics.update(extra_metrics)
         self.wandb_logger.log_rollout_step(
             rollout_id,
             result,
             log_sample,
             step_time_s=time.perf_counter() - t0,
-            extra_metrics={
-                "agent/mean_turns": (sum(depths) / len(depths)) if depths else 0.0,
-                "agent/max_turns": max(depths) if depths else 0,
-                "agent/genless_trajectories": sum(1 for d in depths if d == 0),
-                "agent/train_rows": int(train_part.batch_size),
-            },
+            extra_metrics=metrics,
         )
         return result, mean_reward
 
