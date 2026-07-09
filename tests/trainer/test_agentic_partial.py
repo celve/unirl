@@ -43,6 +43,7 @@ class _FakeRollout:
 
     def submit(self, tasks):
         self.submitted.append(tasks)
+        self._drained.insert(0, False)  # a fresh drive is active → not drained until it delivers
 
     def abort(self):
         return [[]]
