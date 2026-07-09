@@ -96,6 +96,12 @@ class SD3Bundle(Bundle):
             # drains after the weight load.
             from accelerate import init_empty_weights
 
+            if config.shared_kernels:
+                raise ValueError(
+                    "SD3PipelineConfig.shared_kernels requires the eager load path "
+                    "(meta_init_transformer must be False): the parity install reads "
+                    "real weights/buffers at construction time."
+                )
             transformer_config = SD3Transformer2DModel.load_config(path, subfolder="transformer")
             with init_empty_weights(include_buffers=False):
                 transformer = SD3Transformer2DModel.from_config(transformer_config)
@@ -107,6 +113,14 @@ class SD3Bundle(Bundle):
             transformer = SD3Transformer2DModel.from_pretrained(path, subfolder="transformer", torch_dtype=dtype).to(
                 device
             )
+            if config.shared_kernels:
+                # Engine-parity numerics (attention processor + fp32 pos_embed);
+                # must run BEFORE LoRA injection / FSDP wrap — parameter-free,
+                # state-dict keys unchanged. Worker-side counterpart:
+                # rollout/engine/vllm_omni/patches/runtime.py::patch_sd3_shared_kernels.
+                from unirl.models.sd3.parity import install_shared_kernels
+
+                install_shared_kernels(transformer)
 
         vae = AutoencoderKL.from_pretrained(path, subfolder="vae", torch_dtype=vae_dtype).to(device).eval()
         vae.requires_grad_(False)

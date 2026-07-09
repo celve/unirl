@@ -67,6 +67,24 @@ class SD3PipelineConfig:
     # sharding. FSDPBackend recipes leave this False (eager load).
     meta_init_transformer: bool = False
 
+    # ------------------------------------------------------------------
+    # Shared-kernel parity mode (rollout↔train numerics unification).
+    #
+    # ``shared_kernels`` installs the engine-parity attention processor +
+    # canonical fp32 pos_embed on the trainer transformer (see
+    # ``models/sd3/parity.py``); the vLLM-Omni worker installs the SAME
+    # kernels via ``patch_sd3_shared_kernels`` when the engine config sets
+    # ``parity_mode``, making the two forwards bitwise-identical on the
+    # same GPU. Eager load path only (asserted in the bundle).
+    #
+    # ``timestep_in_model_dtype`` casts the DiT timestep input
+    # (``sigma*1000``) to the transformer's param dtype before the
+    # sinusoidal embedding — matching vLLM-Omni's
+    # ``t.expand(B).to(dtype=latents.dtype)`` (pipeline_sd3.py). Gated
+    # separately because it perturbs numerics for every existing recipe.
+    shared_kernels: bool = False
+    timestep_in_model_dtype: bool = False
+
     def __post_init__(self) -> None:
         validate_precision_type(self.model_precision, field="SD3PipelineConfig.model_precision")
 

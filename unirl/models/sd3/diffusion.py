@@ -47,6 +47,14 @@ class SD3DiffusionStep(DiffusionStep[SD3Bundle, SD3Conditions]):
     lower-level escape hatch that takes a precomputed ``noise_pred``.
     """
 
+    def __init__(self, *, timestep_in_model_dtype: bool = False) -> None:
+        # Engine-parity knob (config.timestep_in_model_dtype): vLLM-Omni feeds
+        # the DiT a timestep already cast to the model dtype
+        # (``t.expand(B).to(dtype=latents.dtype)`` in pipeline_sd3.diffuse), so
+        # the sinusoidal embedding sees the bf16-rounded value. Default False
+        # preserves the historical fp32 timestep for existing recipes.
+        self.timestep_in_model_dtype = bool(timestep_in_model_dtype)
+
     def predict_noise(
         self,
         model: SD3Bundle,
@@ -97,6 +105,11 @@ class SD3DiffusionStep(DiffusionStep[SD3Bundle, SD3Conditions]):
             timestep = timestep.expand(batch_size)
         elif timestep.shape[0] != batch_size:
             timestep = timestep.expand(batch_size)
+        if self.timestep_in_model_dtype:
+            # Engine parity: match vLLM-Omni's bf16-rounded timestep input
+            # (see SD3DiffusionStep.__init__). The diffusers embedding
+            # upcasts internally, so only the VALUE rounding changes.
+            timestep = timestep.to(dtype=model_dtype)
 
         if guidance_scale > 1.0:
             neg = conditions.negative_text
