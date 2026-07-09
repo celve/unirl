@@ -1,0 +1,175 @@
+# @package _global_
+# SD3.5-medium + vLLM-Omni rollout — SHARED-KERNEL PARITY demo (Phase A, full-weight).
+#
+# Goal: rollout logπ ≡ trainer replay logπ, bitwise on the same GPU. Derived from
+# sd3_vllmomni.yaml; every divergence is a parity seam closure:
+#   - bundle.config.shared_kernels: trainer installs the engine-parity attention
+#     processor + canonical fp32 pos_embed (models/sd3/parity.py).
+#   - rollout.config.parity_mode: worker installs the SAME kernels
+#     (patches/runtime.py::patch_sd3_shared_kernels) and the SD3 adapter goes
+#     UNGROUPED (one request per sample, num_outputs_per_prompt=1) so the engine
+#     forward batch is [1, ...] — identical to micro_batch_size=1 replay geometry.
+#   - pipeline.autocast_precision: fp32 → autocast DISABLED; the trainer replays
+#     in pure bf16 exactly like the engine (autocast would promote LayerNorm and
+#     elementwise modulation to fp32 — a whole-block numerics divergence).
+#   - pipeline.timestep_in_model_dtype: the engine feeds the DiT a bf16-cast
+#     timestep (pipeline_sd3.diffuse); match it.
+#   - FULL-WEIGHT training (no lora_cfg) + raw IPCWeightSync (lora_merged: false):
+#     merged-LoRA sync is inherently non-bitwise ((W+BA)x vs Wx+BAx); the LoRA
+#     parity variant is sd3_vllmomni_parity_lora.yaml (Phase B).
+#   - algorithm.parity_assert_tol: 0.0 — the run CRASHES with a per-step |Δlogp|
+#     breakdown if the very first post-rollout micro is not bitwise on-policy.
+#     Relax to e.g. 1e-6 on heterogeneous GPUs, or null to observe only.
+#
+# Probe mode (gate G4): num_devices=1 batch_size=2 sampling.samples_per_prompt=2
+# sampling.num_inference_steps=4 — one tiny rollout hits the assert in minutes.
+
+num_devices: 8
+batch_size: 16 # prompts_per_rollout (ungrouped rollouts are batch-1: keep the sample count moderate)
+adv_use_global_std: true
+
+weight_sync_interval: 1
+
+logging:
+  report_to_wandb: false        # flip to true for the demo runs (G5-G7)
+  project_name: unirl
+  run_name: sd3-parity-full
+  entity: null
+  tags: [sd3, parity, shared-kernels]
+
+bundle:
+  _target_: unirl.models.sd3.bundle.SD3Bundle.from_config
+  config:
+    _target_: unirl.models.sd3.config.SD3PipelineConfig
+    pretrained_model_ckpt_path: ${oc.env:PRETRAINED_MODEL,stabilityai/stable-diffusion-3.5-medium}
+    model_precision: bf16
+    shift: 3.0
+    # Parity seam 1/2: engine-parity attention/qk-norm/pos_embed on the trainer.
+    shared_kernels: true
+    timestep_in_model_dtype: true
+
+pipeline:
+  _target_: unirl.models.sd3.pipeline.SD3Pipeline
+  shift: 3.0
+  # Parity seam 3: NO autocast — pure-bf16 forward like the engine. fp32 here
+  # means "not a fp16/bf16 autocast dtype" → SD3DiffusionStage builds a
+  # nullcontext for both diffuse and replay.
+  autocast_precision: fp32
+  trajectory_precision: bf16
+  logprob_precision: fp32
+  # Parity seam 4: bf16 timestep into the sinusoidal embedding (engine parity).
+  timestep_in_model_dtype: true
+  strategy:
+    _target_: unirl.sde.kernels.FlowSDEStrategy
+
+backend:
+  _target_: unirl.train.backend.fsdp.FSDPBackend
+  block_class_names: ["JointTransformerBlock"]
+  trainable_attr: transformer
+  fsdp_cfg:
+    _target_: unirl.train.configs.FSDPConfig
+    param_dtype: bf16
+    cpu_offload: false
+    mixed_precision: true
+    fsdp_mode: full
+    reshard_after_forward: false
+    activation_checkpointing: false
+    use_torch_compile: false     # compile would fuse away the shared-kernel graph
+  optimizer_cfg:
+    _target_: unirl.train.backend.base.OptimizerConfig
+    # Full-weight finetune (no LoRA): 3e-4 is the LoRA LR — far too hot for
+    # 2.5B full-parameter updates. 1e-5 keeps the G7 mini-run stable.
+    learning_rate: 1.0e-5
+    adam_beta1: 0.9
+    adam_beta2: 0.999
+    adam_epsilon: 1.0e-8
+    weight_decay: 0.0
+  scheduler_cfg:
+    _target_: unirl.train.backend.base.LrSchedulerConfig
+    type: constant
+    warmup_steps: 0
+    total_steps: 10000
+  # NO lora_cfg: genuine full-weight training (Phase A removes every LoRA seam).
+
+rollout:
+  _target_: unirl.rollout.engine.vllm_omni.engine.VLLMOmniRolloutEngine
+  model_config: ${bundle.config}
+  config:
+    _target_: unirl.rollout.engine.vllm_omni.config.VLLMOmniEngineConfig
+    model_path: ${oc.env:PRETRAINED_MODEL,stabilityai/stable-diffusion-3.5-medium}
+    modality: sd3_t2i
+    enable_sleep_mode: true
+    # Parity seams 5/6: shared kernels in every worker child + ungrouped
+    # (batch-1) requests. Sets UNIRL_VLLM_OMNI_PARITY=1 at boot.
+    parity_mode: true
+
+reward:
+  _target_: unirl.reward.service.RewardService
+  backend:
+    _target_: unirl.reward.local.pickscore.PickScoreRewardScorer
+    base_device: cuda
+    config:
+      _target_: unirl.reward.local.pickscore.PickScoreSpec
+      batch_size: 8
+      device: auto
+      processor_id: laion/CLIP-ViT-H-14-laion2B-s32B-b79K
+      model_id: yuvalkirstain/PickScore_v1
+
+algorithm:
+  _target_: unirl.algorithms.flowgrpo.FlowGRPO
+  stage_attr: diffusion
+  clip_range: 1.0e-4
+  clip_schedule: constant
+  # Explicit (it's the default): the anchor is the ENGINE's emitted logp, so
+  # the first-micro |Δlogp| measures the rollout-vs-train gap directly.
+  old_logp_source: rollout
+  # Bitwise gate: crash loudly (with a per-step breakdown) on any gap.
+  parity_assert_tol: 0.0
+  conditions_cls:
+    _target_: hydra.utils.get_class
+    path: unirl.models.sd3.conditions.SD3Conditions
+  params: ${sampling}
+
+stack:
+  _target_: unirl.train.stack.TrainStack
+  # Parity seam 6 (trainer half): replay geometry = engine forward geometry = 1.
+  micro_batch_size: 1
+  max_grad_norm: 1.0
+  num_updates_per_batch: 1
+
+data_source:
+  _target_: unirl.data.data_source.MultimodalRLDataSource
+  args:
+    run:
+      data_path: datasets/pickscore/train.txt
+      eval_data_path: datasets/pickscore/test.txt
+      seed: 42
+    algorithm:
+      prompts_per_rollout: ${batch_size}
+
+sampling:
+  _target_: unirl.types.sampling.DiffusionSamplingParams
+  num_inference_steps: 10
+  guidance_scale: 1.0    # CFG off — one branch on both sides (the validated setting)
+  height: 512
+  width: 512
+  eta: 0.7
+  samples_per_prompt: 8
+  seed: 42
+  init_same_noise: false
+  scheduler:
+    _target_: unirl.utils.scheduler_utils.AllSDEScheduler
+    num_timesteps: ${..num_inference_steps}
+    num_sde_steps: 3
+    timestep_fraction: [0, 0.5]
+
+# Raw full-weight sync (bucketed CUDA-IPC, colocate). lora_merged stays false:
+# there is no LoRA, and the raw path ships the exact bf16 compute weights the
+# trainer replays with — the engine then holds bit-identical parameters.
+sync:
+  _target_: unirl.distributed.weight_sync.full.ipc.IPCWeightSync
+  lora_merged: false
+  bucket_size_mb: 2048
+  use_shm: false
+  flush_cache: true
+  name_remap: {"*": "transformer.*"}
