@@ -296,9 +296,13 @@ class FlowMatchSDEDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
         model_output_f32 = model_output.to(torch.float32)
 
         sigma_idx = self.step_index
-        sigma = self.sigmas[sigma_idx]
-        sigma_prev = self.sigmas[sigma_idx + 1]
-        sigma_max = self.sigmas[1]
+        # Device-pin BEFORE the rank change: a 0-dim CPU sigma against CUDA
+        # samples used to slip through via scalar lifting (the very path the
+        # rank fix below removes); a [1,1,1,1] CPU tensor correctly refuses.
+        # self.sigmas can be CPU in the engine's dummy/warmup run.
+        sigma = self.sigmas[sigma_idx].to(device=sample_f32.device)
+        sigma_prev = self.sigmas[sigma_idx + 1].to(device=sample_f32.device)
+        sigma_max = self.sigmas[1].to(device=sample_f32.device)
         # Broadcast-shape parity with the trainer (unirl.sde.kernels
         # StepStrategy.denoise unsqueezes σ to sample rank BEFORE the math).
         # A 0-dim σ here routes elementwise ops through PyTorch's
