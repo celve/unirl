@@ -370,6 +370,17 @@ class FlowMatchSDEDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
             )
             # Mean over all non-batch dims → shape [B]
             log_prob: Optional[torch.Tensor] = log_prob_per_elem.mean(dim=tuple(range(1, log_prob_per_elem.ndim)))
+            import os as _os
+
+            if _os.path.exists("/tmp/unirl_parity_debug"):
+                _std_var = (std_dev_t * torch.sqrt(-dt)).reshape(-1)[0]
+                print(
+                    f"[sd3-parity-dbg] ENGINE-SDE i={int(sigma_idx)} "
+                    f"sigma={float(sigma):.9e}/{float(sigma).hex()} "
+                    f"dt={float(dt):.9e} std_var={float(_std_var).hex()} "
+                    f"logp0={float(log_prob.reshape(-1)[0]).hex()}",
+                    flush=True,
+                )
         else:
             # Pure Euler ODE step. CRITICAL: do NOT use the SDE-form mean
             # (the ``+ std_dev_t² / (2σ) * dt`` corrections) here, even

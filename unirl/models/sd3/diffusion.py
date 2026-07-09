@@ -531,6 +531,20 @@ class SD3DiffusionStage(DiffusionStage[SD3Conditions]):
                     sigma_max=sigma_max,
                     step_index=step_idx,
                 )
+                import os as _os
+
+                if _os.path.exists("/tmp/unirl_parity_debug") and log_prob is not None:
+                    _dt = (sigma_next - sigma).reshape(-1)[0]
+                    _sv = self.strategy._std_dev_t(
+                        sigma=sigma, sigma_next=sigma_next, eta=float(params.eta), sigma_max=sigma_max
+                    ) * torch.sqrt(-_dt)
+                    print(
+                        f"[sd3-parity-dbg] TRAINER-SDE i={step_idx} "
+                        f"sigma={float(sigma):.9e}/{float(sigma).hex()} "
+                        f"dt={float(_dt):.9e} std_var={float(_sv.reshape(-1)[0]).hex()} "
+                        f"logp0={float(log_prob.reshape(-1)[0]).hex()}",
+                        flush=True,
+                    )
                 if log_prob is None:
                     raise RuntimeError(
                         f"SD3DiffusionStage.replay: strategy returned None log-prob "
