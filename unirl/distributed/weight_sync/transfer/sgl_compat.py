@@ -281,6 +281,12 @@ class SafeUnpickler(pickle.Unpickler):
         "huggingface_hub.",
         # --- unirl (vendored reductions + tensor bucket live here) ---
         "unirl.",
+        # --- sglang (NATIVE serializer path): TensorWeightSync serializes buckets with
+        # sglang's own MultiprocessingSerializer + FlattenedTensorBucket (8aca5b5), whose
+        # payloads reference sglang.srt.* rebuild helpers. sglang's OWN SafeUnpickler
+        # allowlists these; the omni receiver deserializes through THIS unpickler, so it
+        # must allow them too (dangerous classes stay caught by DENY_CLASSES below).
+        "sglang.",
     }
 
     DENY_CLASSES = {
