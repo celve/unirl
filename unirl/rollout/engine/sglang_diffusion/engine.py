@@ -47,6 +47,30 @@ _OFFLOAD_TAGS = ("transformer", "vae", "text_encoder")
 _CPU_BACKUP_TAGS = ("vae", "text_encoder")
 
 
+class _InertComponent:
+    """No-op stand-in for a grouped-TP participant's ``backend`` / ``weight_sync``.
+
+    A fat-driver participant boots no runtime — its GPU is driven by the group HEAD's
+    fat driver — but the ``Handle`` still registers the role on it and broadcasts
+    lifecycle / weight verbs to it (``sleep``/``wake_up``/``update_weights_*``/…). Every
+    such verb must be a harmless no-op. ``ping``/``lora_dirty``/``loaded_param_checksums``
+    return benign defaults; all other verbs (release/resume memory, shutdown,
+    update_weights_*, set_lora, mark_weights_released, init/destroy group) no-op.
+    ``generate`` is never reached — it is routed to the head via ``Execute.DP_HEAD``.
+    """
+
+    lora_dirty = False
+
+    def ping(self) -> bool:
+        return True
+
+    def loaded_param_checksums(self, **kwargs: Any) -> Dict[int, List[Dict[str, str]]]:
+        return {}
+
+    def __getattr__(self, name: str):
+        return lambda *args, **kwargs: None
+
+
 class SGLangDiffusionRolloutEngine(BaseRolloutEngine):
     """Rollout engine backed by ``sglang.multimodal_gen.DiffGenerator`` (v2 layout)."""
 
@@ -104,8 +128,8 @@ class SGLangDiffusionRolloutEngine(BaseRolloutEngine):
         # fat driver drives this GPU; this worker only reserves its slot + colocates.
         if self._is_tp_participant:
             logger.info("sglang_diffusion grouped-TP participant (rank=%s): skipping runtime boot", rank)
-            self._backend = None
-            self._weight_sync = None
+            self._backend = _InertComponent()
+            self._weight_sync = _InertComponent()
         else:
             # Grouped-TP head (or plain single-GPU). For a fat group the controller
             # (Handle._assign_tp_coords) handed this driver the group's DevicePool-

@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Optional, Union
 
 import torch
 
-from unirl.distributed.group.dispatch import Dispatch, distributed
+from unirl.distributed.group.dispatch import Dispatch, Execute, distributed
 from unirl.distributed.group.remote import Remote
 from unirl.types.sample import Sample
 
@@ -177,9 +177,15 @@ class BaseRolloutEngine(Remote, ABC):
         groups = await asyncio.gather(*(self.agenerate(g) for g in sample.split()))
         return Sample.concat(groups)
 
-    @distributed(dispatch_mode=Dispatch.DP_SCATTER)
+    @distributed(dispatch_mode=Dispatch.DP_SCATTER, execute_mode=Execute.DP_HEAD)
     def generate(self, sample: Sample) -> RolloutOutput:
         """Synchronous batch façade — the entry trainers call.
+
+        ``DP_SCATTER`` shards the batch by ``dp_size``; ``DP_HEAD`` runs the shard on
+        the group head only. At ``tp==1`` every rank is a head, so this is identical to
+        the historical execute-all path; at ``tp>1`` (grouped-TP rollout) only each
+        group's head generates — its participant ranks / co-located fat driver do the
+        actual parallel work — and ``_collect_dp_merge`` keeps the head results.
 
         Single-turn engines return a single ``Sample``: split the batch into
         prompt-groups, run them concurrently on the engine loop via
