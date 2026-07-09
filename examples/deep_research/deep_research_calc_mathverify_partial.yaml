@@ -23,9 +23,10 @@ oversample_batch_size: 6 # generate 6 prompt-groups/drive; commit the freshest 4
 buffer_max_staleness: 1 # a buffered/carried group may cross up to 1 weight sync before eviction
 tail_policy: carry # ToolEnvironment resumes a carried partial (history-preserving)
 
-# rank-0 coordinator runs the background drain + serves next_task pulls + poll/abort/drained control
-# RPCs concurrently on a threaded Worker — needs >=3.
-worker_max_concurrency: 8
+# Colocate partial oversubscribes rank 0: its own run_drain + every worker's next_task pull +
+# the poll→drain_completed fan + submit/abort/sync all ride these threaded-actor slots. Give it
+# generous headroom (barrier only needs 8 because it never poll-fans).
+worker_max_concurrency: 24
 
 stop: ["</tool_call>"]
 adv_normalization_scope: group

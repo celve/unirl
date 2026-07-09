@@ -23,7 +23,10 @@ oversample_batch_size: 12 # generate 12 games/drive; commit the fastest 8 → 4 
 buffer_max_staleness: 2 # a buffered group may cross up to 2 weight syncs before eviction
 tail_policy: drop # ALFWorld reset starts a fresh episode → a carried partial restarts, so DROP it
 
-worker_max_concurrency: 8
+# Colocate partial oversubscribes rank 0: its own run_drain + every worker's next_task pull +
+# the poll→drain_completed fan + submit/abort/sync all ride these threaded-actor slots. Give it
+# generous headroom (barrier only needs 8 because it never poll-fans).
+worker_max_concurrency: 24
 stop: null # ALFWorld actions are free text; rely on per-turn max_new_tokens
 adv_normalization_scope: group
 normalize_adv_by_std: true

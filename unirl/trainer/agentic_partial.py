@@ -44,7 +44,12 @@ logger = logging.getLogger(__name__)
 class AgenticPartialTrainer(AgenticTrainer):
     """Colocate partial-rollout trainer (over-sample → commit-N → abort tail → carry/drop)."""
 
-    _POLL_INTERVAL_S = 0.02  # backoff between polls while the in-flight drive fills the buffer
+    # Backoff between polls while the in-flight drive fills the buffer. Larger than the async
+    # trainer's 0.02 because the colocate coordinator (rank 0) also serves every worker's
+    # next_task pulls out of the same threaded-actor slots as its own run_drain — a tight
+    # poll→drain_completed fan there starves those slots (RPC ActorUnavailable). 0.1 keeps the
+    # fan gentle; pair with a larger worker_max_concurrency in the recipe.
+    _POLL_INTERVAL_S = 0.1
     _MAX_REFILLS = 64  # underflow guard: refills of a drained-but-short buffer before giving up
 
     def __init__(
