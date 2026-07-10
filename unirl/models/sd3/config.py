@@ -84,6 +84,14 @@ class SD3PipelineConfig:
     # separately because it perturbs numerics for every existing recipe.
     shared_kernels: bool = False
     timestep_in_model_dtype: bool = False
+    # Grouped-parity replay: the engine's grouped forward runs [G, ...] latents
+    # against ONE [1, L, D] text row (AdaLN broadcasts it). When true, replay
+    # micros whose condition rows are all identical (a noise group; requires
+    # micro_batch_size == samples_per_prompt) are forwarded with the single
+    # de-duplicated text row so the trainer reproduces the engine's broadcast
+    # geometry bit-for-bit at full grouped throughput. Pair with the engine's
+    # ``parity_ungrouped: false``.
+    group_broadcast_conditions: bool = False
 
     def __post_init__(self) -> None:
         validate_precision_type(self.model_precision, field="SD3PipelineConfig.model_precision")

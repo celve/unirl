@@ -47,13 +47,23 @@ class SD3DiffusionStep(DiffusionStep[SD3Bundle, SD3Conditions]):
     lower-level escape hatch that takes a precomputed ``noise_pred``.
     """
 
-    def __init__(self, *, timestep_in_model_dtype: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        timestep_in_model_dtype: bool = False,
+        group_broadcast_conditions: bool = False,
+    ) -> None:
         # Engine-parity knob (config.timestep_in_model_dtype): vLLM-Omni feeds
         # the DiT a timestep already cast to the model dtype
         # (``t.expand(B).to(dtype=latents.dtype)`` in pipeline_sd3.diffuse), so
         # the sinusoidal embedding sees the bf16-rounded value. Default False
         # preserves the historical fp32 timestep for existing recipes.
         self.timestep_in_model_dtype = bool(timestep_in_model_dtype)
+        # Grouped-parity knob (config.group_broadcast_conditions): forward a
+        # noise group's identical condition rows as ONE [1, L, D] row so the
+        # transformer AdaLN-broadcasts it against the [G, ...] latents —
+        # exactly the engine's grouped request shape.
+        self.group_broadcast_conditions = bool(group_broadcast_conditions)
 
     def predict_noise(
         self,
@@ -98,6 +108,28 @@ class SD3DiffusionStep(DiffusionStep[SD3Bundle, SD3Conditions]):
         prompt_embeds = prompt_embeds.to(dtype=model_dtype)
         if pooled_prompt_embeds is not None:
             pooled_prompt_embeds = pooled_prompt_embeds.to(dtype=model_dtype)
+
+        if self.group_broadcast_conditions and sample.shape[0] > 1 and prompt_embeds.shape[0] == sample.shape[0]:
+            if guidance_scale > 1.0:
+                raise RuntimeError(
+                    "group_broadcast_conditions with CFG (guidance_scale > 1) is "
+                    "unvalidated — the engine's grouped CFG geometry is not the "
+                    "trainer's batch-doubled one. Run guidance_scale <= 1."
+                )
+            # Grouped-parity: a replay micro is one noise group — every row
+            # shares one prompt. Collapse to a single context row so the
+            # transformer AdaLN-broadcasts it against the [G, ...] latents,
+            # exactly the engine's grouped-request forward. Bitwise guard:
+            # the rows must be exact repeats of the engine's text capture.
+            if not torch.equal(prompt_embeds, prompt_embeds[0:1].expand_as(prompt_embeds)):
+                raise RuntimeError(
+                    "group_broadcast_conditions: micro contains non-identical text "
+                    "rows — micro_batch_size must equal samples_per_prompt so each "
+                    "micro is exactly one noise group."
+                )
+            prompt_embeds = prompt_embeds[0:1]
+            if pooled_prompt_embeds is not None:
+                pooled_prompt_embeds = pooled_prompt_embeds[0:1]
 
         batch_size = sample.shape[0]
         timestep = sigma * 1000.0

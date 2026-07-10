@@ -75,6 +75,7 @@ class SD3Pipeline(Pipeline):
         logprob_precision: str = "fp32",
         batch_replay_steps: bool = False,
         timestep_in_model_dtype: bool = False,
+        group_broadcast_conditions: bool = False,
     ) -> None:
         super().__init__()
         self.bundle = bundle
@@ -82,7 +83,10 @@ class SD3Pipeline(Pipeline):
         if diffusion is None:
             diffusion = SD3DiffusionStage(
                 model=bundle,
-                step=SD3DiffusionStep(timestep_in_model_dtype=timestep_in_model_dtype),
+                step=SD3DiffusionStep(
+                    timestep_in_model_dtype=timestep_in_model_dtype,
+                    group_broadcast_conditions=group_broadcast_conditions,
+                ),
                 strategy=strategy if strategy is not None else CPSSDEStrategy(),
                 autocast_precision=autocast_precision,
                 trajectory_precision=trajectory_precision,
@@ -130,6 +134,7 @@ class SD3Pipeline(Pipeline):
             logprob_precision=config.logprob_precision,
             batch_replay_steps=config.batch_replay_steps,
             timestep_in_model_dtype=config.timestep_in_model_dtype,
+            group_broadcast_conditions=config.group_broadcast_conditions,
         )
 
     def build_conditions(

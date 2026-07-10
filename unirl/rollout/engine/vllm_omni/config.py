@@ -74,14 +74,23 @@ class VLLMOmniEngineConfig(BaseEngineConfig):
 
     # Shared-kernel parity mode (rollout↔train numerics unification, SD3).
     # Boot sets ``UNIRL_VLLM_OMNI_PARITY=1`` before spawning workers, which
-    # (a) installs the shared attention/qk-norm kernels in every worker child
-    # (``patches/runtime.py::patch_sd3_shared_kernels``), (b) switches the
-    # SD3 adapter to UNGROUPED requests (one request per sample,
-    # ``num_outputs_per_prompt=1``) so the engine's DiT forward geometry
-    # matches the trainer's ``micro_batch_size=1`` replay, and (c) makes the
-    # RL pipeline canonicalize the fp32 pos_embed buffer. Pair with the
+    # installs the shared attention/qk-norm kernels in every worker child
+    # (``patches/runtime.py::patch_sd3_shared_kernels``). Pair with the
     # trainer-side ``model.shared_kernels: true`` recipe flag.
     parity_mode: bool = False
+
+    # Geometry flavor under parity_mode:
+    # - True (Phase A default): UNGROUPED requests — one request per sample,
+    #   ``num_outputs_per_prompt=1``; engine forward batch [1, ...] matches the
+    #   trainer's ``micro_batch_size=1`` replay. Simple, ~+36%/sample generate.
+    # - False (grouped parity): keep the engine's native grouped requests
+    #   (one request per prompt, forward batch [spp, ...] with ONE broadcast
+    #   [1, L, D] text row). The trainer must then replay at the group
+    #   geometry: ``micro_batch_size == samples_per_prompt`` AND
+    #   ``group_broadcast_conditions: true`` on the SD3 pipeline config, which
+    #   reproduces the engine's AdaLN broadcast bit-for-bit at full grouped
+    #   throughput.
+    parity_ungrouped: bool = True
 
     # Passthrough for advanced ``Omni`` kwargs not surfaced as typed fields.
     omni_extra: Dict[str, Any] = field(default_factory=dict)
@@ -132,6 +141,7 @@ class VLLMOmniEngineConfig(BaseEngineConfig):
             "enable_sleep_mode": bool(self.enable_sleep_mode),
             "ports": ports,
             "parity_mode": bool(self.parity_mode),
+            "parity_ungrouped": bool(self.parity_ungrouped),
         }
         # Adapter boot extras: stage_yaml / stage_yaml_source /
         # needs_driver_tokenizer / clear_cuda_visible.

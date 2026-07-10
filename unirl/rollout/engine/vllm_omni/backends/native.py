@@ -187,9 +187,12 @@ class VLLMOmniBackend:
         # 0. Parity env BEFORE the patch install and any spawn: the hijack's
         #    patch_sd3_shared_kernels gates on it in this process AND in every
         #    spawn child (children inherit os.environ), and the driver-side
-        #    SD3 adapter reads it to switch to ungrouped requests.
+        #    SD3 adapter reads the UNGROUPED flag to pick the request geometry.
         if intent.get("parity_mode"):
             os.environ["UNIRL_VLLM_OMNI_PARITY"] = "1"
+            os.environ["UNIRL_VLLM_OMNI_PARITY_UNGROUPED"] = (
+                "1" if intent.get("parity_ungrouped", True) else "0"
+            )
 
         # 1. Patches first: install() wraps mp.Process so spawn children
         #    re-run the hijack at startup — the primary mechanism for
