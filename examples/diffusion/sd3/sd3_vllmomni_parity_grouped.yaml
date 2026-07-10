@@ -60,7 +60,11 @@ backend:
     mixed_precision: true
     fsdp_mode: full
     reshard_after_forward: false
-    activation_checkpointing: false
+    # Grouped replay holds micro=8 x num-SDE-step autograd graphs at once
+    # (~78 GB without AC on an H20 alongside the colocated engine). AC
+    # recomputes deterministically with the same shared kernels, so the
+    # bitwise gate is unaffected; only train_time pays (~+30%).
+    activation_checkpointing: true
     use_torch_compile: false
   optimizer_cfg:
     _target_: unirl.train.backend.base.OptimizerConfig
