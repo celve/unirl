@@ -952,6 +952,19 @@ def patch_wan22_shared_kernels() -> None:
                     _hook_handles.append(self.condition_embedder.register_forward_hook(_mk("condition_embedder")))
                     for _bi, _blk in enumerate(self.blocks):
                         _hook_handles.append(_blk.register_forward_hook(_mk(f"block{_bi:02d}")))
+                if _wan_logged["count"] < 26 and _os3.path.exists("/tmp/unirl_parity_debug"):
+                    from unirl.kernels.sd3 import parity_debug_sha as _tsha
+
+                    _cn = _wan_logged["count"]
+
+                    def _temb_trace(_m, _i, o, _cn=_cn):
+                        print(
+                            "[wan22-temb-trace] ENGINE call=%d t=%.6f temb=%s"
+                            % (_cn, float(ts.reshape(-1)[0]) if ts is not None else -1.0, _tsha(o[0])),
+                            flush=True,
+                        )
+
+                    _hook_handles.append(self.condition_embedder.register_forward_hook(_temb_trace))
                 try:
                     out = _orig(self, *args, **kwargs)
                 finally:
