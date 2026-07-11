@@ -156,6 +156,33 @@ def main() -> None:
     cmp("flagOFF(e) vs ENGINE temb", f_e[0][:1], e_cond[0][:1])
     cmp("flagOFF(t) vs TRAINER temb", f_t[0][:1], t_cond[0][:1])
 
+    for side in ("engine", "trainer"):
+        wpath = os.path.join(args.dumps, f"{side}_cond_w.pt")
+        if os.path.exists(wpath):
+            wd = torch.load(wpath, map_location="cpu")
+            print(f"== in-vivo weights vs checkpoint: {side} ==")
+            from safetensors import safe_open as _so
+
+            sub = os.path.join(args.model, "transformer")
+            with open(os.path.join(sub, "diffusion_pytorch_model.safetensors.index.json")) as f:
+                wm = json.load(f)["weight_map"]
+            for tag, key in (
+                ("time_l1", "condition_embedder.time_embedder.linear_1.weight"),
+                ("text_l1", "condition_embedder.text_embedder.linear_1.weight"),
+            ):
+                with _so(os.path.join(sub, wm[key]), framework="pt", device="cpu") as f:
+                    ck_t = f.get_tensor(key)
+                iv = wd[tag]
+                print(f"  {tag}: in-vivo dtype={iv.dtype}")
+                if iv.dtype != ck_t.dtype:
+                    rt = iv.to(ck_t.dtype)
+                    print(
+                        f"    dtype≠ckpt({ck_t.dtype}); round-trip-equal={torch.equal(rt, ck_t)} "
+                        f"(True ⇒ lossless upcast of checkpoint)"
+                    )
+                else:
+                    cmp(f"{tag} vs ckpt", iv, ck_t)
+
     print("== in-vivo weight check: clean linear_1(w) vs dumps? (indirect) ==")
     # If neither clean variant matches a side, that side's WEIGHTS differed in
     # vivo (sync/FSDP effect) — report sinusoid determinism to close the loop.
