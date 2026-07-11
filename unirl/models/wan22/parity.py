@@ -210,6 +210,21 @@ def _engine_order_block_forward(
     return hidden_states
 
 
+def _engine_order_patch_embed_forward(self, x: torch.Tensor) -> torch.Tensor:
+    """vllm ``Conv3dLayer._forward_mulmat`` — the engine's patchify on
+    torch>=2.9: unfold the (kernel==stride, zero-padding) conv into ONE GEMM.
+    diffusers runs cudnn ``F.conv3d`` — a different reduction, different bits.
+    Bound onto the trainer's ``nn.Conv3d`` instance (params/state-dict
+    untouched)."""
+    B, C, T, H, W = x.shape
+    K1, K2, K3 = self.kernel_size
+    T2, H2, W2 = T // K1, H // K2, W // K3
+    x = x.unfold(2, K1, K1).unfold(3, K2, K2).unfold(4, K3, K3)
+    x = x.permute(0, 2, 3, 4, 1, 5, 6, 7).reshape(-1, C * K1 * K2 * K3)
+    x = F.linear(x, self.weight.view(self.out_channels, -1), self.bias)
+    return x.view(B, T2, H2, W2, self.out_channels).permute(0, 4, 1, 2, 3)
+
+
 class _EngineOrderFinalNorm(torch.nn.Module):
     """Drop-in for the model-level ``norm_out`` (parameter-free FP32LayerNorm).
 
@@ -251,6 +266,19 @@ def install_shared_kernels(transformer: torch.nn.Module) -> None:
     transformer.set_attn_processor(SharedKernelWanAttnProcessor())
     for block in transformer.blocks:
         block.forward = MethodType(_engine_order_block_forward, block)
+    pe = transformer.patch_embedding
+    if (
+        tuple(pe.kernel_size) != tuple(pe.stride)
+        or any(pe.padding)
+        or any(d != 1 for d in pe.dilation)
+        or pe.groups != 1
+    ):
+        raise RuntimeError(
+            "wan22 install_shared_kernels: patch_embedding is not a plain "
+            "kernel==stride patchify conv — the engine's mulmat decomposition "
+            "does not apply."
+        )
+    pe.forward = MethodType(_engine_order_patch_embed_forward, pe)
     norm_out = transformer.norm_out
     if norm_out.weight is not None or norm_out.bias is not None:
         raise RuntimeError("wan22 install_shared_kernels: expected a parameter-free norm_out (affine=False)")
