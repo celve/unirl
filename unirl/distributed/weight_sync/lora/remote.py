@@ -47,6 +47,8 @@ class RemoteLoraWeightSync(LoraWeightSyncBase):
         verify: bool = False,
         track_prefix: str = "",
         copy: bool = False,
+        name_substitutions=None,
+        peft_target_modules_override=None,
     ) -> None:
         super().__init__(
             backend=backend,
@@ -54,6 +56,8 @@ class RemoteLoraWeightSync(LoraWeightSyncBase):
             adapter_name=adapter_name,
             verify=verify,
             track_prefix=track_prefix,
+            name_substitutions=name_substitutions,
+            peft_target_modules_override=peft_target_modules_override,
         )
         self._copy = bool(copy)
         # Rollout engines' (role_name, [worker_handles]) pairs, cached on rank 0 by

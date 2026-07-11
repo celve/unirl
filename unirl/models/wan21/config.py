@@ -69,6 +69,18 @@ class WAN21PipelineConfig:
     # the stashed ``_transformer_weights_path``.
     meta_init_transformer: bool = False
 
+    # Shared-kernel parity mode (rollout↔train numerics unification, same
+    # contract as SD3's flag): installs the engine-parity attention processor,
+    # engine-order block forwards, and the engine-order final norm on the
+    # trainer transformer(s) — see ``unirl/models/wan22/parity.py``. The
+    # vLLM-Omni worker installs the matching kernels via
+    # ``patch_wan22_shared_kernels`` when the engine config sets
+    # ``parity_mode``. Consumed by ``WAN22Bundle`` (both experts); eager load
+    # path only. Pair with ``autocast_precision: fp32`` (pure bf16) and
+    # ``trajectory_precision: fp32`` (the wan engine's denoise loop carries
+    # fp32 latents).
+    shared_kernels: bool = False
+
     def __post_init__(self) -> None:
         validate_precision_type(self.model_precision, field="WAN21PipelineConfig.model_precision")
 

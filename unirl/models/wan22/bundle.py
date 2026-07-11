@@ -155,6 +155,20 @@ class WAN22Bundle(Bundle):
         # wrapped module.
         low_noise_transformer = low_noise_transformer.to(aux.device, dtype=dtype)
 
+        # Step 2b: shared-kernel parity (rollout↔train numerics unification).
+        # Installed on BOTH experts before FSDP wrapping / PEFT injection.
+        if getattr(config, "shared_kernels", False):
+            if config.meta_init_transformer:
+                raise RuntimeError(
+                    "WAN22Bundle: shared_kernels requires the eager load path "
+                    "(meta_init_transformer: false) — parity install must see "
+                    "materialized modules."
+                )
+            from unirl.models.wan22.parity import install_shared_kernels
+
+            install_shared_kernels(high_noise_transformer)
+            install_shared_kernels(low_noise_transformer)
+
         # Step 3: expose both branches through the composite. The composite
         # is the stage's trainable-module surface; FSDPPolicy then discovers
         # and wraps the WanTransformerBlock children under both branches.
@@ -207,18 +221,15 @@ class WAN22Bundle(Bundle):
             "high_noise."  -> "transformer."
             "low_noise."   -> "transformer_2."
 
-        **Current consumer status**: the weight-sync handlers do
-        prefix-prepend only; they do NOT consume ``weight_sync_name_map``.
-        So this method is a forward-looking API surfaced on the bundle for
-        the eventual WAN22 separate-sampling (vllm-omni rollout) path. For
-        trainside rollout (rollout = train Policy stack), no cross-process
-        sync runs, so missing the substitution is harmless.
-
-        When wiring the consumer side: the weight-sync handler gains an
-        optional ``name_substitutions: Optional[Dict[str, str]]`` ctor
-        field and the trainer's weight-sync setup reads
-        ``getattr(self.bundle, "weight_sync_name_map", lambda: {})()``
-        and passes it through to the sync config.
+        **Current consumer status**: the LoRA sync handlers
+        (``LoraWeightSyncBase``) accept an ordered ``name_substitutions``
+        ctor field that implements exactly this transform — the wan22
+        vllm-omni recipes pass this map (plus the LoRA-only
+        ``".to_out.0." → ".to_out."`` fixup, which does NOT belong here:
+        for full weights the engine's own ``load_weights`` already remaps
+        ``to_out.0``) at the recipe level with ``param_prefix: ""`` so the
+        composite children carry the expert prefix. The FULL-weight sync
+        family still consumes only its own glob-style ``name_remap``.
         """
         return {
             "high_noise.": "transformer.",

@@ -39,6 +39,8 @@ class LocalLoraWeightSync(LoraWeightSyncBase):
         adapter_name: Optional[str] = None,
         verify: bool = False,
         track_prefix: str = "",
+        name_substitutions=None,
+        peft_target_modules_override=None,
     ) -> None:
         super().__init__(
             backend=backend,
@@ -46,6 +48,8 @@ class LocalLoraWeightSync(LoraWeightSyncBase):
             adapter_name=adapter_name,
             verify=verify,
             track_prefix=track_prefix,
+            name_substitutions=name_substitutions,
+            peft_target_modules_override=peft_target_modules_override,
         )
         self._rollout = rollout
 

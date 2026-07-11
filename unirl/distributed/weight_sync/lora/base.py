@@ -53,6 +53,37 @@ def _extract_canonical_lora(backend: Any, *, param_prefix: str, adapter_name: st
     return lora_tensors, peft_config
 
 
+def apply_name_substitutions(lora_tensors: Dict[str, Any], substitutions) -> Dict[str, Any]:
+    """Ordered substring substitutions over canonical LoRA keys, validated loudly.
+
+    Every pattern must match at least one key and the result must stay
+    collision-free — the checksum verify is name-insensitive, so a bad map
+    would otherwise verify green while every engine layer silently runs base
+    weights (see ``LoraWeightSyncBase`` ctor docs). Module-level so the map
+    logic is unit-testable without a backend
+    (``tests/test_wan22_lora_name_map.py``).
+    """
+    subs = [(str(k), str(v)) for k, v in dict(substitutions or {}).items()]
+    if not subs:
+        return lora_tensors
+    keys = list(lora_tensors.keys())
+    for old, new in subs:
+        matched = [k for k in keys if old in k]
+        if not matched:
+            raise RuntimeError(
+                f"[LoRA-SYNC] name_substitutions pattern {old!r} matched no extracted "
+                f"key (of {len(keys)}; sample: {keys[:3]}). A silent no-op here would "
+                f"ship unroutable names — fix the map or the param_prefix."
+            )
+        keys = [k.replace(old, new) for k in keys]
+    if len(set(keys)) != len(keys):
+        raise RuntimeError(
+            "[LoRA-SYNC] name_substitutions produced colliding keys — two trainer "
+            "params mapped onto one engine name; the map is wrong."
+        )
+    return dict(zip(keys, lora_tensors.values()))
+
+
 class LoraWeightSyncBase(Remote):
     """Base for LoRA weight-sync handlers — extraction + verify; subclasses push.
 
@@ -79,6 +110,8 @@ class LoraWeightSyncBase(Remote):
         adapter_name: Optional[str] = None,
         verify: bool = False,
         track_prefix: str = "",
+        name_substitutions: Optional[Dict[str, str]] = None,
+        peft_target_modules_override: Optional[List[str]] = None,
     ) -> None:
         super().__init__()
         self._backend = backend
@@ -88,6 +121,27 @@ class LoraWeightSyncBase(Remote):
         self._adapter_name = str(adapter_name) if adapter_name is not None else str(backend.rollout_adapter_name)
         self._verify = bool(verify)
         self._track_prefix = str(track_prefix or "")
+        # Ordered substring substitutions applied to the canonical keys AFTER
+        # the ``param_prefix`` prepend and BEFORE ``track_prefix`` — routes
+        # trainer module paths onto the engine's namespace when the two trees
+        # differ (WAN22 dual experts: ``high_noise.`` → ``transformer.``,
+        # ``low_noise.`` → ``transformer_2.``, plus the LoRA-only
+        # ``.to_out.0.`` → ``.to_out.`` fixup; see
+        # ``WAN22Bundle.weight_sync_name_map``). Every pattern must match at
+        # least one key and the substituted keys must stay unique — the
+        # checksum verify is name-insensitive, so a bad map would otherwise
+        # verify green while every engine layer silently runs base weights.
+        self._name_substitutions = [(str(k), str(v)) for k, v in dict(name_substitutions or {}).items()]
+        # Replaces ``target_modules`` in the wire PEFT config with
+        # engine-shaped strings (the engine LoRA manager suffix-matches its
+        # OWN module names — e.g. wan's ``attn1.to_out``, not the trainer's
+        # ``attn1.to_out.0``).
+        self._peft_target_modules_override = (
+            [str(t) for t in peft_target_modules_override] if peft_target_modules_override is not None else None
+        )
+
+    def _apply_name_substitutions(self, lora_tensors: Dict[str, Any]) -> Dict[str, Any]:
+        return apply_name_substitutions(lora_tensors, self._name_substitutions)
 
     def _extract(self):
         """Extract the canonical adapter (+ ``track_prefix``) and PEFT config.
@@ -98,6 +152,9 @@ class LoraWeightSyncBase(Remote):
         lora_tensors, peft_config = _extract_canonical_lora(
             self._backend, param_prefix=self._param_prefix, adapter_name=self._adapter_name
         )
+        lora_tensors = self._apply_name_substitutions(lora_tensors)
+        if self._peft_target_modules_override is not None:
+            peft_config = {**peft_config, "target_modules": list(self._peft_target_modules_override)}
         # Prefix keys so a ComposedRolloutEngine can demux to one child.
         if self._track_prefix:
             lora_tensors = {f"{self._track_prefix}.{k}": v for k, v in lora_tensors.items()}
@@ -145,4 +202,4 @@ class LoraWeightSyncBase(Remote):
                     )
 
 
-__all__ = ["LoraWeightSyncBase"]
+__all__ = ["LoraWeightSyncBase", "apply_name_substitutions"]

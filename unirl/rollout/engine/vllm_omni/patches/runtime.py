@@ -760,6 +760,113 @@ def patch_sd3_shared_kernels() -> None:
     logger.info("[sd3-parity] engine shared kernels installed: %s", kernel_fingerprint())
 
 
+def patch_wan22_shared_kernels() -> None:
+    """Engine half of Wan2.2 shared-kernel parity. Same gate and ordering as
+    ``patch_sd3_shared_kernels`` (which already covers the attention path —
+    Wan routes through the SAME ``FlashAttentionImpl`` class).
+
+    Wan-specific targets:
+
+    - ``vllm_omni.diffusion.layers.norm.RMSNorm`` (``forward_cuda`` /
+      ``forward_native``) → ``shared_rms_norm``. Wan's qk-norms use this
+      vllm-omni-local class (across-heads width, pre-head-split), NOT the
+      ``vllm.model_executor`` RMSNorm the SD3 patch targets. Its fused CUDA
+      kernel otherwise rounds differently from the trainer's eager norm.
+      Blast radius: only the DiT qk-norms use this class in the wan2_2 model;
+      the block norms are ``LayerNorm``/``AdaLayerNorm`` whose forward_cuda is
+      already the pure-torch fp32 expression the trainer mirrors.
+    - ``DistributedRMSNorm.__init__`` → raise. It only instantiates at TP>1,
+      where RowParallel partial-sum order breaks bitwise parity anyway — fail
+      at build instead of tripping the gate 40 layers deep.
+    - One-shot Wan DiT forward shape/dtype log (+ SHA log of the first calls
+      when ``/tmp/unirl_parity_debug`` exists) for geometry verification
+      against the trainer replay logs.
+
+    Trainer-side counterpart: ``unirl/models/wan22/parity.py`` (installed by
+    the WAN22 bundle under ``shared_kernels: true``).
+    """
+    import os as _os
+
+    if _os.environ.get("UNIRL_VLLM_OMNI_PARITY") != "1":
+        return
+
+    from vllm_omni.diffusion.layers.norm import RMSNorm as _OmniRMSNorm
+
+    from unirl.kernels.sd3 import kernel_fingerprint, shared_rms_norm
+
+    if not getattr(_OmniRMSNorm.forward_cuda, "_diffrl_wan22_parity", False):
+
+        def _parity_wan_rms(self, x, *, _shared=shared_rms_norm):
+            return _shared(x, self.weight, float(self.variance_epsilon))
+
+        _parity_wan_rms._diffrl_wan22_parity = True  # type: ignore[attr-defined]
+        _OmniRMSNorm.forward_cuda = _parity_wan_rms
+        _OmniRMSNorm.forward_native = _parity_wan_rms
+
+    try:
+        from vllm_omni.diffusion.models.wan2_2.wan2_2_transformer import (
+            DistributedRMSNorm as _WanDistRMSNorm,
+        )
+        from vllm_omni.diffusion.models.wan2_2.wan2_2_transformer import (
+            WanTransformer3DModel as _WanDiT,
+        )
+
+        if not getattr(_WanDistRMSNorm.__init__, "_diffrl_wan22_parity", False):
+
+            def _refuse_tp_rms(self, *args, **kwargs):
+                raise RuntimeError(
+                    "wan22 parity mode requires tensor_parallel_size=1 "
+                    "(DistributedRMSNorm/RowParallel partial-sum order is not "
+                    "bitwise-reproducible by the unsharded trainer)."
+                )
+
+            _refuse_tp_rms._diffrl_wan22_parity = True  # type: ignore[attr-defined]
+            _WanDistRMSNorm.__init__ = _refuse_tp_rms
+
+        if not getattr(_WanDiT.forward, "_diffrl_wan22_parity", False):
+            _orig_wan_forward = _WanDiT.forward
+            _wan_logged = {"count": 0}
+
+            def _logged_wan_forward(self, *args, _orig=_orig_wan_forward, **kwargs):
+                hs = kwargs.get("hidden_states", args[0] if args else None)
+                ehs = kwargs.get("encoder_hidden_states")
+                ts = kwargs.get("timestep")
+                if _wan_logged["count"] == 0:
+                    logger.info(
+                        "[wan22-parity] engine DiT forward: hidden=%s %s | encoder=%s | timestep=%s %s | %s",
+                        tuple(hs.shape) if hs is not None else None,
+                        hs.dtype if hs is not None else None,
+                        tuple(ehs.shape) if ehs is not None else None,
+                        tuple(ts.shape) if ts is not None else None,
+                        ts.dtype if ts is not None else None,
+                        kernel_fingerprint(),
+                    )
+                out = _orig(self, *args, **kwargs)
+                import os as _os2
+
+                if _wan_logged["count"] < 14 and _os2.path.exists("/tmp/unirl_parity_debug"):
+                    from unirl.kernels.sd3 import parity_debug_sha as _sha
+
+                    sample = out[0] if isinstance(out, tuple) else getattr(out, "sample", out)
+                    logger.info(
+                        "[wan22-parity-dbg] ENGINE call=%d t=%.6f x=%s enc=%s out=%s",
+                        _wan_logged["count"],
+                        float(ts.reshape(-1)[0]) if ts is not None else -1.0,
+                        _sha(hs),
+                        _sha(ehs),
+                        _sha(sample),
+                    )
+                _wan_logged["count"] += 1
+                return out
+
+            _logged_wan_forward._diffrl_wan22_parity = True  # type: ignore[attr-defined]
+            _WanDiT.forward = _logged_wan_forward
+    except Exception:  # noqa: BLE001 — diagnostics/guards, never block boot
+        logger.warning("patch_wan22_shared_kernels: wan model guards install failed", exc_info=True)
+
+    logger.info("[wan22-parity] engine shared kernels installed: %s", kernel_fingerprint())
+
+
 class VLLMOmniHijack:
     """Monkey-patches vllm-omni internals to support in-memory LoRA tensors.
 
@@ -794,6 +901,7 @@ class VLLMOmniHijack:
         patch_hi3_flow_alignment()
         patch_master_port_unstrip()
         patch_sd3_shared_kernels()
+        patch_wan22_shared_kernels()
 
 
 __all__ = [
@@ -803,4 +911,5 @@ __all__ = [
     "patch_per_request_ar_seed",
     "patch_sd3_shared_kernels",
     "patch_sigmas_passthrough",
+    "patch_wan22_shared_kernels",
 ]

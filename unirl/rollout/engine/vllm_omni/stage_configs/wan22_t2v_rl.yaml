@@ -1,0 +1,73 @@
+# Single-stage Wan2.2 text-to-video config for RL rollout.
+#
+# Diff vs the HV1.5 stage config:
+#   - Dual-expert DiT: the worker loads BOTH transformer (high-noise) and
+#     transformer_2 (low-noise) — od_config.boundary_ratio stays unset so the
+#     load policy keeps both, and the per-request boundary_ratio (pinned by
+#     Wan22InputAdapter from the shared bundle config) drives the switch.
+#   - custom_pipeline_args installs our RLWan22Pipeline subclass so SDE-mode
+#     rollouts get trajectory capture (latents, sigmas, log_probs), the σ
+#     override (upstream Wan ignores request sigmas), and UMT5 condition
+#     extraction.
+#   - max_batch_size: 1 pins the parity geometry at the runtime level: one
+#     request (= one GRPO sample, ungrouped) per forward, matching the
+#     trainer's micro_batch_size: 1 replay bit-for-bit.
+#
+# Sized for Wan2.2-T2V-A14B on TP=1. Single-GPU rollout matches the trainer's
+# full-forward math (TP>1 RowParallel partial-sum order breaks bitwise parity).
+
+stage_args:
+  - stage_id: 0
+    stage_type: diffusion
+    runtime:
+      process: true
+      devices: "0"
+      max_batch_size: 1
+    engine_args:
+      model_stage: diffusion
+      enforce_eager: true
+      distributed_executor_backend: "mp"
+      vae_use_slicing: false
+      vae_use_tiling: false
+      cache_backend: null
+      cache_config: null
+      enable_cache_dit_summary: false
+      # Required for vLLM to wrap DiT Linear modules in LoRA-aware variants.
+      # Without ``enable_lora``, ``add_lora`` still registers the adapter in
+      # ``DiffusionLoRAManager._registered_adapters`` (so checksum probes
+      # pass), but no Linear consults it and the forward silently runs base
+      # weights. ``max_lora_rank`` must be >= the recipe's LoRAPolicy rank;
+      # the vllm.config.lora default of 16 silently rejects larger adapters
+      # at add time.
+      enable_lora: true
+      max_lora_rank: 64
+      parallel_config:
+        pipeline_parallel_size: 1
+        data_parallel_size: 1
+        tensor_parallel_size: 1
+        enable_expert_parallel: false
+        sequence_parallel_size: 1
+        ulysses_degree: 1
+        ring_degree: 1
+        cfg_parallel_size: 1
+        vae_patch_parallel_size: 1
+        use_hsdp: false
+        hsdp_shard_size: -1
+        hsdp_replicate_size: 1
+      # unirl-specific: install RLWan22Pipeline so SDE-mode rollouts get a
+      # swappable scheduler, per-step trajectory capture (latents, sigmas,
+      # log_probs), the σ override, and UMT5 condition extraction.
+      custom_pipeline_args:
+        pipeline_class: unirl.rollout.engine.vllm_omni.pipelines.wan22.pipeline.RLWan22Pipeline
+      # unirl-specific: install the weight-sync extension so the DiT
+      # worker exposes update_weights_from_ipc (bucketed CUDA-IPC) and
+      # later init_weight_transfer_engine / update_weights (NCCL).
+      worker_extension_cls: unirl.rollout.engine.vllm_omni.worker.dit_extension.DiTWeightSyncExtension
+    final_output: true
+    final_output_type: video
+
+runtime:
+  enabled: true
+  defaults:
+    window_size: -1
+    max_inflight: 1

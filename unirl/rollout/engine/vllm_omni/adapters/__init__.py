@@ -1,4 +1,4 @@
-"""Adapter registry — importing this package registers all 9 modalities.
+"""Adapter registry — importing this package registers all 10 modalities.
 
 Modality adapters are grouped by model family and composed from input/output
 sub-adapters (the binder constructs both in ``__init__`` and delegates the
@@ -7,6 +7,7 @@ two conversion verbs):
 - ``hi3``  — hi3_t2i, hi3_it2i, hi3_i2t, hi3_t2t, hi3_ar_recaption, hi3_dit_recaption
 - ``sd3``  — sd3_t2i
 - ``hv15`` — hv15_t2v
+- ``wan22`` — wan22_t2v
 - ``qwen_image`` — qwen_image_t2i
 - ``bagel`` — bagel_t2i
 
@@ -53,6 +54,11 @@ from unirl.rollout.engine.vllm_omni.adapters.qwen_image import (
     QwenImageT2iAdapter,
 )
 from unirl.rollout.engine.vllm_omni.adapters.sd3 import Sd3OutputAdapter, Sd3T2iAdapter
+from unirl.rollout.engine.vllm_omni.adapters.wan22 import (
+    Wan22InputAdapter,
+    Wan22T2vAdapter,
+    Wan22VideoOutputAdapter,
+)
 
 __all__ = [
     "DitInputAdapter",
@@ -81,6 +87,9 @@ __all__ = [
     "QwenImageT2iAdapter",
     "Sd3OutputAdapter",
     "Sd3T2iAdapter",
+    "Wan22InputAdapter",
+    "Wan22T2vAdapter",
+    "Wan22VideoOutputAdapter",
     "get_adapter",
     "register_adapter",
     "registered_adapters",

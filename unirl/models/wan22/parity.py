@@ -1,0 +1,265 @@
+"""Engine-parity kernels for the diffusers Wan2.2 transformer (both experts).
+
+Installed by ``WAN22Bundle`` when ``shared_kernels: true``. Makes the
+trainer's forward **bitwise-identical** to vLLM-Omni v0.20.0's
+``wan2_2_transformer.py`` on the same GPU, by mirroring exactly:
+
+1. **Attention** (``SharedKernelWanAttnProcessor``):
+   - self-attention: the engine's fused QKV GEMM (one ``[D -> 3D]``
+     ``F.linear`` with catted weights, split in thirds), qk-norm on the FLAT
+     ``heads*head_dim`` width BEFORE the head split (``shared_rms_norm`` —
+     also patched into the engine's ``vllm_omni.diffusion.layers.norm.RMSNorm``),
+     the engine's RoPE application (cos/sin strided-sliced then cast to the
+     activation dtype, rotate multiply in bf16 — diffusers multiplies in
+     fp32), and the shared flash-attention kernel + engine epilogue;
+   - cross-attention: separate q/k/v GEMMs (the engine keeps them separate),
+     same flat-width qk-norm, no RoPE, no key-padding mask (both sides attend
+     over the zero-padded 512 text slots);
+   - the engine's LoRA expression on every projection (fused base GEMM +
+     per-slice ``(x @ Aᵀ) @ B_foldedᵀ`` with alpha/r folded into B — reused
+     from ``unirl.models.sd3.parity``: the fold/apply expression must have
+     ONE implementation for the contract to hold).
+
+2. **Block forward** (``_engine_order_block_forward``, bound per block
+   instance): the engine computes the AdaLN modulation in **bf16**
+   (``scale_shift_table + temb`` with no ``.float()``; LayerNorm is
+   fp32-internal but rounds to bf16 BEFORE the ``* (1+scale) + shift``) and
+   keeps residual adds in bf16 — diffusers upcasts all of these to fp32.
+   Binding a reimplementation on the block instances leaves the class, the
+   state dict, FSDP block wrapping, and activation checkpointing untouched.
+
+3. **Final norm** (``_EngineOrderFinalNorm`` swapped over ``norm_out``):
+   the model-level tail multiplies ``norm_out(x.float()) * (1+scale) +
+   shift`` — with stock diffusers the norm returns fp32 so the modulation
+   runs in fp32; the engine's AdaLayerNorm rounds the LN output to bf16
+   first. Returning bf16 from the swapped module makes the (untouched)
+   inline tail compute in bf16 exactly like the engine. ``norm_out`` is
+   parameter-free (elementwise_affine=False), so the swap is
+   state-dict-neutral.
+
+Already identical on both sides (verified against the v0.20.0 source — no
+mirroring needed): the timestep/text condition embedder (the engine imports
+diffusers' ``Timesteps``/``TimestepEmbedding``/``PixArtAlphaTextProjection``
+and both hold bf16 params after the bundle's ``.to``), the fp64→fp32 RoPE
+frequency tables, GELU-tanh FFN, the final ``scale_shift_table + temb``
+(bf16 on both), ``proj_out``, and patchify/unpatchify — provided the recipe
+disables autocast (``autocast_precision: fp32``) so the trainer runs pure
+bf16 like the engine.
+
+T2V only: I2V's ``add_k_proj`` image branch and TI2V's per-token timesteps
+raise rather than silently diverge.
+"""
+
+from __future__ import annotations
+
+from types import MethodType
+from typing import Optional, Tuple
+
+import torch
+import torch.nn.functional as F
+
+from unirl.kernels.sd3 import shared_attention, shared_rms_norm
+from unirl.models.sd3.parity import _fused_linear, _plain_linear
+
+
+def _rms_eps(norm: torch.nn.Module) -> float:
+    eps = getattr(norm, "eps", None)
+    if eps is None:
+        eps = getattr(norm, "variance_epsilon", 1e-6)
+    return float(eps)
+
+
+def _engine_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+    """vllm-omni ``RotaryEmbeddingWan.forward_native`` (interleaved/GPT-J,
+    half-head-dim cos/sin) — multiply happens in the activation dtype."""
+    x1, x2 = x.unflatten(-1, (-1, 2)).unbind(-1)
+    rotated = torch.stack(
+        (
+            x1 * cos - x2 * sin,
+            x1 * sin + x2 * cos,
+        ),
+        dim=-1,
+    )
+    return rotated.flatten(-2, -1).to(x.dtype)
+
+
+class SharedKernelWanAttnProcessor:
+    """diffusers Wan attention processor executing the ENGINE's attention math."""
+
+    def __call__(
+        self,
+        attn,
+        hidden_states: torch.Tensor,
+        encoder_hidden_states: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        rotary_emb: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        **kwargs,
+    ):
+        if attention_mask is not None:
+            raise RuntimeError(
+                "wan22 parity processor: no attention mask expected (engine passes "
+                "none at SP=1; text is attended over its zero padding on both sides)"
+            )
+        if getattr(attn, "add_k_proj", None) is not None:
+            raise RuntimeError("wan22 parity processor supports T2V only (I2V add_k_proj branch present)")
+
+        heads = attn.heads
+
+        if encoder_hidden_states is None:
+            # --- self-attention: engine WanSelfAttention.forward ---
+            qkv = _fused_linear([attn.to_q, attn.to_k, attn.to_v], hidden_states)
+            query, key, value = qkv.chunk(3, dim=-1)
+            # qk-norm on the FLAT heads*head_dim width, BEFORE the head split.
+            query = shared_rms_norm(query, attn.norm_q.weight, _rms_eps(attn.norm_q))
+            key = shared_rms_norm(key, attn.norm_k.weight, _rms_eps(attn.norm_k))
+            query = query.unflatten(2, (heads, -1))
+            key = key.unflatten(2, (heads, -1))
+            value = value.unflatten(2, (heads, -1))
+            if rotary_emb is not None:
+                # Engine slices the fp32 tables (cos even / sin odd lanes) and
+                # casts to the activation dtype BEFORE the rotate multiply.
+                freqs_cos, freqs_sin = rotary_emb
+                cos = freqs_cos[..., 0::2].to(hidden_states.dtype)
+                sin = freqs_sin[..., 1::2].to(hidden_states.dtype)
+                query = _engine_rope(query, cos, sin)
+                key = _engine_rope(key, cos, sin)
+        else:
+            # --- cross-attention: engine WanCrossAttention.forward ---
+            query = _plain_linear(attn.to_q, hidden_states)
+            query = shared_rms_norm(query, attn.norm_q.weight, _rms_eps(attn.norm_q))
+            key = _plain_linear(attn.to_k, encoder_hidden_states)
+            value = _plain_linear(attn.to_v, encoder_hidden_states)
+            key = shared_rms_norm(key, attn.norm_k.weight, _rms_eps(attn.norm_k))
+            query = query.unflatten(2, (heads, -1))
+            key = key.unflatten(2, (heads, -1))
+            value = value.unflatten(2, (heads, -1))
+
+        head_dim = query.shape[-1]
+        out = shared_attention(query, key, value, softmax_scale=1.0 / (head_dim**0.5), causal=False)
+        # Engine epilogue.
+        out = out.flatten(2, 3)
+        out = out.to(query.dtype)
+        out = _plain_linear(attn.to_out[0], out)
+        # diffusers to_out[1] / the engine's self.dropout are both Dropout(0.0)
+        # — inert, skipped on both sides' parity path.
+        return out
+
+
+def _fp32_ln(x: torch.Tensor, normalized_shape, weight, bias, eps: float) -> torch.Tensor:
+    """vllm-omni ``LayerNorm.forward_native``: fp32 math, round back to the
+    input dtype BEFORE any downstream modulation."""
+    origin_dtype = x.dtype
+    return F.layer_norm(
+        x.float(),
+        normalized_shape,
+        weight.float() if weight is not None else None,
+        bias.float() if bias is not None else None,
+        eps,
+    ).to(origin_dtype)
+
+
+def _engine_order_block_forward(
+    self,
+    hidden_states: torch.Tensor,
+    encoder_hidden_states: torch.Tensor,
+    temb: torch.Tensor,
+    rotary_emb,
+) -> torch.Tensor:
+    """Engine ``WanTransformerBlock.forward`` (wan2_2_transformer.py:633-673):
+    bf16 modulation add, bf16 gate/residual math, fp32-internal LayerNorms
+    that round to bf16 before modulation. Bound per block instance by
+    ``install_shared_kernels``."""
+    if temb.ndim != 3:
+        raise RuntimeError(
+            f"wan22 parity block forward supports the T2V [B, 6, D] modulation only "
+            f"(got temb.ndim={temb.ndim}; TI2V per-token timesteps are out of scope)"
+        )
+    # ENGINE: no .float() on temb — the modulation params stay bf16.
+    shift_msa, scale_msa, gate_msa, c_shift_msa, c_scale_msa, c_gate_msa = (
+        self.scale_shift_table + temb
+    ).chunk(6, dim=1)
+
+    # 1. Self-attention
+    norm_hidden_states = (
+        _fp32_ln(hidden_states, self.norm1.normalized_shape, self.norm1.weight, self.norm1.bias, self.norm1.eps)
+        * (1 + scale_msa)
+        + shift_msa
+    ).type_as(hidden_states)
+    attn_output = self.attn1(norm_hidden_states, None, None, rotary_emb)
+    hidden_states = (hidden_states + attn_output * gate_msa).type_as(hidden_states)
+
+    # 2. Cross-attention
+    if isinstance(self.norm2, torch.nn.Identity):
+        norm_hidden_states = hidden_states
+    else:
+        norm_hidden_states = _fp32_ln(
+            hidden_states, self.norm2.normalized_shape, self.norm2.weight, self.norm2.bias, self.norm2.eps
+        ).type_as(hidden_states)
+    attn_output = self.attn2(norm_hidden_states, encoder_hidden_states, None, None)
+    hidden_states = hidden_states + attn_output
+
+    # 3. Feed-forward
+    norm_hidden_states = (
+        _fp32_ln(hidden_states, self.norm3.normalized_shape, self.norm3.weight, self.norm3.bias, self.norm3.eps)
+        * (1 + c_scale_msa)
+        + c_shift_msa
+    ).type_as(hidden_states)
+    ff_output = self.ffn(norm_hidden_states)
+    hidden_states = (hidden_states + ff_output * c_gate_msa).type_as(hidden_states)
+
+    return hidden_states
+
+
+class _EngineOrderFinalNorm(torch.nn.Module):
+    """Drop-in for the model-level ``norm_out`` (parameter-free FP32LayerNorm).
+
+    The model tail feeds it ``hidden_states.float()`` and multiplies the
+    result by the (bf16) modulation inline. Stock diffusers returns fp32
+    there → fp32 modulation; the engine's AdaLayerNorm rounds the LN output
+    to the model dtype first → bf16 modulation. Returning the model dtype
+    reproduces the engine's rounding point without touching the model code.
+    """
+
+    def __init__(self, normalized_shape, eps: float, out_dtype: torch.dtype) -> None:
+        super().__init__()
+        self.normalized_shape = tuple(normalized_shape)
+        self.eps = float(eps)
+        self.out_dtype = out_dtype
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return F.layer_norm(x.float(), self.normalized_shape, None, None, self.eps).to(self.out_dtype)
+
+
+def install_shared_kernels(transformer: torch.nn.Module) -> None:
+    """Put ONE trainer Wan transformer (one expert) on the shared numerics
+    contract. Called by ``WAN22Bundle.from_config`` for both experts (eager
+    path, ``shared_kernels: true``) BEFORE FSDP wrapping and PEFT injection
+    (the processor reads PEFT submodules at call time, so injection order
+    does not matter). State-dict keys are untouched.
+    """
+    import logging
+
+    from unirl.kernels.sd3 import kernel_fingerprint
+
+    if any(p.is_meta for p in transformer.parameters()):
+        raise RuntimeError(
+            "wan22 install_shared_kernels: transformer is meta-initialized; "
+            "shared-kernel parity requires the eager load path "
+            "(meta_init_transformer: false)."
+        )
+
+    transformer.set_attn_processor(SharedKernelWanAttnProcessor())
+    for block in transformer.blocks:
+        block.forward = MethodType(_engine_order_block_forward, block)
+    norm_out = transformer.norm_out
+    if norm_out.weight is not None or norm_out.bias is not None:
+        raise RuntimeError("wan22 install_shared_kernels: expected a parameter-free norm_out (affine=False)")
+    transformer.norm_out = _EngineOrderFinalNorm(
+        norm_out.normalized_shape, norm_out.eps, out_dtype=transformer.dtype
+    )
+    logging.getLogger(__name__).info(
+        "wan22 shared kernels installed (trainer side): %s", kernel_fingerprint()
+    )
+
+
+__all__ = ["SharedKernelWanAttnProcessor", "install_shared_kernels"]
