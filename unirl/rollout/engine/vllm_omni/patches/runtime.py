@@ -844,7 +844,7 @@ def patch_wan22_shared_kernels() -> None:
                 out = _orig(self, *args, **kwargs)
                 import os as _os2
 
-                if _wan_logged["count"] < 14 and _os2.path.exists("/tmp/unirl_parity_debug"):
+                if _wan_logged["count"] < 26 and _os2.path.exists("/tmp/unirl_parity_debug"):
                     from unirl.kernels.sd3 import parity_debug_sha as _sha
 
                     sample = out[0] if isinstance(out, tuple) else getattr(out, "sample", out)
