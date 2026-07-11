@@ -61,14 +61,10 @@ def _load_engine_model(model_path: str, subfolder: str) -> torch.nn.Module:
     if not cfg:
         raise FileNotFoundError(f"no transformer config under {model_path}/{subfolder}")
 
-    # vLLM CustomOp/layers require an active vllm config during construction
-    # (the worker builds models inside this context; the probe must too).
-    from vllm.config import VllmConfig, set_current_vllm_config
-
     prev_dtype = torch.get_default_dtype()
     torch.set_default_dtype(torch.bfloat16)
     try:
-        with set_current_vllm_config(VllmConfig()), torch.device("cuda"):
+        with torch.device("cuda"):
             model = create_transformer_from_config(cfg)
     finally:
         torch.set_default_dtype(prev_dtype)
@@ -131,6 +127,16 @@ def main() -> int:
     ap.add_argument("--bisect", action="store_true", help="per-module SHA capture on both sides")
     args = ap.parse_args()
 
+    # vLLM's distributed init, CustomOp construction, and layer forwards all
+    # require an active vllm config (the worker runs inside one) — hold it
+    # for the probe's entire lifetime.
+    from vllm.config import VllmConfig, set_current_vllm_config
+
+    with set_current_vllm_config(VllmConfig()):
+        return _run(args)
+
+
+def _run(args) -> int:
     subfolder = "transformer" if args.expert == "high" else "transformer_2"
     _log(f"expert={args.expert} subfolder={subfolder}")
 
