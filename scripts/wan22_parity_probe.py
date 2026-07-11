@@ -125,6 +125,13 @@ def main() -> int:
     ap.add_argument("--width", type=int, default=640)
     ap.add_argument("--sigma", type=float, default=0.9375, help="probe σ (default: first shift-5 20-step value)")
     ap.add_argument("--bisect", action="store_true", help="per-module SHA capture on both sides")
+    ap.add_argument(
+        "--loop",
+        type=int,
+        default=0,
+        help="memory-leak hunt: run the TRAINER forward N extra times under "
+        "no_grad, printing cuda allocated each iter (skips the engine model)",
+    )
     args = ap.parse_args()
 
     # vLLM's distributed init, CustomOp construction, and layer forwards all
@@ -151,6 +158,24 @@ def _run(args) -> int:
 
     patch_sd3_shared_kernels()
     patch_wan22_shared_kernels()
+
+    if args.loop:
+        trainer_model = _load_trainer_model(args.model, subfolder)
+        _log("trainer model loaded (parity kernels installed) — loop mode")
+        torch.manual_seed(7)
+        lat_h, lat_w = args.height // 8, args.width // 8
+        x = torch.randn(1, 16, 1, lat_h, lat_w, dtype=torch.float32, device="cuda").to(torch.bfloat16)
+        t = torch.tensor([args.sigma * 1000.0], dtype=torch.float32, device="cuda")
+        text_dim = int(getattr(trainer_model.config, "text_dim", 4096))
+        enc = torch.randn(1, 512, text_dim, dtype=torch.float32, device="cuda").to(torch.bfloat16)
+        with torch.no_grad():
+            for i in range(args.loop):
+                trainer_model(hidden_states=x, timestep=t, encoder_hidden_states=enc, return_dict=False)
+                _log(
+                    f"loop {i}: allocated={torch.cuda.memory_allocated() / 2**30:.2f} GiB "
+                    f"reserved={torch.cuda.memory_reserved() / 2**30:.2f} GiB"
+                )
+        return 0
 
     engine_model = _load_engine_model(args.model, subfolder)
     _log("engine model loaded")
