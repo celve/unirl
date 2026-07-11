@@ -226,6 +226,7 @@ class WAN22DiffusionStep(DiffusionStep[WAN22Bundle, WAN21Conditions]):
 
             print(
                 f"[wan22-parity-dbg] TRAINER t={float(timestep.reshape(-1)[0]):.6f} "
+                f"t_precise={float(timestep.reshape(-1)[0]):.17g} t_dtype={timestep.dtype} "
                 f"high={use_high_noise} x={_sha(sample_cat)} enc={_sha(prompt_embeds)} "
                 f"out={_sha(noise_pred)}",
                 flush=True,

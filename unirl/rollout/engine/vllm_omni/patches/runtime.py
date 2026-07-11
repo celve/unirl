@@ -878,9 +878,11 @@ def patch_wan22_shared_kernels() -> None:
 
                     sample = out[0] if isinstance(out, tuple) else getattr(out, "sample", out)
                     logger.info(
-                        "[wan22-parity-dbg] ENGINE call=%d t=%.6f x=%s enc=%s out=%s",
+                        "[wan22-parity-dbg] ENGINE call=%d t=%.6f t_precise=%.17g t_dtype=%s x=%s enc=%s out=%s",
                         _wan_logged["count"],
                         float(ts.reshape(-1)[0]) if ts is not None else -1.0,
+                        float(ts.reshape(-1)[0]) if ts is not None else -1.0,
+                        ts.dtype if ts is not None else None,
                         _sha(hs),
                         _sha(ehs),
                         _sha(sample),
