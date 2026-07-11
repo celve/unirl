@@ -241,6 +241,22 @@ class FlowMatchSDEDiscreteScheduler(FlowMatchEulerDiscreteScheduler):
                 mu=mu,
                 timesteps=timesteps,
             )
+        # Timestep-product parity: diffusers derives ``timesteps`` from the
+        # PASSED sigmas list through numpy fp64 (``σ·num_train_timesteps``
+        # rounded from the fp64 product), while trainer replays compute
+        # ``σ_fp32 * 1000.0`` as a torch fp32 product — up to 1 fp32 ulp
+        # apart per step. SD3 absorbed the ulp by casting t to bf16 before
+        # the sinusoid (timestep_in_model_dtype); wan feeds t to the fp32
+        # sinusoidal embedding directly, where the ulp drifts the DiT output
+        # (wan22 gate trip 2026-07-11: step σ=1.0 exact — 1000.0 is exact in
+        # both paths — later steps |Δlogp| up to 3e-6). Recompute the
+        # timesteps from the fp32 σ tensor with the same torch fp32 product
+        # the trainer uses, so both sides feed bitwise-identical t.
+        if sigmas is not None and self.sigmas is not None:
+            n = len(self.timesteps)
+            self.timesteps = (
+                self.sigmas[:n].to(torch.float32) * float(self.config.num_train_timesteps)
+            ).to(device=self.timesteps.device, dtype=self.timesteps.dtype)
         self._traj_latents = []
         self._traj_timesteps = []
         self._traj_log_probs = []

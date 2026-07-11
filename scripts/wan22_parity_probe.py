@@ -264,7 +264,68 @@ def _run(args) -> int:
         )
         return 1
 
-    _log("PROBE PASSED")
+    # --- multi-step chain: reproduce the in-vivo rollout->replay flow ---
+    # Engine-model chain: forward -> armed SDE step -> forward ... capturing
+    # the trajectory exactly like RLWan22Pipeline; then a trainer-model
+    # replay over the stored transitions. Catches step-coupled divergence a
+    # single-forward probe cannot (the G5 gate saw step0 exact, k>=1 drift).
+    n_chain = 4
+    sched2 = FlowMatchSDEDiscreteScheduler(num_train_timesteps=1000, shift=shift, eta=0.7)
+    sched2.set_timesteps(sigmas=sigmas, device="cuda")
+    sched2.arm(eta=0.7, sde_indices=list(range(n_chain)))
+    gen2 = torch.Generator(device="cuda").manual_seed(23)
+    from unirl.kernels.sd3 import parity_debug_sha as _sha
+
+    master2 = x.to(torch.float32)
+    eng_v = []
+    with torch.no_grad(), set_forward_context(omni_diffusion_config=fake_od_config):
+        for k in range(n_chain):
+            t_k = sched2.timesteps[k]
+            v = engine_model(
+                hidden_states=master2.to(torch.bfloat16),
+                timestep=t_k.reshape(1),
+                encoder_hidden_states=enc,
+                return_dict=False,
+            )[0]
+            eng_v.append(v)
+            master2 = sched2.step(v.to(master2.dtype), t_k, master2, generator=gen2)[0]
+
+    chain_latents = [sched2._initial_latent] + list(sched2._traj_latents)
+    strategy2 = FlowSDEStrategy()
+    ok = True
+    with torch.no_grad():
+        for k in range(n_chain):
+            x_k = chain_latents[k].to("cuda")
+            v_t = trainer_model(
+                hidden_states=x_k.to(torch.bfloat16),
+                timestep=(sched2.sigmas[k] * 1000.0).reshape(1).to("cuda"),
+                encoder_hidden_states=enc,
+                return_dict=False,
+            )[0]
+            v_match = torch.equal(v_t, eng_v[k])
+            _, logp_t, _ = strategy2.denoise(
+                noise_pred=v_t.to(torch.float32),
+                sample=x_k,
+                sigma=sched2.sigmas[k],
+                sigma_next=sched2.sigmas[k + 1],
+                eta=0.7,
+                prev_sample=chain_latents[k + 1].to("cuda"),
+                sigma_max=sched2.sigmas[1],
+                step_index=k,
+            )
+            logp_e = sched2._traj_log_probs[k]
+            gap = (logp_t.float() - logp_e.float()).abs().max().item()
+            _log(
+                f"chain step {k}: v_bitwise={v_match} x_in={_sha(x_k)} v_eng={_sha(eng_v[k])} "
+                f"v_trn={_sha(v_t)} logp_gap={gap:.3e}"
+            )
+            ok = ok and v_match and gap == 0.0
+
+    if not ok:
+        _log("CHAIN MISMATCH — see per-step lines above")
+        return 1
+
+    _log("PROBE PASSED (single + chain)")
     return 0
 
 
