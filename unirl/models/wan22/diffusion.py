@@ -222,6 +222,38 @@ class WAN22DiffusionStep(DiffusionStep[WAN22Bundle, WAN21Conditions]):
                 with torch.no_grad():
                     r1 = _m(*_i, **_kw)
                     r2 = _m(*_i, **_kw)
+
+                _sin = _m.timesteps_proj(_i[0]).to(w1.dtype)
+                _F = torch.nn.functional
+                with torch.no_grad():
+                    _o2 = _F.linear(_F.silu(_F.linear(_sin, w1, _m.time_embedder.linear_1.bias)), _m.time_embedder.linear_2.weight, _m.time_embedder.linear_2.bias)
+                    _o3 = _F.linear(
+                        _F.silu(_F.linear(_sin.clone(), w1.clone(), _m.time_embedder.linear_1.bias.clone())),
+                        _m.time_embedder.linear_2.weight.clone(),
+                        _m.time_embedder.linear_2.bias.clone(),
+                    )
+
+                def _pr(t):
+                    return "%d/%s/%s" % (t.data_ptr() % 256, tuple(t.stride()), type(t).__name__)
+
+                print(
+                    "[wan22-cond-dbg2] TRAINER manual=%s clone=%s | t=%s sin=%s w1=%s b1=%s w2=%s b2=%s | alloc=%s conf=%s lt_ws=%s ws_cfg=%s"
+                    % (
+                        _bsha(_o2),
+                        _bsha(_o3),
+                        _pr(_i[0]),
+                        _pr(_sin),
+                        _pr(w1),
+                        _pr(_m.time_embedder.linear_1.bias),
+                        _pr(_m.time_embedder.linear_2.weight),
+                        _pr(_m.time_embedder.linear_2.bias),
+                        torch.cuda.get_allocator_backend(),
+                        _os.environ.get("PYTORCH_CUDA_ALLOC_CONF"),
+                        _os.environ.get("CUBLASLT_WORKSPACE_SIZE"),
+                        _os.environ.get("CUBLAS_WORKSPACE_CONFIG"),
+                    ),
+                    flush=True,
+                )
                 _in_dump["on"] = False
                 print(
                     "[wan22-cond-dbg] TRAINER cls_t1=%s dt_t1=%s w_t1=%s cls_x1=%s dt_x1=%s w_x1=%s "
