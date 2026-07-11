@@ -186,7 +186,7 @@ class WAN22DiffusionStep(DiffusionStep[WAN22Bundle, WAN21Conditions]):
         if image_embeds is not None:
             extra["encoder_hidden_states_image"] = image_embeds
 
-        return model.transformer(
+        noise_pred = model.transformer(
             use_high_noise=use_high_noise,
             hidden_states=sample_cat,
             encoder_hidden_states=prompt_embeds,
@@ -194,6 +194,18 @@ class WAN22DiffusionStep(DiffusionStep[WAN22Bundle, WAN21Conditions]):
             return_dict=False,
             **extra,
         )[0]
+        import os as _os
+
+        if _os.path.exists("/tmp/unirl_parity_debug"):
+            from unirl.kernels.sd3 import parity_debug_sha as _sha
+
+            print(
+                f"[wan22-parity-dbg] TRAINER t={float(timestep.reshape(-1)[0]):.6f} "
+                f"high={use_high_noise} x={_sha(sample_cat)} enc={_sha(prompt_embeds)} "
+                f"out={_sha(noise_pred)}",
+                flush=True,
+            )
+        return noise_pred
 
     # ---- Protocol surface ---------------------------------------------------
 
