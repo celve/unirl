@@ -855,15 +855,17 @@ def patch_wan22_shared_kernels() -> None:
                     _wan_logged["blk_fired"] = True
                     from unirl.kernels.sd3 import parity_debug_sha as _bsha
 
+                    import torch as _torch
+
                     _os3.makedirs("/root/parity_dump", exist_ok=True)
-                    torch.save(
+                    _torch.save(
                         {"t": ts.detach().cpu(), "enc": ehs.detach().cpu(), "x": hs.detach().cpu()},
                         "/root/parity_dump/engine_in.pt",
                     )
 
                     def _cond_dump(_m, _i, o):
-                        torch.save(
-                            tuple(v.detach().cpu() if isinstance(v, torch.Tensor) else v for v in o),
+                        _torch.save(
+                            tuple(v.detach().cpu() if isinstance(v, _torch.Tensor) else v for v in o),
                             "/root/parity_dump/engine_cond.pt",
                         )
 
