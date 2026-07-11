@@ -67,21 +67,51 @@ def _linear_params(mod: torch.nn.Module) -> Tuple[torch.Tensor, Optional[torch.T
     return mod.weight, mod.bias, None
 
 
-def _fused_linear(mods: List[torch.nn.Module], x: torch.Tensor) -> torch.Tensor:
-    """One fused GEMM over the catted projection weights + engine-style LoRA.
+def _fused_base(mods: List[torch.nn.Module], params) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    """The catted base weight/bias for a multi-projection fused GEMM.
 
-    Mirrors the engine where q/k/v live in ONE ``QKVParallelLinear``: same GEMM
-    shape (``[*, in] @ [in, sum(out)]``), bias applied in-kernel, then LoRA
-    deltas added per output slice on the flattened tokens. ``torch.cat`` on
-    weights is exact (pure data movement), and autograd flows back through it
-    to the original per-projection parameters.
+    ``torch.cat`` on weights is exact (pure data movement) but allocates a
+    COPY — and under gradients F.linear saves its weight operand in the
+    graph, so a per-call cat pins one full fused copy per attention per
+    step-graph (wan22's serial multi-SDE-step replay held ~67 GB of these).
+    When the base projections are FROZEN (LoRA training), the fused copy is
+    cached on the lead module at the first grad-mode call and reused —
+    autograd then saves the SAME tensor every call (a reference, not a
+    copy). Lazy on grad-mode keeps never-replayed experts (wan22 low-noise)
+    and no-grad generate paths cache-free. Trainable-base recipes (SD3
+    full-weight parity) keep the per-call cat: gradients must flow through
+    it to the per-projection params, and at SD3 scale the per-graph copies
+    are small.
     """
-    params = [_linear_params(m) for m in mods]
+    lead = mods[0]
+    cached = getattr(lead, "_unirl_fused_base", None)
+    if cached is not None:
+        return cached
     weight = torch.cat([w for w, _, _ in params], dim=0)
     biases = [b for _, b, _ in params]
     if any(b is None for b in biases) and any(b is not None for b in biases):
         raise RuntimeError("parity processor: mixed bias/no-bias projections cannot be fused")
     bias = torch.cat(biases, dim=0) if biases[0] is not None else None
+    if torch.is_grad_enabled() and not any(w.requires_grad for w, _, _ in params):
+        lead._unirl_fused_base = (weight, bias)
+    return weight, bias
+
+
+def _fused_linear(mods: List[torch.nn.Module], x: torch.Tensor) -> torch.Tensor:
+    """One fused GEMM over the catted projection weights + engine-style LoRA.
+
+    Mirrors the engine where q/k/v live in ONE ``QKVParallelLinear``: same GEMM
+    shape (``[*, in] @ [in, sum(out)]``), bias applied in-kernel, then LoRA
+    deltas added per output slice on the flattened tokens. Single-projection
+    calls skip the cat entirely (a one-tensor cat is a full copy that autograd
+    would save per call; the direct param is the same values — same GEMM,
+    same bits).
+    """
+    params = [_linear_params(m) for m in mods]
+    if len(mods) == 1:
+        weight, bias, _ = params[0]
+    else:
+        weight, bias = _fused_base(mods, params)
     y = F.linear(x, weight, bias)
 
     if all(lora is None for _, _, lora in params):
