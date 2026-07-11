@@ -869,9 +869,11 @@ def patch_wan22_shared_kernels() -> None:
                 ):
                     _wan_logged["blk_fired"] = True
                     from unirl.kernels.sd3 import parity_debug_sha as _bsha
+                    import torch as _torch_dbg
+
                     from unirl.models.wan22.parity import _parity_ctx_state as _pcs
 
-                    print("[wan22-ctx] ENGINE " + _pcs(torch, _os3), flush=True)
+                    print("[wan22-ctx] ENGINE " + _pcs(_torch_dbg, _os3), flush=True)
 
                     def _mk(name):
                         def _h(_m, _i, o):
