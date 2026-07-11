@@ -203,13 +203,51 @@ class WAN22DiffusionStep(DiffusionStep[WAN22Bundle, WAN21Conditions]):
 
             _target_pre = model.transformer.high_noise if use_high_noise else model.transformer.low_noise
 
-            def _cond_dump(_m, _i, o):
+            _in_dump = {"on": False}
+
+            def _cond_dump(_m, _i, _kw, o):
+                if _in_dump["on"]:
+                    return
+                _in_dump["on"] = True
                 torch.save(
                     tuple(v.detach().cpu() if isinstance(v, torch.Tensor) else v for v in o),
                     "/root/parity_dump/trainer_cond.pt",
                 )
+                w1 = _m.time_embedder.linear_1.weight
+                wx = _m.text_embedder.linear_1.weight
+                torch.save(
+                    {"time_l1": w1.detach().cpu(), "text_l1": wx.detach().cpu()},
+                    "/root/parity_dump/trainer_cond_w.pt",
+                )
+                with torch.no_grad():
+                    r1 = _m(*_i, **_kw)
+                    r2 = _m(*_i, **_kw)
+                _in_dump["on"] = False
+                print(
+                    "[wan22-cond-dbg] TRAINER cls_t1=%s dt_t1=%s w_t1=%s cls_x1=%s dt_x1=%s w_x1=%s "
+                    "temb0=%s re1=%s re2=%s tx0=%s rex1=%s rex2=%s bf16red=%s tf32=%s"
+                    % (
+                        type(_m.time_embedder.linear_1).__name__,
+                        w1.dtype,
+                        _bsha(w1),
+                        type(_m.text_embedder.linear_1).__name__,
+                        wx.dtype,
+                        _bsha(wx),
+                        _bsha(o[0]),
+                        _bsha(r1[0]),
+                        _bsha(r2[0]),
+                        _bsha(o[2]),
+                        _bsha(r1[2]),
+                        _bsha(r2[2]),
+                        torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction,
+                        torch.backends.cuda.matmul.allow_tf32,
+                    ),
+                    flush=True,
+                )
 
-            _hook_handles.append(_target_pre.condition_embedder.register_forward_hook(_cond_dump))
+            _hook_handles.append(
+                _target_pre.condition_embedder.register_forward_hook(_cond_dump, with_kwargs=True)
+            )
 
             _target = model.transformer.high_noise if use_high_noise else model.transformer.low_noise
 
