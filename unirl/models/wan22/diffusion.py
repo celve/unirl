@@ -191,6 +191,20 @@ class WAN22DiffusionStep(DiffusionStep[WAN22Bundle, WAN21Conditions]):
         _dbg = _os.path.exists("/tmp/unirl_parity_debug")
         _hook_handles = []
         _t0 = float(timestep.reshape(-1)[0])
+        if _dbg and getattr(WAN22DiffusionStep, "_temb_trace_n", 0) < 26:
+            WAN22DiffusionStep._temb_trace_n = getattr(WAN22DiffusionStep, "_temb_trace_n", 0) + 1
+            from unirl.kernels.sd3 import parity_debug_sha as _tsha
+
+            _tt_target = model.transformer.high_noise if use_high_noise else model.transformer.low_noise
+            _tt_n = WAN22DiffusionStep._temb_trace_n
+
+            def _temb_trace(_m, _i, o, _tt_n=_tt_n):
+                print(
+                    "[wan22-temb-trace] TRAINER call=%d t=%.6f temb=%s" % (_tt_n, _t0, _tsha(o[0])),
+                    flush=True,
+                )
+
+            _hook_handles.append(_tt_target.condition_embedder.register_forward_hook(_temb_trace))
         if _dbg and 985.0 < _t0 < 995.0 and not getattr(WAN22DiffusionStep, "_blk_dbg_fired", False):
             WAN22DiffusionStep._blk_dbg_fired = True
             from unirl.kernels.sd3 import parity_debug_sha as _bsha
@@ -252,6 +266,41 @@ class WAN22DiffusionStep(DiffusionStep[WAN22Bundle, WAN21Conditions]):
                         _os.environ.get("CUBLASLT_WORKSPACE_SIZE"),
                         _os.environ.get("CUBLAS_WORKSPACE_CONFIG"),
                     ),
+                    flush=True,
+                )
+                import threading as _thr
+
+                _sin2 = _m.timesteps_proj(_i[0]).to(w1.dtype)
+                _Fp = torch.nn.functional
+                _l1b, _l2w, _l2b = _m.time_embedder.linear_1.bias, _m.time_embedder.linear_2.weight, _m.time_embedder.linear_2.bias
+
+                def _chain():
+                    with torch.no_grad():
+                        return _Fp.linear(_Fp.silu(_Fp.linear(_sin2, w1, _l1b)), _l2w, _l2b)
+
+                _ss = torch.cuda.Stream()
+                with torch.cuda.stream(_ss):
+                    _o_ss = _chain()
+                torch.cuda.current_stream().wait_stream(_ss)
+                _th_res = {}
+
+                def _th_fn():
+                    _th_res["o"] = _chain()
+
+                _tt = _thr.Thread(target=_th_fn)
+                _tt.start()
+                _tt.join()
+                _o_pre = _chain()
+                try:
+                    torch._C._cuda_clearCublasWorkspaces()
+                    _o_clr = _chain()
+                    _clr_ok = True
+                except Exception:
+                    _o_clr = _o_pre
+                    _clr_ok = False
+                print(
+                    "[wan22-cond-dbg3] TRAINER sidestream=%s thread=%s preclear=%s postclear=%s clr_ok=%s"
+                    % (_bsha(_o_ss), _bsha(_th_res["o"]), _bsha(_o_pre), _bsha(_o_clr), _clr_ok),
                     flush=True,
                 )
                 _in_dump["on"] = False
