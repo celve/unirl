@@ -53,6 +53,7 @@ bundle:
     max_sequence_length: 512
     boundary_ratio: 0.875
     num_train_timesteps: 1000
+    load_aux_modules: false   # UMT5+VAE live in the engine; trainer replays harvested conditions
     shared_kernels: true
 
 pipeline:

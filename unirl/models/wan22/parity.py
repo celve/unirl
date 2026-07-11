@@ -253,6 +253,7 @@ def install_shared_kernels(transformer: torch.nn.Module) -> None:
     does not matter). State-dict keys are untouched.
     """
     import logging
+    import os
 
     from unirl.kernels.sd3 import kernel_fingerprint
 
@@ -263,30 +264,44 @@ def install_shared_kernels(transformer: torch.nn.Module) -> None:
             "(meta_init_transformer: false)."
         )
 
-    transformer.set_attn_processor(SharedKernelWanAttnProcessor())
-    for block in transformer.blocks:
-        block.forward = MethodType(_engine_order_block_forward, block)
-    pe = transformer.patch_embedding
-    if (
-        tuple(pe.kernel_size) != tuple(pe.stride)
-        or any(pe.padding)
-        or any(d != 1 for d in pe.dilation)
-        or pe.groups != 1
-    ):
-        raise RuntimeError(
-            "wan22 install_shared_kernels: patch_embedding is not a plain "
-            "kernel==stride patchify conv — the engine's mulmat decomposition "
-            "does not apply."
+    # Debug-only bisect switch: install a subset of the parity surfaces
+    # (comma list of processor|blocks|patchify|norm_out). Unset = all.
+    parts_env = os.environ.get("UNIRL_WAN22_PARITY_PARTS")
+    parts = {p.strip() for p in parts_env.split(",") if p.strip()} if parts_env else None
+
+    def _on(name: str) -> bool:
+        return parts is None or name in parts
+
+    if _on("processor"):
+        transformer.set_attn_processor(SharedKernelWanAttnProcessor())
+    if _on("blocks"):
+        for block in transformer.blocks:
+            block.forward = MethodType(_engine_order_block_forward, block)
+    if _on("patchify"):
+        pe = transformer.patch_embedding
+        if (
+            tuple(pe.kernel_size) != tuple(pe.stride)
+            or any(pe.padding)
+            or any(d != 1 for d in pe.dilation)
+            or pe.groups != 1
+        ):
+            raise RuntimeError(
+                "wan22 install_shared_kernels: patch_embedding is not a plain "
+                "kernel==stride patchify conv — the engine's mulmat decomposition "
+                "does not apply."
+            )
+        pe.forward = MethodType(_engine_order_patch_embed_forward, pe)
+    if _on("norm_out"):
+        norm_out = transformer.norm_out
+        if norm_out.weight is not None or norm_out.bias is not None:
+            raise RuntimeError("wan22 install_shared_kernels: expected a parameter-free norm_out (affine=False)")
+        transformer.norm_out = _EngineOrderFinalNorm(
+            norm_out.normalized_shape, norm_out.eps, out_dtype=transformer.dtype
         )
-    pe.forward = MethodType(_engine_order_patch_embed_forward, pe)
-    norm_out = transformer.norm_out
-    if norm_out.weight is not None or norm_out.bias is not None:
-        raise RuntimeError("wan22 install_shared_kernels: expected a parameter-free norm_out (affine=False)")
-    transformer.norm_out = _EngineOrderFinalNorm(
-        norm_out.normalized_shape, norm_out.eps, out_dtype=transformer.dtype
-    )
     logging.getLogger(__name__).info(
-        "wan22 shared kernels installed (trainer side): %s", kernel_fingerprint()
+        "wan22 shared kernels installed (trainer side, parts=%s): %s",
+        parts_env or "all",
+        kernel_fingerprint(),
     )
 
 

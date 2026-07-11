@@ -69,6 +69,15 @@ class WAN21PipelineConfig:
     # the stashed ``_transformer_weights_path``.
     meta_init_transformer: bool = False
 
+    # Trainer-side auxiliary modules (UMT5 text encoder + VAE). Under an
+    # external rollout engine (vLLM-Omni) the trainer never encodes text or
+    # decodes video — conditions and frames are harvested from the engine —
+    # so ~13 GB/GPU of UMT5+VAE is dead weight next to a colocated dual-14B
+    # engine. ``false`` skips loading them (the pipeline's text_embed /
+    # vae_decode stages then hold a None-encoder bundle and any accidental
+    # use fails loudly). Keep ``true`` for trainside rollout.
+    load_aux_modules: bool = True
+
     # Shared-kernel parity mode (rollout↔train numerics unification, same
     # contract as SD3's flag): installs the engine-parity attention processor,
     # engine-order block forwards, and the engine-order final norm on the

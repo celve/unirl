@@ -127,13 +127,22 @@ class WAN21Bundle(Bundle):
             # the wrapped module.
             transformer = transformer.to(device, dtype=dtype)
 
-        vae = AutoencoderKLWan.from_pretrained(vae_path, subfolder="vae", torch_dtype=vae_dtype).to(device).eval()
-        vae.requires_grad_(False)
+        load_aux = bool(getattr(config, "load_aux_modules", True))
+        if load_aux:
+            vae = AutoencoderKLWan.from_pretrained(vae_path, subfolder="vae", torch_dtype=vae_dtype).to(device).eval()
+            vae.requires_grad_(False)
 
-        text_encoder = (
-            UMT5EncoderModel.from_pretrained(te_path, subfolder="text_encoder", torch_dtype=te_dtype).to(device).eval()
-        )
-        text_encoder.requires_grad_(False)
+            text_encoder = (
+                UMT5EncoderModel.from_pretrained(te_path, subfolder="text_encoder", torch_dtype=te_dtype)
+                .to(device)
+                .eval()
+            )
+            text_encoder.requires_grad_(False)
+        else:
+            # External-engine rollout: text is encoded and video decoded by
+            # the engine; the trainer replays harvested conditions only.
+            vae = None
+            text_encoder = None
 
         tokenizer = AutoTokenizer.from_pretrained(te_path, subfolder="tokenizer")
 
