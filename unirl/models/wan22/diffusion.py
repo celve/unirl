@@ -186,17 +186,42 @@ class WAN22DiffusionStep(DiffusionStep[WAN22Bundle, WAN21Conditions]):
         if image_embeds is not None:
             extra["encoder_hidden_states_image"] = image_embeds
 
-        noise_pred = model.transformer(
-            use_high_noise=use_high_noise,
-            hidden_states=sample_cat,
-            encoder_hidden_states=prompt_embeds,
-            timestep=timestep,
-            return_dict=False,
-            **extra,
-        )[0]
         import os as _os
 
-        if _os.path.exists("/tmp/unirl_parity_debug"):
+        _dbg = _os.path.exists("/tmp/unirl_parity_debug")
+        _hook_handles = []
+        _t0 = float(timestep.reshape(-1)[0])
+        if _dbg and 985.0 < _t0 < 995.0 and not getattr(WAN22DiffusionStep, "_blk_dbg_fired", False):
+            WAN22DiffusionStep._blk_dbg_fired = True
+            from unirl.kernels.sd3 import parity_debug_sha as _bsha
+
+            _target = model.transformer.high_noise if use_high_noise else model.transformer.low_noise
+
+            def _mk(name):
+                def _h(_m, _i, o):
+                    t = o[0] if isinstance(o, tuple) else o
+                    print(f"[wan22-blk-dbg] TRAINER {name} {_bsha(t)}", flush=True)
+
+                return _h
+
+            _hook_handles.append(_target.patch_embedding.register_forward_hook(_mk("patch_embedding")))
+            _hook_handles.append(_target.condition_embedder.register_forward_hook(_mk("condition_embedder")))
+            for _bi, _blk in enumerate(_target.blocks):
+                _hook_handles.append(_blk.register_forward_hook(_mk(f"block{_bi:02d}")))
+        try:
+            noise_pred = model.transformer(
+                use_high_noise=use_high_noise,
+                hidden_states=sample_cat,
+                encoder_hidden_states=prompt_embeds,
+                timestep=timestep,
+                return_dict=False,
+                **extra,
+            )[0]
+        finally:
+            for _hh in _hook_handles:
+                _hh.remove()
+
+        if _dbg:
             from unirl.kernels.sd3 import parity_debug_sha as _sha
 
             print(

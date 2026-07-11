@@ -828,6 +828,8 @@ def patch_wan22_shared_kernels() -> None:
             _wan_logged = {"count": 0}
 
             def _logged_wan_forward(self, *args, _orig=_orig_wan_forward, **kwargs):
+                import os as _os3
+
                 hs = kwargs.get("hidden_states", args[0] if args else None)
                 ehs = kwargs.get("encoder_hidden_states")
                 ts = kwargs.get("timestep")
@@ -841,7 +843,34 @@ def patch_wan22_shared_kernels() -> None:
                         ts.dtype if ts is not None else None,
                         kernel_fingerprint(),
                     )
-                out = _orig(self, *args, **kwargs)
+                # Per-block SHA capture at the divergent step (t≈989.58) —
+                # gated on the same debug flag; hooks attach for ONE call.
+                _hook_handles = []
+                _t0 = float(ts.reshape(-1)[0]) if ts is not None else -1.0
+                if (
+                    _os3.path.exists("/tmp/unirl_parity_debug")
+                    and 985.0 < _t0 < 995.0
+                    and not _wan_logged.get("blk_fired")
+                ):
+                    _wan_logged["blk_fired"] = True
+                    from unirl.kernels.sd3 import parity_debug_sha as _bsha
+
+                    def _mk(name):
+                        def _h(_m, _i, o):
+                            t = o[0] if isinstance(o, tuple) else o
+                            print(f"[wan22-blk-dbg] ENGINE {name} {_bsha(t)}", flush=True)
+
+                        return _h
+
+                    _hook_handles.append(self.patch_embedding.register_forward_hook(_mk("patch_embedding")))
+                    _hook_handles.append(self.condition_embedder.register_forward_hook(_mk("condition_embedder")))
+                    for _bi, _blk in enumerate(self.blocks):
+                        _hook_handles.append(_blk.register_forward_hook(_mk(f"block{_bi:02d}")))
+                try:
+                    out = _orig(self, *args, **kwargs)
+                finally:
+                    for _hh in _hook_handles:
+                        _hh.remove()
                 import os as _os2
 
                 if _wan_logged["count"] < 26 and _os2.path.exists("/tmp/unirl_parity_debug"):
