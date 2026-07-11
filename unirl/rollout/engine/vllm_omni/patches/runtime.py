@@ -775,6 +775,9 @@ def patch_wan22_shared_kernels() -> None:
       Blast radius: only the DiT qk-norms use this class in the wan2_2 model;
       the block norms are ``LayerNorm``/``AdaLayerNorm`` whose forward_cuda is
       already the pure-torch fp32 expression the trainer mirrors.
+    - ``WanTimeTextImageEmbedding.forward`` → the shared deterministic
+      time-path replica from ``unirl.models.wan22.parity`` (cuBLAS skinny-GEMM
+      algo selection is call-context-dependent; see ``det_skinny_linear``).
     - ``DistributedRMSNorm.__init__`` → raise. It only instantiates at TP>1,
       where RowParallel partial-sum order breaks bitwise parity anyway — fail
       at build instead of tripping the gate 40 layers deep.
@@ -808,8 +811,20 @@ def patch_wan22_shared_kernels() -> None:
             DistributedRMSNorm as _WanDistRMSNorm,
         )
         from vllm_omni.diffusion.models.wan2_2.wan2_2_transformer import (
+            WanTimeTextImageEmbedding as _WanCondEmbed,
+        )
+        from vllm_omni.diffusion.models.wan2_2.wan2_2_transformer import (
             WanTransformer3DModel as _WanDiT,
         )
+
+        # Deterministic time-embedding path — the SAME function the trainer
+        # binds in install_shared_kernels (see parity.py: the M=1 GEMV chain
+        # is not bit-stable under cuBLAS across call contexts).
+        if not getattr(_WanCondEmbed.forward, "_diffrl_wan22_parity", False):
+            from unirl.models.wan22.parity import parity_time_text_embedding_forward as _det_cond_fwd
+
+            _det_cond_fwd._diffrl_wan22_parity = True  # type: ignore[attr-defined]
+            _WanCondEmbed.forward = _det_cond_fwd
 
         if not getattr(_WanDistRMSNorm.__init__, "_diffrl_wan22_parity", False):
 

@@ -37,11 +37,21 @@ trainer's forward **bitwise-identical** to vLLM-Omni v0.20.0's
    parameter-free (elementwise_affine=False), so the swap is
    state-dict-neutral.
 
+4. **Time embedding** (``parity_time_text_embedding_forward`` +
+   ``det_skinny_linear``): the embedder code is line-identical on both sides
+   (the engine imports diffusers' ``Timesteps``/``TimestepEmbedding``), but
+   its M=1 GEMV chain is NOT bit-stable under cuBLAS — algorithm selection
+   for skinny problems shifts with per-process workspace state (observed:
+   the trainer replay flipped from step 1 onward after the allocator's
+   OOM-retry cleared cuBLAS workspaces, while every fat GEMM held). Both
+   sides therefore run the time path through an explicit fp32
+   broadcast-mul+sum kernel; the engine gets the same function via
+   ``patch_wan22_shared_kernels``.
+
 Already identical on both sides (verified against the v0.20.0 source — no
-mirroring needed): the timestep/text condition embedder (the engine imports
-diffusers' ``Timesteps``/``TimestepEmbedding``/``PixArtAlphaTextProjection``
-and both hold bf16 params after the bundle's ``.to``), the fp64→fp32 RoPE
-frequency tables, GELU-tanh FFN, the final ``scale_shift_table + temb``
+mirroring needed): the text-projection branch of the condition embedder
+(M=512 GEMMs — fat enough that cuBLAS never re-ranks them), the fp64→fp32
+RoPE frequency tables, GELU-tanh FFN, the final ``scale_shift_table + temb``
 (bf16 on both), ``proj_out``, and patchify/unpatchify — provided the recipe
 disables autocast (``autocast_precision: fp32``) so the trainer runs pure
 bf16 like the engine.
@@ -245,6 +255,75 @@ class _EngineOrderFinalNorm(torch.nn.Module):
         return F.layer_norm(x.float(), self.normalized_shape, None, None, self.eps).to(self.out_dtype)
 
 
+def det_skinny_linear(x: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor]) -> torch.Tensor:
+    """Deterministic cuBLAS-free linear for tiny-batch (skinny/GEMV) calls.
+
+    cuBLAS(Lt) picks algorithms per call context — for M=1/skinny problems the
+    choice (split-k vs not) changes the fp reduction ORDER, so the same bits
+    through the same weights can produce different results in two processes,
+    or even in one process before/after the allocator's OOM-retry clears the
+    cached cuBLAS workspaces (observed in vivo: the trainer's replay flipped
+    the wan2.2 time-embedder GEMV from replay step 1 onward while the fat
+    block GEMMs never moved). Bit-parity therefore cannot ride on cuBLAS for
+    these shapes. This computes ``x @ weight.T + bias`` as an explicit
+    broadcast-multiply + ``sum`` in fp32 — torch's fixed-shape tree reduction,
+    no cuBLAS, bitwise-stable across processes for a given torch build — and
+    rounds once to ``x.dtype``. Chunked over output features to bound the
+    fp32 intermediate (peak chunk ≈ M·8192·K·4 bytes).
+
+    Used by ``parity_time_text_embedding_forward`` on BOTH sides of the
+    contract; keep it the single implementation.
+    """
+    if x.shape[0] > 32:
+        raise RuntimeError(f"det_skinny_linear is for tiny-batch calls, got M={x.shape[0]}")
+    xf = x.float()
+    outs = []
+    for i in range(0, weight.shape[0], 8192):
+        w = weight[i : i + 8192].float()
+        acc = (xf.unsqueeze(1) * w.unsqueeze(0)).sum(-1)
+        if bias is not None:
+            acc = acc + bias[i : i + 8192].float()
+        outs.append(acc)
+    return torch.cat(outs, dim=1).to(x.dtype)
+
+
+def parity_time_text_embedding_forward(
+    self,
+    timestep: torch.Tensor,
+    encoder_hidden_states: torch.Tensor,
+    encoder_hidden_states_image: Optional[torch.Tensor] = None,
+    timestep_seq_len: Optional[int] = None,
+):
+    """``WanTimeTextImageEmbedding.forward`` replica with a deterministic
+    time path — installed on BOTH the trainer expert (MethodType bind) and
+    the engine class (module patch), replacing the module code that is
+    line-identical on the two sides but NOT bit-stable (see
+    ``det_skinny_linear``). The text path keeps the stock module GEMMs
+    ([512, 4096] — fat enough that cuBLAS never re-ranks them; probe- and
+    in-vivo-verified equal). T2V only.
+    """
+    if timestep_seq_len is not None:
+        raise RuntimeError("parity time embedding: TI2V per-token timesteps are not supported (t2v only)")
+    if encoder_hidden_states_image is not None or self.image_embedder is not None:
+        raise RuntimeError("parity time embedding: I2V image conditioning is not supported (t2v only)")
+
+    te = self.time_embedder
+    if getattr(te, "cond_proj", None) is not None or getattr(te, "post_act", None) is not None:
+        raise RuntimeError("parity time embedding: unexpected TimestepEmbedding extras (cond_proj/post_act)")
+
+    sinusoid = self.timesteps_proj(timestep)
+    w_dtype = te.linear_1.weight.dtype
+    if sinusoid.dtype != w_dtype and w_dtype != torch.int8:
+        sinusoid = sinusoid.to(w_dtype)
+    temb = det_skinny_linear(sinusoid, te.linear_1.weight, te.linear_1.bias)
+    temb = det_skinny_linear(F.silu(temb), te.linear_2.weight, te.linear_2.bias)
+    temb = temb.type_as(encoder_hidden_states)
+    timestep_proj = det_skinny_linear(F.silu(temb), self.time_proj.weight, self.time_proj.bias)
+
+    encoder_hidden_states = self.text_embedder(encoder_hidden_states)
+    return temb, timestep_proj, encoder_hidden_states, None
+
+
 def install_shared_kernels(transformer: torch.nn.Module) -> None:
     """Put ONE trainer Wan transformer (one expert) on the shared numerics
     contract. Called by ``WAN22Bundle.from_config`` for both experts (eager
@@ -265,7 +344,7 @@ def install_shared_kernels(transformer: torch.nn.Module) -> None:
         )
 
     # Debug-only bisect switch: install a subset of the parity surfaces
-    # (comma list of processor|blocks|patchify|norm_out). Unset = all.
+    # (comma list of processor|blocks|patchify|norm_out|time_embed). Unset = all.
     parts_env = os.environ.get("UNIRL_WAN22_PARITY_PARTS")
     parts = {p.strip() for p in parts_env.split(",") if p.strip()} if parts_env else None
 
@@ -291,6 +370,9 @@ def install_shared_kernels(transformer: torch.nn.Module) -> None:
                 "does not apply."
             )
         pe.forward = MethodType(_engine_order_patch_embed_forward, pe)
+    if _on("time_embed"):
+        ce = transformer.condition_embedder
+        ce.forward = MethodType(parity_time_text_embedding_forward, ce)
     if _on("norm_out"):
         norm_out = transformer.norm_out
         if norm_out.weight is not None or norm_out.bias is not None:
@@ -305,4 +387,9 @@ def install_shared_kernels(transformer: torch.nn.Module) -> None:
     )
 
 
-__all__ = ["SharedKernelWanAttnProcessor", "install_shared_kernels"]
+__all__ = [
+    "SharedKernelWanAttnProcessor",
+    "det_skinny_linear",
+    "install_shared_kernels",
+    "parity_time_text_embedding_forward",
+]
