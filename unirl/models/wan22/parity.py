@@ -255,6 +255,35 @@ class _EngineOrderFinalNorm(torch.nn.Module):
         return F.layer_norm(x.float(), self.normalized_shape, None, None, self.eps).to(self.out_dtype)
 
 
+def _parity_ctx_state(torch_mod, os_mod):
+    """One-line snapshot of every process/thread state knob that can steer
+    cuBLAS/cuDNN kernel selection — printed from BOTH parity contexts at the
+    divergent step to diff them."""
+    import threading
+
+    t = torch_mod
+    parts = [
+        ("det", t.are_deterministic_algorithms_enabled()),
+        ("det_warn", t.is_deterministic_algorithms_warn_only_enabled()),
+        ("cudnn_det", t.backends.cudnn.deterministic),
+        ("cudnn_bench", t.backends.cudnn.benchmark),
+        ("tf32", t.backends.cuda.matmul.allow_tf32),
+        ("bf16red", t.backends.cuda.matmul.allow_bf16_reduced_precision_reduction),
+        ("fp16red", t.backends.cuda.matmul.allow_fp16_reduced_precision_reduction),
+        ("f32prec", t.get_float32_matmul_precision()),
+        ("blas", str(t.backends.cuda.preferred_blas_library())),
+        ("linalg", str(t.backends.cuda.preferred_linalg_library())),
+        ("inference", t.is_inference_mode_enabled()),
+        ("grad", t.is_grad_enabled()),
+        ("stream", t.cuda.current_stream().stream_id),
+        ("dev", t.cuda.current_device()),
+        ("thread", threading.current_thread().name),
+        ("ws_cfg", os_mod.environ.get("CUBLAS_WORKSPACE_CONFIG")),
+        ("lt_ws", os_mod.environ.get("CUBLASLT_WORKSPACE_SIZE")),
+    ]
+    return " ".join(f"{k}={v}" for k, v in parts)
+
+
 def det_skinny_linear(x: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor]) -> torch.Tensor:
     """Deterministic cuBLAS-free linear for tiny-batch (skinny/GEMV) calls.
 
@@ -389,6 +418,7 @@ def install_shared_kernels(transformer: torch.nn.Module) -> None:
 
 __all__ = [
     "SharedKernelWanAttnProcessor",
+    "_parity_ctx_state",
     "det_skinny_linear",
     "install_shared_kernels",
     "parity_time_text_embedding_forward",

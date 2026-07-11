@@ -194,6 +194,9 @@ class WAN22DiffusionStep(DiffusionStep[WAN22Bundle, WAN21Conditions]):
         if _dbg and 985.0 < _t0 < 995.0 and not getattr(WAN22DiffusionStep, "_blk_dbg_fired", False):
             WAN22DiffusionStep._blk_dbg_fired = True
             from unirl.kernels.sd3 import parity_debug_sha as _bsha
+            from unirl.models.wan22.parity import _parity_ctx_state as _pcs
+
+            print("[wan22-ctx] TRAINER " + _pcs(torch, _os), flush=True)
 
             _target = model.transformer.high_noise if use_high_noise else model.transformer.low_noise
 
