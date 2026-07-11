@@ -195,6 +195,22 @@ class WAN22DiffusionStep(DiffusionStep[WAN22Bundle, WAN21Conditions]):
             WAN22DiffusionStep._blk_dbg_fired = True
             from unirl.kernels.sd3 import parity_debug_sha as _bsha
 
+            _os.makedirs("/root/parity_dump", exist_ok=True)
+            torch.save(
+                {"t": timestep.detach().cpu(), "enc": prompt_embeds.detach().cpu(), "x": sample_cat.detach().cpu()},
+                "/root/parity_dump/trainer_in.pt",
+            )
+
+            _target_pre = model.transformer.high_noise if use_high_noise else model.transformer.low_noise
+
+            def _cond_dump(_m, _i, o):
+                torch.save(
+                    tuple(v.detach().cpu() if isinstance(v, torch.Tensor) else v for v in o),
+                    "/root/parity_dump/trainer_cond.pt",
+                )
+
+            _hook_handles.append(_target_pre.condition_embedder.register_forward_hook(_cond_dump))
+
             _target = model.transformer.high_noise if use_high_noise else model.transformer.low_noise
 
             def _mk(name):
