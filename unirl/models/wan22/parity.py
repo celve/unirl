@@ -38,14 +38,19 @@ trainer's forward **bitwise-identical** to vLLM-Omni v0.20.0's
    state-dict-neutral.
 
 4. **Time embedding** (``parity_time_text_embedding_forward`` +
-   ``det_skinny_linear``): the embedder code is line-identical on both sides
-   (the engine imports diffusers' ``Timesteps``/``TimestepEmbedding``), but
-   its M=1 GEMV chain is NOT bit-stable under cuBLAS — algorithm selection
-   for skinny problems shifts with per-process workspace state (observed:
-   the trainer replay flipped from step 1 onward after the allocator's
-   OOM-retry cleared cuBLAS workspaces, while every fat GEMM held). Both
-   sides therefore run the time path through an explicit fp32
-   broadcast-mul+sum kernel; the engine gets the same function via
+   ``det_skinny_linear``): two seams, one function.
+   (a) FSDP2's root ``fully_shard`` wrap casts floating forward inputs to
+   ``param_dtype`` (``cast_forward_inputs`` defaults True), so the trainer's
+   model-level ``timestep`` arrives bf16-rounded (989.5833 → 988) while the
+   engine's stays fp32 — an irreversible input difference invisible outside
+   FSDP (probes pass; step 0 matches because t=1000 is bf16-exact). The
+   shared forward rounds t to bf16 on BOTH sides before the sinusoid.
+   (b) The M=1 GEMV chain is kept off cuBLAS entirely
+   (``det_skinny_linear``: explicit fp32 broadcast-mul+sum): skinny-GEMM
+   algorithm selection is sensitive to operand pointer alignment (verified
+   directly — a sub-16-byte offset copy of the same weights changes the
+   bf16 GEMV bits), and trainer weights can live as flat-buffer views under
+   sharded setups. The engine gets the same function via
    ``patch_wan22_shared_kernels``.
 
 Already identical on both sides (verified against the v0.20.0 source — no
@@ -339,6 +344,18 @@ def parity_time_text_embedding_forward(
     te = self.time_embedder
     if getattr(te, "cond_proj", None) is not None or getattr(te, "post_act", None) is not None:
         raise RuntimeError("parity time embedding: unexpected TimestepEmbedding extras (cond_proj/post_act)")
+
+    # Round the timestep to bf16 BEFORE the sinusoid, on both sides. The
+    # trainer's t arrives already bf16-rounded — FSDP2's root ``fully_shard``
+    # wrap casts every floating forward input to ``param_dtype``
+    # (``MixedPrecisionPolicy.cast_forward_inputs`` defaults to True), and
+    # bf16 rounding is not invertible (989.5833 → 988), so the fp32 value
+    # cannot be recovered inside the model. Applying the same rounding here
+    # makes the engine (which receives fp32 t) condition on the identical
+    # value — the SD3 parity convention. Exact at step 0 (t=1000 is
+    # bf16-representable); a ≤0.2% t quantization elsewhere, identical on
+    # both sides.
+    timestep = timestep.to(torch.bfloat16)
 
     sinusoid = self.timesteps_proj(timestep)
     w_dtype = te.linear_1.weight.dtype
