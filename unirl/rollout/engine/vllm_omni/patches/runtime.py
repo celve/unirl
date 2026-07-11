@@ -870,92 +870,6 @@ def patch_wan22_shared_kernels() -> None:
                     _wan_logged["blk_fired"] = True
                     from unirl.kernels.sd3 import parity_debug_sha as _bsha
 
-                    import torch as _torch
-
-                    _os3.makedirs("/root/parity_dump", exist_ok=True)
-                    _torch.save(
-                        {"t": ts.detach().cpu(), "enc": ehs.detach().cpu(), "x": hs.detach().cpu()},
-                        "/root/parity_dump/engine_in.pt",
-                    )
-
-                    _in_dump = {"on": False}
-
-                    def _cond_dump(_m, _i, _kw, o):
-                        if _in_dump["on"]:
-                            return
-                        _in_dump["on"] = True
-                        _torch.save(
-                            tuple(v.detach().cpu() if isinstance(v, _torch.Tensor) else v for v in o),
-                            "/root/parity_dump/engine_cond.pt",
-                        )
-                        w1 = _m.time_embedder.linear_1.weight
-                        wx = _m.text_embedder.linear_1.weight
-                        _torch.save(
-                            {"time_l1": w1.detach().cpu(), "text_l1": wx.detach().cpu()},
-                            "/root/parity_dump/engine_cond_w.pt",
-                        )
-                        with _torch.no_grad():
-                            r1 = _m(*_i, **_kw)
-                            r2 = _m(*_i, **_kw)
-
-                        _sin = _m.timesteps_proj(_i[0]).to(w1.dtype)
-                        _F = _torch.nn.functional
-                        with _torch.no_grad():
-                            _o2 = _F.linear(_F.silu(_F.linear(_sin, w1, _m.time_embedder.linear_1.bias)), _m.time_embedder.linear_2.weight, _m.time_embedder.linear_2.bias)
-                            _o3 = _F.linear(
-                                _F.silu(_F.linear(_sin.clone(), w1.clone(), _m.time_embedder.linear_1.bias.clone())),
-                                _m.time_embedder.linear_2.weight.clone(),
-                                _m.time_embedder.linear_2.bias.clone(),
-                            )
-
-                        def _pr(t):
-                            return "%d/%s/%s" % (t.data_ptr() % 256, tuple(t.stride()), type(t).__name__)
-
-                        print(
-                            "[wan22-cond-dbg2] ENGINE manual=%s clone=%s | t=%s sin=%s w1=%s b1=%s w2=%s b2=%s | alloc=%s conf=%s lt_ws=%s ws_cfg=%s"
-                            % (
-                                _bsha(_o2),
-                                _bsha(_o3),
-                                _pr(_i[0]),
-                                _pr(_sin),
-                                _pr(w1),
-                                _pr(_m.time_embedder.linear_1.bias),
-                                _pr(_m.time_embedder.linear_2.weight),
-                                _pr(_m.time_embedder.linear_2.bias),
-                                _torch.cuda.get_allocator_backend(),
-                                _os3.environ.get("PYTORCH_CUDA_ALLOC_CONF"),
-                                _os3.environ.get("CUBLASLT_WORKSPACE_SIZE"),
-                                _os3.environ.get("CUBLAS_WORKSPACE_CONFIG"),
-                            ),
-                            flush=True,
-                        )
-                        _in_dump["on"] = False
-                        print(
-                            "[wan22-cond-dbg] ENGINE cls_t1=%s dt_t1=%s w_t1=%s cls_x1=%s dt_x1=%s w_x1=%s "
-                            "temb0=%s re1=%s re2=%s tx0=%s rex1=%s rex2=%s bf16red=%s tf32=%s"
-                            % (
-                                type(_m.time_embedder.linear_1).__name__,
-                                w1.dtype,
-                                _bsha(w1),
-                                type(_m.text_embedder.linear_1).__name__,
-                                wx.dtype,
-                                _bsha(wx),
-                                _bsha(o[0]),
-                                _bsha(r1[0]),
-                                _bsha(r2[0]),
-                                _bsha(o[2]),
-                                _bsha(r1[2]),
-                                _bsha(r2[2]),
-                                _torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction,
-                                _torch.backends.cuda.matmul.allow_tf32,
-                            ),
-                            flush=True,
-                        )
-
-                    _hook_handles.append(
-                        self.condition_embedder.register_forward_hook(_cond_dump, with_kwargs=True)
-                    )
-
                     def _mk(name):
                         def _h(_m, _i, o):
                             t = o[0] if isinstance(o, tuple) else o
@@ -967,19 +881,6 @@ def patch_wan22_shared_kernels() -> None:
                     _hook_handles.append(self.condition_embedder.register_forward_hook(_mk("condition_embedder")))
                     for _bi, _blk in enumerate(self.blocks):
                         _hook_handles.append(_blk.register_forward_hook(_mk(f"block{_bi:02d}")))
-                if _wan_logged["count"] < 26 and _os3.path.exists("/tmp/unirl_parity_debug"):
-                    from unirl.kernels.sd3 import parity_debug_sha as _tsha
-
-                    _cn = _wan_logged["count"]
-
-                    def _temb_trace(_m, _i, o, _cn=_cn):
-                        print(
-                            "[wan22-temb-trace] ENGINE call=%d t=%.6f temb=%s"
-                            % (_cn, float(ts.reshape(-1)[0]) if ts is not None else -1.0, _tsha(o[0])),
-                            flush=True,
-                        )
-
-                    _hook_handles.append(self.condition_embedder.register_forward_hook(_temb_trace))
                 try:
                     out = _orig(self, *args, **kwargs)
                 finally:
