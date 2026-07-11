@@ -137,7 +137,16 @@ def _raw_shared_attention(
     """Engine-exact unmasked attention: vllm-omni v0.20.0
     ``FlashAttentionImpl.forward_cuda`` with ``attn_mask=None``.
 
-    Layout ``[B, S, H, D]`` in and out.
+    Layout ``[B, S, H, D]`` in and out. ``key``/``value`` may carry a
+    different sequence length than ``query`` (cross-attention — wan22).
+
+    The varlen-dense fallback generalizes upstream's ``_forward_varlen_dense``
+    to unequal kv length: upstream builds ONE ``cu_seqlens`` from the query
+    length and passes it for k too, which is an out-of-bounds read for
+    cross-attention (wan22 q=video tokens vs k=512 text slots — stock wan on
+    a dense-flash-less install crashes there). For q_len == k_len the
+    expression below is byte-for-byte upstream's, so SD3 parity is unchanged;
+    for cross shapes both sides run THIS function, so the contract holds.
     """
     dense, varlen, _ = resolve_flash_entries()
     if dense is not None:
@@ -148,9 +157,15 @@ def _raw_shared_attention(
             "shared_attention requires a flash-attention build (fa3-fwd, "
             "flash-attn, or vllm.vllm_flash_attn); none importable."
         )
-    # Varlen-dense fallback — byte-for-byte the engine's _forward_varlen_dense.
+    # Varlen-dense fallback — engine's _forward_varlen_dense, kv-length-correct.
     batch_size, q_len = query.size()[:2]
-    cu_seqlens = torch.arange(0, (batch_size + 1) * q_len, step=q_len, dtype=torch.int32, device=query.device)
+    k_len = key.size(1)
+    cu_seqlens_q = torch.arange(0, (batch_size + 1) * q_len, step=q_len, dtype=torch.int32, device=query.device)
+    cu_seqlens_k = (
+        cu_seqlens_q
+        if k_len == q_len
+        else torch.arange(0, (batch_size + 1) * k_len, step=k_len, dtype=torch.int32, device=query.device)
+    )
     query = query.flatten(0, 1)
     key = key.flatten(0, 1)
     value = value.flatten(0, 1)
@@ -158,10 +173,10 @@ def _raw_shared_attention(
         q=query,
         k=key,
         v=value,
-        cu_seqlens_q=cu_seqlens,
-        cu_seqlens_k=cu_seqlens,
+        cu_seqlens_q=cu_seqlens_q,
+        cu_seqlens_k=cu_seqlens_k,
         max_seqlen_q=q_len,
-        max_seqlen_k=q_len,
+        max_seqlen_k=k_len,
         causal=causal,
         softmax_scale=softmax_scale,
     )
