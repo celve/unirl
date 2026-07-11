@@ -202,6 +202,8 @@ class RLWan22Pipeline(Wan22Pipeline):
         ``VLLMOmniBackend.boot``."""
         if os.environ.get("UNIRL_VLLM_OMNI_PARITY") != "1":
             return
+        if getattr(req.sampling_params, "sigmas", None) is None:
+            return  # non-RL traffic (engine boot dummy warmup) — no trajectory is replayed
         gs = getattr(req.sampling_params, "guidance_scale", None)
         provided = bool(getattr(req.sampling_params, "guidance_scale_provided", False))
         gs2 = getattr(req.sampling_params, "guidance_scale_2", None)
