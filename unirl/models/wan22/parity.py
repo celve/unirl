@@ -349,6 +349,31 @@ def parity_time_text_embedding_forward(
     temb = temb.type_as(encoder_hidden_states)
     timestep_proj = det_skinny_linear(F.silu(temb), self.time_proj.weight, self.time_proj.bias)
 
+    import os as _os_dbg
+
+    if _os_dbg.path.exists("/tmp/unirl_parity_debug"):
+        t0 = float(timestep.reshape(-1)[0])
+        if 985.0 < t0 < 995.0:
+            from unirl.kernels.sd3 import parity_debug_sha as _sha_dbg
+
+            print(
+                "[wan22-tpath] grad=%s t0=%.17g t_dt=%s t_stride=%s t=%s sin=%s w1=%s b1=%s l2w=%s temb=%s enc_dt=%s"
+                % (
+                    torch.is_grad_enabled(),
+                    t0,
+                    timestep.dtype,
+                    tuple(timestep.stride()),
+                    _sha_dbg(timestep.contiguous()),
+                    _sha_dbg(sinusoid),
+                    _sha_dbg(te.linear_1.weight),
+                    _sha_dbg(te.linear_1.bias),
+                    _sha_dbg(te.linear_2.weight),
+                    _sha_dbg(temb),
+                    encoder_hidden_states.dtype,
+                ),
+                flush=True,
+            )
+
     encoder_hidden_states = self.text_embedder(encoder_hidden_states)
     return temb, timestep_proj, encoder_hidden_states, None
 
