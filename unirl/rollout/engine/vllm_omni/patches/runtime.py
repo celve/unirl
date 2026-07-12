@@ -826,14 +826,14 @@ def patch_wan22_shared_kernels() -> None:
 
     Wan-specific targets:
 
-    - ``vllm_omni.diffusion.layers.norm.RMSNorm`` (``forward_cuda`` /
-      ``forward_native``) → ``shared_rms_norm``. Wan's qk-norms use this
-      vllm-omni-local class (across-heads width, pre-head-split), NOT the
-      ``vllm.model_executor`` RMSNorm the SD3 patch targets. Its fused CUDA
-      kernel otherwise rounds differently from the trainer's eager norm.
-      Blast radius: only the DiT qk-norms use this class in the wan2_2 model;
-      the block norms are ``LayerNorm``/``AdaLayerNorm`` whose forward_cuda is
-      already the pure-torch fp32 expression the trainer mirrors.
+    - ``vllm_omni.diffusion.layers.norm.RMSNorm``: left NATIVE (fused
+      ``vllm._custom_ops.rms_norm``). The trainer calls the SAME fused kernel
+      via ``shared_rms_norm_fused`` — v2 unifies onto the engine's fast op
+      instead of patching the engine down to the eager composition (v1),
+      recovering stock engine speed. Wan's qk-norms are the only users of
+      this class in the wan2_2 model; the block norms are
+      ``LayerNorm``/``AdaLayerNorm`` whose forward_cuda is already the
+      pure-torch fp32 expression the trainer mirrors.
     - ``WanTimeTextImageEmbedding.forward`` → the shared deterministic
       time-path replica from ``unirl.models.wan22.parity`` (cuBLAS skinny-GEMM
       algo selection is call-context-dependent; see ``det_skinny_linear``).
@@ -852,18 +852,7 @@ def patch_wan22_shared_kernels() -> None:
     if _os.environ.get("UNIRL_VLLM_OMNI_PARITY") != "1":
         return
 
-    from vllm_omni.diffusion.layers.norm import RMSNorm as _OmniRMSNorm
-
-    from unirl.kernels.sd3 import kernel_fingerprint, shared_rms_norm
-
-    if not getattr(_OmniRMSNorm.forward_cuda, "_diffrl_wan22_parity", False):
-
-        def _parity_wan_rms(self, x, *, _shared=shared_rms_norm):
-            return _shared(x, self.weight, float(self.variance_epsilon))
-
-        _parity_wan_rms._diffrl_wan22_parity = True  # type: ignore[attr-defined]
-        _OmniRMSNorm.forward_cuda = _parity_wan_rms
-        _OmniRMSNorm.forward_native = _parity_wan_rms
+    from unirl.kernels.sd3 import kernel_fingerprint
 
     try:
         from vllm_omni.diffusion.models.wan2_2.wan2_2_transformer import (

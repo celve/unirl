@@ -7,8 +7,9 @@ trainer's forward **bitwise-identical** to vLLM-Omni v0.20.0's
 1. **Attention** (``SharedKernelWanAttnProcessor``):
    - self-attention: the engine's fused QKV GEMM (one ``[D -> 3D]``
      ``F.linear`` with catted weights, split in thirds), qk-norm on the FLAT
-     ``heads*head_dim`` width BEFORE the head split (``shared_rms_norm`` —
-     also patched into the engine's ``vllm_omni.diffusion.layers.norm.RMSNorm``),
+     ``heads*head_dim`` width BEFORE the head split (``shared_rms_norm_fused``
+     — the ENGINE's own fused ``vllm._custom_ops.rms_norm`` kernel, called
+     from the trainer with an eager backward; the engine runs unpatched),
      the engine's RoPE application (cos/sin strided-sliced then cast to the
      activation dtype, rotate multiply in bf16 — diffusers multiplies in
      fp32), and the shared flash-attention kernel + engine epilogue;
@@ -73,7 +74,7 @@ from typing import Optional, Tuple
 import torch
 import torch.nn.functional as F
 
-from unirl.kernels.sd3 import shared_attention, shared_rms_norm
+from unirl.kernels.sd3 import shared_attention, shared_rms_norm, shared_rms_norm_fused
 from unirl.models.sd3.parity import _fused_linear, _plain_linear
 
 
@@ -125,8 +126,8 @@ class SharedKernelWanAttnProcessor:
             qkv = _fused_linear([attn.to_q, attn.to_k, attn.to_v], hidden_states)
             query, key, value = qkv.chunk(3, dim=-1)
             # qk-norm on the FLAT heads*head_dim width, BEFORE the head split.
-            query = shared_rms_norm(query, attn.norm_q.weight, _rms_eps(attn.norm_q))
-            key = shared_rms_norm(key, attn.norm_k.weight, _rms_eps(attn.norm_k))
+            query = shared_rms_norm_fused(query, attn.norm_q.weight, _rms_eps(attn.norm_q))
+            key = shared_rms_norm_fused(key, attn.norm_k.weight, _rms_eps(attn.norm_k))
             query = query.unflatten(2, (heads, -1))
             key = key.unflatten(2, (heads, -1))
             value = value.unflatten(2, (heads, -1))
@@ -141,10 +142,10 @@ class SharedKernelWanAttnProcessor:
         else:
             # --- cross-attention: engine WanCrossAttention.forward ---
             query = _plain_linear(attn.to_q, hidden_states)
-            query = shared_rms_norm(query, attn.norm_q.weight, _rms_eps(attn.norm_q))
+            query = shared_rms_norm_fused(query, attn.norm_q.weight, _rms_eps(attn.norm_q))
             key = _plain_linear(attn.to_k, encoder_hidden_states)
             value = _plain_linear(attn.to_v, encoder_hidden_states)
-            key = shared_rms_norm(key, attn.norm_k.weight, _rms_eps(attn.norm_k))
+            key = shared_rms_norm_fused(key, attn.norm_k.weight, _rms_eps(attn.norm_k))
             query = query.unflatten(2, (heads, -1))
             key = key.unflatten(2, (heads, -1))
             value = value.unflatten(2, (heads, -1))
@@ -357,14 +358,39 @@ def parity_time_text_embedding_forward(
     # both sides.
     timestep = timestep.to(torch.bfloat16)
 
-    sinusoid = self.timesteps_proj(timestep)
-    w_dtype = te.linear_1.weight.dtype
-    if sinusoid.dtype != w_dtype and w_dtype != torch.int8:
-        sinusoid = sinusoid.to(w_dtype)
-    temb = det_skinny_linear(sinusoid, te.linear_1.weight, te.linear_1.bias)
-    temb = det_skinny_linear(F.silu(temb), te.linear_2.weight, te.linear_2.bias)
-    temb = temb.type_as(encoder_hidden_states)
-    timestep_proj = det_skinny_linear(F.silu(temb), self.time_proj.weight, self.time_proj.bias)
+    # Per-t memo: the whole time path is a pure, grad-free function of the
+    # (bf16-rounded) timestep and the FROZEN embedder weights — a 20-step
+    # schedule has 20 distinct values, and both sides recompute it every
+    # forward (engine: every request×step; trainer: every replay step). A
+    # cache hit returns the *identical tensors* the miss produced, so parity
+    # is unaffected by construction. Keyed on the exact t bits plus the
+    # weight object identity+version so any in-place weight change (full
+    # weight sync) invalidates.
+    w1 = te.linear_1.weight
+    key = (
+        tuple(timestep.reshape(-1).view(torch.int16).tolist()),
+        encoder_hidden_states.dtype,
+        id(w1),
+        w1._version,
+    )
+    cache = getattr(self, "_unirl_tcache", None)
+    if cache is None:
+        cache = {}
+        self._unirl_tcache = cache
+    hit = cache.get(key)
+    if hit is not None:
+        temb, timestep_proj = hit
+    else:
+        sinusoid = self.timesteps_proj(timestep)
+        w_dtype = w1.dtype
+        if sinusoid.dtype != w_dtype and w_dtype != torch.int8:
+            sinusoid = sinusoid.to(w_dtype)
+        temb = det_skinny_linear(sinusoid, w1, te.linear_1.bias)
+        temb = det_skinny_linear(F.silu(temb), te.linear_2.weight, te.linear_2.bias)
+        temb = temb.type_as(encoder_hidden_states)
+        timestep_proj = det_skinny_linear(F.silu(temb), self.time_proj.weight, self.time_proj.bias)
+        if len(cache) < 64:
+            cache[key] = (temb.detach(), timestep_proj.detach())
 
     import os as _os_dbg
 

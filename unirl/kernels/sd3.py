@@ -270,6 +270,60 @@ def shared_rms_norm(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.
     return (weight.to(torch.float32) * x).to(input_dtype)
 
 
+class _FusedRMSNorm(torch.autograd.Function):
+    """vLLM's fused CUDA RMSNorm with a hand-written eager backward.
+
+    Forward replicates ``vllm_omni.diffusion.layers.norm.RMSNorm._forward_fused``
+    byte-for-byte (same ``vllm._custom_ops.rms_norm`` kernel on the same 2-D
+    reshape), so the trainer matches the engine's NATIVE path with no engine
+    patch at all — the v1 eager ``shared_rms_norm`` swap traded the fused
+    kernel away for bitwiseness; this keeps both. The backward is standard
+    eager RMSNorm calculus in fp32 — gradient numerics are a training
+    concern, not a parity one (the gate compares forward logπ only).
+    """
+
+    @staticmethod
+    def forward(ctx, x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
+        from vllm import _custom_ops as _ops
+
+        orig_shape = x.shape
+        x_2d = x.reshape(-1, orig_shape[-1])
+        out = torch.empty_like(x_2d)
+        _ops.rms_norm(out, x_2d, weight.data, eps)
+        ctx.save_for_backward(x, weight)
+        ctx.eps = eps
+        return out.reshape(orig_shape)
+
+    @staticmethod
+    def backward(ctx, grad_out: torch.Tensor):
+        x, weight = ctx.saved_tensors
+        xf = x.float()
+        gf = grad_out.float()
+        inv_rms = torch.rsqrt(xf.pow(2).mean(-1, keepdim=True) + ctx.eps)
+        xhat = xf * inv_rms
+        wg = gf * weight.float()
+        dx = (wg - xhat * (wg * xhat).mean(-1, keepdim=True)) * inv_rms
+        grad_w = None
+        if ctx.needs_input_grad[1]:
+            grad_w = (gf * xhat).reshape(-1, x.shape[-1]).sum(0).to(weight.dtype)
+        return dx.to(x.dtype), grad_w, None
+
+
+def shared_rms_norm_fused(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
+    """RMSNorm on the ENGINE's fused CUDA kernel — trainer-callable.
+
+    Bit-parity contract: the engine's ``RMSNorm.forward_cuda`` runs
+    ``vllm._custom_ops.rms_norm`` natively; the trainer calls the same kernel
+    through ``_FusedRMSNorm`` (adding only autograd). Falls back to the eager
+    ``shared_rms_norm`` off-GPU (CPU tests) — the engine's own ``forward_cuda``
+    falls back on kernel failure too, and the parity gate is the arbiter if
+    the two fallback policies ever disagree in vivo.
+    """
+    if x.is_cuda:
+        return _FusedRMSNorm.apply(x, weight, float(eps))
+    return shared_rms_norm(x, weight, eps)
+
+
 # ---------------------------------------------------------------------------
 # pos_embed buffer restore (seam: engine buffer is fp32(checkpoint), trainer's
 # was cast to bf16 by from_pretrained)
