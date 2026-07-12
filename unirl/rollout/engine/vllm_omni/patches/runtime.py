@@ -638,6 +638,65 @@ def patch_hi3_flow_alignment() -> None:
         _DecoderLayer.forward = _patched_decoder_forward
 
 
+def patch_varlen_kv_length() -> None:
+    """Fix vllm-omni's varlen-dense fallback for cross-attention (q_len != k_len).
+
+    Upstream ``FlashAttentionImpl._forward_varlen_dense`` (v0.20.0) derives
+    ``cu_seqlens_k``/``max_seqlen_k`` from the QUERY length. Self-attention is
+    unaffected (q_len == k_len), but wan2.2 cross-attention (q=4800 image
+    tokens over k=512 text tokens) makes flash-attn read the key/value
+    buffers out of bounds — a CUDA illegal memory access whenever the dense
+    flash entry is unavailable and this fallback runs. Byte-identical to
+    upstream when q_len == k_len; env-independent (a correctness fix, not a
+    parity knob — the parity shared kernel carries the same fix separately).
+    """
+    try:
+        from vllm_omni.diffusion.attention.backends.flash_attn import (
+            FlashAttentionImpl as _FAImpl,
+        )
+    except ImportError:
+        return
+
+    if getattr(_FAImpl._forward_varlen_dense, "_diffrl_kv_len_fix", False):
+        return
+
+    def _forward_varlen_dense(self, query, key, value):
+        import torch as _t
+
+        from vllm_omni.diffusion.attention.backends.utils.fa import (
+            flash_attn_varlen_func,
+        )
+
+        batch_size, q_len = query.size()[:2]
+        k_len = key.size(1)
+        cu_seqlens_q = _t.arange(0, (batch_size + 1) * q_len, step=q_len, dtype=_t.int32, device=query.device)
+        cu_seqlens_k = (
+            cu_seqlens_q
+            if k_len == q_len
+            else _t.arange(0, (batch_size + 1) * k_len, step=k_len, dtype=_t.int32, device=query.device)
+        )
+        query = query.flatten(0, 1)
+        key = key.flatten(0, 1)
+        value = value.flatten(0, 1)
+
+        out = flash_attn_varlen_func(
+            q=query,
+            k=key,
+            v=value,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_k=cu_seqlens_k,
+            max_seqlen_q=q_len,
+            max_seqlen_k=k_len,
+            causal=self.causal,
+            softmax_scale=self.softmax_scale,
+        )
+        out = self._unwrap_flash_output(out)
+        return out.reshape(batch_size, q_len, *out.shape[1:])
+
+    _forward_varlen_dense._diffrl_kv_len_fix = True  # type: ignore[attr-defined]
+    _FAImpl._forward_varlen_dense = _forward_varlen_dense
+
+
 def patch_sd3_shared_kernels() -> None:
     """Engine half of SD3 shared-kernel parity. Gated on
     ``UNIRL_VLLM_OMNI_PARITY=1`` (set by ``VLLMOmniBackend.boot`` when the
@@ -951,6 +1010,7 @@ class VLLMOmniHijack:
         patch_sigmas_passthrough()
         patch_hi3_flow_alignment()
         patch_master_port_unstrip()
+        patch_varlen_kv_length()
         patch_sd3_shared_kernels()
         patch_wan22_shared_kernels()
 
