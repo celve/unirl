@@ -39,6 +39,7 @@ from unirl.types.primitives import Texts
 from unirl.types.prompts import RolloutInputs
 from unirl.types.sample import Part, Sample, _part_with_field
 from unirl.types.sampling import BaseSamplingParams
+from unirl.utils.trajectory_dump import maybe_dump_trajectories
 
 logger = logging.getLogger(__name__)
 
@@ -192,6 +193,11 @@ class AgenticTrainer(ARTrainer):
 
         # GROUP-relative GRPO advantage over the ``n`` siblings per prompt.
         advantages = self._group_advantages(rewards, group_ids)
+
+        # Debug: dump every trajectory of this rollout (decoded turns + reward/advantage)
+        # when $TRAJ_DUMP_DIR is set — a no-op otherwise, and never raises. Placed BEFORE
+        # the loop below frees each gen Part's decoded ``primitive`` for training.
+        maybe_dump_trajectories(trajs, rewards, advantages, group_ids, rollout_id=rollout_id)
 
         # Assign each trajectory's scalar advantage to ALL its assistant turns; gather.
         train_parts: List[Part] = []

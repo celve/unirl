@@ -18,6 +18,12 @@
 #   QWEN3_INSTRUCT_PATH=... DATA_PATH=data/asearcher/train.jsonl \
 #   SERPER_KEY_ID=... JINA_API_KEYS=... JUDGE_URL=... JUDGE_MODEL=... \
 #   python -m unirl.train_deep_research --config-name=deep_research/deep_research_search_judge num_devices=2
+#
+# Serper via a gateway/proxy (non-serper.dev endpoint): set SERPER_URL to the proxy
+#   and SERPER_AUTH=bearer to send the key as ``Authorization: Bearer <SERPER_KEY_ID>``.
+# Debug: set TRAJ_DUMP_DIR=/abs/path to dump every trajectory of every rollout to
+#   <dir>/rollout_<id>.jsonl — one line per sample (decoded turns + reward + advantage).
+#   TRAJ_DUMP_MAX_CHARS>0 caps per-turn text (default 0 = full).
 
 num_devices: 2
 batch_size: 4 # P prompts_per_rollout; P*n = 8 must be divisible by num_devices
