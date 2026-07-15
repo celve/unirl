@@ -26,7 +26,7 @@
 #   TRAJ_DUMP_MAX_CHARS>0 caps per-turn text (default 0 = full).
 
 num_devices: 8
-batch_size: 8 # P prompts_per_rollout; P*n = 64 must be divisible by num_devices
+batch_size: 128 # P prompts_per_rollout; P*n = 1024 must be divisible by num_devices (tongyi_deepresearch batch_size=128)
 num_rollouts: 200
 weight_sync_interval: 1
 eval_interval: 0
@@ -80,18 +80,18 @@ backend:
     adam_beta1: 0.9
     adam_beta2: 0.999
     adam_epsilon: 1.0e-8
-    weight_decay: 0.01
+    weight_decay: 0.003 # tongyi_deepresearch
   scheduler_cfg:
     _target_: unirl.train.backend.base.LrSchedulerConfig
     type: constant
-    warmup_steps: 0
+    warmup_steps: 2 # ~0.001 warmup proportion, tongyi_deepresearch
     total_steps: 2000
 
 rollout:
   _target_: unirl.rollout.engine.agentic.engine.AgenticRolloutEngine
   config:
     _target_: unirl.rollout.engine.agentic.config.AgenticRolloutEngineConfig
-    max_turns: 16 # deep-research depth; aligned to tongyi_deepresearch
+    max_turns: 100 # tongyi_deepresearch max_llm_calls_per_run
     per_worker_concurrency: 8
     inner:
       _target_: unirl.rollout.engine.sglang.config.SGLangEngineConfig
@@ -127,7 +127,7 @@ rollout:
         enable_lora: false
     env:
       _target_: unirl.rollout.loop.tool_environment.ToolEnvironment
-      max_turns: 16 # keep == config.max_turns
+      max_turns: 100 # keep == config.max_turns
       tools:
         - _target_: unirl.rollout.loop.tools.search.SearchTool
           top_k: 10
@@ -189,7 +189,7 @@ data_source:
       eval_data_path: ${oc.env:EVAL_DATA_PATH,${oc.env:DATA_PATH}} # unused (eval_interval=0); defaults to train
       seed: 42
     algorithm:
-      prompts_per_rollout: 8 # == batch_size (P)
+      prompts_per_rollout: 128 # == batch_size (P)
 
 sampling:
   _target_: unirl.types.sampling.ARSamplingParams
