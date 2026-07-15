@@ -56,7 +56,7 @@ import json
 import logging
 import os
 import time
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 from hydra.utils import instantiate
@@ -67,6 +67,7 @@ from unirl.distributed.tensor import TensorRef, hydrate
 from unirl.distributed.tensor.batch import Batch
 from unirl.train.stack import TrainStepResult
 from unirl.trainer.base import BaseTrainer, build_sampling_dict
+from unirl.trainer.eval_suites import EvalRewardSuite, build_eval_suites
 from unirl.types.primitives import Texts
 from unirl.types.prompts import RolloutInputs
 from unirl.types.sample import Part, Sample
@@ -143,6 +144,11 @@ class UnifiedModelTrainer(BaseTrainer):
         dump_dir: Optional[str] = None,
         logging_cfg: Optional[DictConfig] = None,
         enable_fsdp_offload: bool = True,
+        eval_interval: int = 0,
+        eval_num_prompts: int = 32,
+        eval_cfg_text_scale: float = 4.0,
+        eval_eta: float = 0.0,
+        eval_rewards_cfg: Optional[Any] = None,
     ) -> None:
         super().__init__(cfg=cfg, logging_cfg=logging_cfg)
         self.batch_size = batch_size
@@ -168,6 +174,16 @@ class UnifiedModelTrainer(BaseTrainer):
 
         self.sampling_params: Dict[str, BaseSamplingParams] = build_sampling_dict(sampling_cfg)
 
+        # Periodic eval cadence (every eval_interval rollouts; eval_interval=0
+        # disables it). Scores only the image track, generated at the
+        # deterministic best-quality setting (CFG=eval_cfg_text_scale,
+        # eta=eval_eta) — same knobs/semantics as DiffusionTrainer; extra
+        # eval-only rewards: unirl.trainer.eval_suites.
+        self.eval_interval = int(eval_interval)
+        self.eval_num_prompts = int(eval_num_prompts)
+        self.eval_cfg_text_scale = float(eval_cfg_text_scale)
+        self.eval_eta = float(eval_eta)
+
         # Set below from the `sync` block; None means no sync (e.g. trainside).
         self.weight_sync = None
 
@@ -179,6 +195,11 @@ class UnifiedModelTrainer(BaseTrainer):
             self.pipeline = remote_hydra(pipeline_cfg, bundle=self.bundle)
             self.backend = remote_hydra(backend_cfg, bundle=self.bundle)
             self.reward = remote_hydra(reward_cfg)
+            # Extra eval-only rewards (eval_rewards) — siblings of the training
+            # reward on this slab; see unirl.trainer.eval_suites.
+            self._eval_suites: List[EvalRewardSuite] = build_eval_suites(
+                eval_rewards_cfg, data_source_cfg=data_source_cfg, enabled=self.eval_interval > 0
+            )
 
             # Two algorithms over the SAME shared pipeline (each resolves its
             # own stage via ``stage_attr``: ar→pipeline.ar, image→pipeline.diffusion).
@@ -296,7 +317,9 @@ class UnifiedModelTrainer(BaseTrainer):
         role_cls = parsed.pop("role_cls")
         return self.pool.create_remote(role_cls, device_ids=[anchor_device], init_kwargs=parsed)
 
-    def _build_request_sample(self, inputs: RolloutInputs, rollout_id: int) -> Sample:
+    def _build_request_sample(
+        self, inputs: RolloutInputs, rollout_id: int, *, sampling: Optional[Dict[str, BaseSamplingParams]] = None
+    ) -> Sample:
         """Turn a data-source batch of ``P`` prompts into the unified request ``Sample``.
 
         Pre-forks the unified lineage shells ``[input, ar_shell(P*N),
@@ -305,9 +328,15 @@ class UnifiedModelTrainer(BaseTrainer):
         diffusion SDE-step schedule (``scheduler`` nulled so only the concrete
         ``sde_indices`` ride) and salts the root ids. The AR sub-block has no SDE
         machinery and is left untouched.
+
+        ``sampling`` overrides the modality-keyed sampling dict — eval forces the
+        diffusion sub-block onto the deterministic best-quality setting; the SDE
+        schedule is still resolved off whichever diffusion params result. ``None``
+        (default) uses ``self.sampling_params`` (the training setting).
         """
-        diff_params = self.sampling_params.get("diffusion")
-        ar_params = self.sampling_params.get("ar")
+        sp = sampling if sampling is not None else self.sampling_params
+        diff_params = sp.get("diffusion")
+        ar_params = sp.get("ar")
         sde_indices = diff_params.resolve_sde_indices(rollout_id)
         # Driver-x_T opt-out: env DISABLE_DRIVER_XT (parity with DiffusionTrainer) OR a
         # recipe-set params flag. The hi3 DiT adapter skips init_noise_group_ids when
@@ -637,6 +666,110 @@ class UnifiedModelTrainer(BaseTrainer):
         except Exception as exc:  # noqa: BLE001 — dump must never break training
             logger.warning("[HI3-DUMP] rollout %d dump failed (non-fatal): %s", rollout_id, exc)
 
+    def evaluate(self, step: int) -> float:
+        """Periodic eval on the eval set (no training); returns the mean image reward.
+
+        Mirrors :meth:`train_step`'s rollout+reward path but skips
+        credit-assign/advantage/backward: run the ``P->P*N->P*N*M`` fan-out
+        through :meth:`run_rollout` at the deterministic best-quality setting
+        (CFG at ``eval_cfg_text_scale``, ``eta=eval_eta``) and score ONLY the
+        frontier (image) Part — the training reward plus the ``eval_rewards``
+        suites (see :mod:`unirl.trainer.eval_suites`). Logs one ``eval/*`` row;
+        returns ``eval/reward``.
+
+        Syncs the live adapter into the engines once per eval (EXTRACT with the
+        base onloaded -> wake -> PUSH -> sleep, mirroring :meth:`train_step`'s
+        ordering) — train_step syncs BEFORE its generate, so without this the
+        engines would eval one update stale. Pushed weights persist across
+        sleep/wake, so the passes below just wake/sleep around each chunk's
+        rollout. Unlike train_step, eval never onloads the base after the
+        extract: there is no backward, so the FSDP state stays offloaded (the
+        steady state) throughout.
+        """
+        # Override only the "diffusion" entry of the modality-keyed sampling dict.
+        # CFG strength lives in ``cfg_text_scale`` on Bagel-style sampling params
+        # and in ``guidance_scale`` on the standard DiffusionSamplingParams (HI3,
+        # ...) — same fallback as :meth:`DiffusionTrainer.evaluate`.
+        base_diffusion = self.sampling_params.get("diffusion")
+        replace_kwargs = dict(eta=self.eval_eta)
+        if "cfg_text_scale" in {f.name for f in dataclasses.fields(base_diffusion)}:
+            replace_kwargs["cfg_text_scale"] = self.eval_cfg_text_scale
+        else:
+            replace_kwargs["guidance_scale"] = self.eval_cfg_text_scale
+        eval_diffusion = dataclasses.replace(base_diffusion, **replace_kwargs)
+        eval_sp = {**self.sampling_params, "diffusion": eval_diffusion}
+        # Sync the CURRENT adapter once for the whole eval (PUSH needs awake
+        # engines, so it rides one short wake/sleep cycle here). No-op when there
+        # is no sync bridge (weight_sync is None).
+        if self.weight_sync is not None:
+            if self._enable_fsdp_offload:
+                self.backend.onload()
+            self.weight_sync.extract()
+            if self._enable_fsdp_offload:
+                self.backend.offload()
+            for eng in self.ar_rollouts + self.dit_rollouts:
+                eng.wake_up()
+            self.weight_sync.push()
+            for eng in self.ar_rollouts + self.dit_rollouts:
+                eng.sleep()
+        # Default pass: training reward + shared-set suites score the SAME images.
+        scorers = [("reward", self.reward)] + [(s.name, s.reward) for s in self._eval_suites if s.data_source is None]
+        metrics = self._eval_pass(self.data_source, self.eval_num_prompts, scorers, eval_sp, step)
+        for suite in self._eval_suites:
+            if suite.data_source is not None:
+                n = suite.num_prompts or self.eval_num_prompts
+                metrics.update(self._eval_pass(suite.data_source, n, [(suite.name, suite.reward)], eval_sp, step))
+        logger.info(
+            "EVAL step %d  (cfg=%.1f eta=%.1f)  %s",
+            step,
+            self.eval_cfg_text_scale,
+            self.eval_eta,
+            "  ".join(f"{k}={v:.4f}" for k, v in metrics.items()),
+        )
+        self.wandb_logger.log_eval(step, metrics)
+        return metrics["reward"]
+
+    def _eval_pass(
+        self,
+        data_source: Any,
+        num_prompts: int,
+        scorers: List[Tuple[str, Any]],
+        eval_sp: Dict[str, BaseSamplingParams],
+        step: int,
+    ) -> Dict[str, float]:
+        """One generate->score sweep over one eval set; returns each scorer's mean.
+
+        Chunked by ``self.batch_size`` (the un-expanded P-prompt request
+        DP-splits, so the chunk must be dp-divisible; ``batch_size`` is what
+        training runs). A ragged tail (``num_prompts`` not a multiple of
+        ``batch_size``) is floored off.
+        """
+        all_inputs = data_source.get_eval_samples(num_prompts)
+        n_prompts = len(all_inputs.sample_ids)
+        chunk = max(1, self.batch_size)
+        usable = n_prompts - n_prompts % chunk or n_prompts
+        sums = {name: 0.0 for name, _ in scorers}
+        counts = {name: 0 for name, _ in scorers}
+        for start in range(0, usable, chunk):
+            sub = all_inputs.slice(start, min(start + chunk, n_prompts))
+            sample = self._build_request_sample(sub, step, sampling=eval_sp)
+            for eng in self.ar_rollouts + self.dit_rollouts:
+                eng.wake_up()
+            sample = self.run_rollout(sample)
+            for eng in self.ar_rollouts + self.dit_rollouts:
+                eng.sleep()
+            # Score the frontier (image) Part; the reward reads each image's
+            # prompt context from the lineage (conditioning), so no manual req
+            # expansion is needed.
+            for name, reward in scorers:
+                scored = reward.score_and_attach(sample)
+                part = scored.parts[-1]
+                if part.rewards is not None:
+                    r = hydrate(part.rewards).to(torch.float32)
+                    sums[name] += float(r.sum().item())
+                    counts[name] += int(r.numel())
+        return {name: sums[name] / max(1, counts[name]) for name, _ in scorers}
+
     def train(
         self,
         *,
@@ -666,6 +799,8 @@ class UnifiedModelTrainer(BaseTrainer):
             self.data_source.get_samples(self.batch_size)
         self._init_wandb(num_rollouts=num_rollouts)
         try:
+            if self.eval_interval > 0:
+                self.evaluate(start_rollout)  # baseline eval before any training
             for rollout_id in range(start_rollout, num_rollouts):
                 training_progress = rollout_id / max(1, num_rollouts - 1)
                 self._dump_rollout_id = rollout_id  # picked up by train_step's dump
@@ -694,6 +829,10 @@ class UnifiedModelTrainer(BaseTrainer):
                 # logp convention (temperature / top-k-p filtering / full-vs-renorm
                 # softmax) doesn't match vLLM's sampler.
                 self.wandb_logger.log_progress(rollout_id, num_rollouts, results, mean_reward, logger=logger)
+                # eval(k) BEFORE save(checkpoint-k) at the same step, so a
+                # resumed checkpoint re-runs the same eval (A/B consistency).
+                if self.eval_interval > 0 and (rollout_id + 1) % self.eval_interval == 0:
+                    self.evaluate(rollout_id + 1)
                 self.maybe_save_checkpoint(
                     rollout_id, num_rollouts, save_interval=save_interval, save_dir=save_dir, save_mode=save_mode
                 )
