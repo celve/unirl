@@ -425,7 +425,6 @@ class UnifiedModelTrainer(BaseTrainer):
         # re-rooted flat (1:1). The recaption rides as a chained cot_text input Part.
         dit_prompts = Texts(texts=[prompts.texts[i // n_rec] for i in range(n_ar) for _ in range(n_img)])
         dit_cot = Texts(texts=[recaptions.texts[i] for i in range(n_ar) for _ in range(n_img)])
-        n_total = len(dit_prompts.texts)
         # Re-root from the globally-unique image-shell lineage (flatten the path into a
         # legal root id) rather than replica-local ``d{k}``: the DiT engine derives the
         # x_T noise key from these ids, and ``d{k}`` restarts at 0 per dp>1 replica so

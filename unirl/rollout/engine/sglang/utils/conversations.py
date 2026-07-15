@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Tuple
 
-from unirl.types.primitives import Images, Texts
+from unirl.types.primitives import Images
 from unirl.types.sample import Sample
 
 # One sample's chat conversation: an ordered list of role-tagged messages.

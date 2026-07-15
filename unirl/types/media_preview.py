@@ -229,7 +229,7 @@ def build_media_preview_for_part(
     # T2AV: extract per-sample audio waveforms for muxing into the mp4 upload.
     audios_out: List[Any] = []
     audio_sr: Optional[int] = None
-    decoded_audio = getattr(track, "decoded_audio", None)
+    decoded_audio = getattr(part, "decoded_audio", None)
     if decoded_audio is not None and hasattr(decoded_audio, "to_list"):
         from unirl.distributed.tensor import hydrate, map_tree
 
@@ -240,7 +240,7 @@ def build_media_preview_for_part(
                 audios_out.append(audio_list[idx].waveform.detach().cpu().float())
             else:
                 audios_out.append(None)
-        audio_sr = getattr(track, "audio_sample_rate", None)
+        audio_sr = getattr(part, "audio_sample_rate", None)
         # Drop audio if none of the selected samples have it
         if all(a is None for a in audios_out):
             audios_out = []

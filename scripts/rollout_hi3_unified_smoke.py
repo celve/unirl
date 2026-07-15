@@ -37,7 +37,6 @@ What each half proves about the migrated ``_run_rollout_one``:
 
 from __future__ import annotations
 
-import dataclasses
 import json
 import os
 import sys

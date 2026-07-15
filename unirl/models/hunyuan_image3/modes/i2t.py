@@ -49,8 +49,8 @@ def generate(pipeline: "HunyuanImage3Pipeline", sample: Sample) -> Sample:
     images = next((c for c in conditioning[1:] if isinstance(c, Images)), None)
     if not isinstance(images, Images):
         raise TypeError(
-            f"HunyuanImage3Pipeline.generate (i2t): "
-            f"expected a chained Images input in sample.conditioning(), found none"
+            "HunyuanImage3Pipeline.generate (i2t): "
+            "expected a chained Images input in sample.conditioning(), found none"
         )
 
     # Build HunyuanImage3ARParams from typed sampling params + model-specific control.
