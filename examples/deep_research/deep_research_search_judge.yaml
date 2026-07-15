@@ -121,7 +121,7 @@ rollout:
         mem_fraction_static: 0.3
         context_length: 32768 # aligned to tongyi_deepresearch trajectory budget
         skip_server_warmup: true
-        attention_backend: triton
+        attention_backend: fa3 # tongyi_deepresearch uses fa3; triton JIT kernel fails to compile in this env
         disable_cuda_graph: false
         cuda_graph_max_bs: 16
         enable_lora: false
