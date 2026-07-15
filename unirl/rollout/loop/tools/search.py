@@ -7,6 +7,10 @@ as text. Two providers, selected by ``$SEARCH_PROVIDER`` (or the constructor):
 - ``serper``  (default): Serper — ``POST serper.dev`` with an ``X-API-KEY`` header.
 - ``serpapi``          : SerpApi — ``GET serpapi.com`` with an ``api_key`` param.
 
+The serper endpoint is overridable for gateways/proxies that speak the same
+response shape: ``$SERPER_URL`` swaps the base URL, and ``$SERPER_AUTH=bearer``
+sends the key as ``Authorization: Bearer <key>`` instead of ``X-API-KEY``.
+
 Both read the API key from ``$SERPER_KEY_ID``. ``execute`` is synchronous and
 thread-safe (it holds no state) so it runs cleanly under
 concurrent trajectory threads (:meth:`ToolEnvironment.step`).
@@ -88,12 +92,13 @@ class SearchTool(Tool):
             )
             resp.raise_for_status()
             return resp.json().get("organic_results") or []
-        resp = requests.post(
-            _SERPER_URL,
-            json={"q": query},
-            headers={"X-API-KEY": key, "Content-Type": "application/json"},
-            timeout=self._timeout,
-        )
+        url = os.environ.get("SERPER_URL", _SERPER_URL)
+        headers = {"Content-Type": "application/json"}
+        if os.environ.get("SERPER_AUTH", "").lower() == "bearer":
+            headers["Authorization"] = f"Bearer {key}"
+        else:
+            headers["X-API-KEY"] = key
+        resp = requests.post(url, json={"q": query}, headers=headers, timeout=self._timeout)
         resp.raise_for_status()
         return resp.json().get("organic") or []
 
