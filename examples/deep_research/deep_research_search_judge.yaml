@@ -25,8 +25,8 @@
 #   <dir>/rollout_<id>.jsonl — one line per sample (decoded turns + reward + advantage).
 #   TRAJ_DUMP_MAX_CHARS>0 caps per-turn text (default 0 = full).
 
-num_devices: 2
-batch_size: 4 # P prompts_per_rollout; P*n = 8 must be divisible by num_devices
+num_devices: 8
+batch_size: 8 # P prompts_per_rollout; P*n = 64 must be divisible by num_devices
 num_rollouts: 200
 weight_sync_interval: 1
 eval_interval: 0
@@ -34,13 +34,13 @@ eval_interval: 0
 worker_max_concurrency: 8
 stop: ["</tool_call>"]
 
-adv_normalization_scope: group
+adv_normalization_scope: global # tongyi_deepresearch: batch-level adv normalization
 normalize_adv_by_std: true
 
 logging:
-  report_to_wandb: false
+  report_to_wandb: true
   project_name: unirl-deep-research
-  run_name: deepresearch_search_judge_qwen3
+  run_name: deepresearch_tongyi_qwen3_1p7b
   entity: ${oc.env:WANDB_ENTITY,null}
   tags: [deep-research, agentic, search, visit, llm-judge, qwen3, m2]
 
@@ -48,7 +48,7 @@ bundle:
   _target_: unirl.models.qwen3.bundle.Qwen3Bundle.from_config
   config:
     _target_: unirl.models.qwen3.config.Qwen3PipelineConfig
-    pretrained_model_ckpt_path: ${oc.env:QWEN3_INSTRUCT_PATH,Qwen/Qwen3-4B-Instruct}
+    pretrained_model_ckpt_path: ${oc.env:QWEN3_INSTRUCT_PATH,Qwen/Qwen3-1.7B}
     model_precision: fp32
     use_gradient_checkpointing: true
     attn_implementation: flex_attention
@@ -76,7 +76,7 @@ backend:
     defer_grad_sync: false
   optimizer_cfg:
     _target_: unirl.train.backend.base.OptimizerConfig
-    learning_rate: 1.0e-6
+    learning_rate: 3.0e-6 # tongyi_deepresearch
     adam_beta1: 0.9
     adam_beta2: 0.999
     adam_epsilon: 1.0e-8
@@ -91,14 +91,14 @@ rollout:
   _target_: unirl.rollout.engine.agentic.engine.AgenticRolloutEngine
   config:
     _target_: unirl.rollout.engine.agentic.config.AgenticRolloutEngineConfig
-    max_turns: 8 # research trajectories need more turns than the calculator smoke
+    max_turns: 16 # deep-research depth; aligned to tongyi_deepresearch
     per_worker_concurrency: 8
     inner:
       _target_: unirl.rollout.engine.sglang.config.SGLangEngineConfig
       backend: native
-      pretrained_model_ckpt_path: ${oc.env:QWEN3_INSTRUCT_PATH,Qwen/Qwen3-4B-Instruct}
+      pretrained_model_ckpt_path: ${oc.env:QWEN3_INSTRUCT_PATH,Qwen/Qwen3-1.7B}
       tp_size: 1
-      max_new_tokens: 2048 # per TURN (reasoning + a tool call / the final answer)
+      max_new_tokens: 8192 # per TURN; aligned to tongyi_deepresearch
       temperature: 1.0
       top_p: 1.0
       concurrency: 8
@@ -119,6 +119,7 @@ rollout:
         # `tools` is auto-injected from the env's tool_schemas() at engine build.
       engine_kwargs:
         mem_fraction_static: 0.3
+        context_length: 32768 # aligned to tongyi_deepresearch trajectory budget
         skip_server_warmup: true
         attention_backend: triton
         disable_cuda_graph: false
@@ -126,7 +127,7 @@ rollout:
         enable_lora: false
     env:
       _target_: unirl.rollout.loop.tool_environment.ToolEnvironment
-      max_turns: 8 # keep == config.max_turns
+      max_turns: 16 # keep == config.max_turns
       tools:
         - _target_: unirl.rollout.loop.tools.search.SearchTool
           top_k: 10
@@ -135,11 +136,11 @@ rollout:
           model: ${oc.env:SUMMARY_MODEL,""}
     episode_sampling:
       _target_: unirl.types.sampling.ARSamplingParams
-      samples_per_prompt: 2
+      samples_per_prompt: 8
       temperature: 1.0
       top_p: 1.0
       top_k: 0
-      max_new_tokens: 2048
+      max_new_tokens: 8192
 
 reward:
   # LLM-as-judge over text: the judge decides whether the trajectory's <answer> is
@@ -158,11 +159,11 @@ reward:
 algorithm:
   _target_: unirl.algorithms.grpo.GRPO
   stage_attr: ar
-  clip_range: 0.2
+  clip_range: 0.4 # tongyi_deepresearch eps_clip
   clip_range_high: null
   clip_schedule: constant
   loss_agg_mode: seq-mean-token-mean
-  horizon: 2048
+  horizon: 8192
   sampling_temperature: 1.0 # MUST equal episode_sampling.temperature
   conditions_cls:
     _target_: hydra.utils.get_class
@@ -188,12 +189,12 @@ data_source:
       eval_data_path: ${oc.env:EVAL_DATA_PATH,${oc.env:DATA_PATH}} # unused (eval_interval=0); defaults to train
       seed: 42
     algorithm:
-      prompts_per_rollout: 4 # == batch_size (P)
+      prompts_per_rollout: 8 # == batch_size (P)
 
 sampling:
   _target_: unirl.types.sampling.ARSamplingParams
-  samples_per_prompt: 2
+  samples_per_prompt: 8
   temperature: 1.0
   top_p: 1.0
   top_k: 0
-  max_new_tokens: 2048
+  max_new_tokens: 8192
