@@ -17,7 +17,7 @@ loop reproduces each family's ``diffuse`` at eta=0 — no per-family
 from __future__ import annotations
 
 from contextlib import nullcontext
-from typing import Any, Optional
+from typing import Any
 
 import torch
 
@@ -102,14 +102,16 @@ def draft_generate(
     texts: Texts,
     params: DiffusionSamplingParams,
     draft_num_steps: int,
-    negatives: Optional[Texts] = None,
     activation_checkpoint: bool = False,
 ) -> Images:
     """Family-agnostic ReFL forward: conditions → DRaFT-K sample → grad VAE decode.
 
-    Selects the family purely via ``pipeline`` (its ``build_conditions`` /
+    Selects the family purely via ``pipeline`` (its ``_conditions_for`` /
     ``diffusion`` / ``vae_decode`` stages + ``latent_shape`` classmethod). The only
     output tensor is the image, carrying grad_fn into the policy weights.
+
+    ``_conditions_for`` derives the CFG empty-negative from ``params.guidance_scale``
+    internally (user-supplied negatives are deferred framework-wide).
     """
     diffusion = pipeline.diffusion
     device = pipeline.bundle.device
@@ -117,7 +119,7 @@ def draft_generate(
     # Text encoders are frozen — keep their (large, e.g. T5-XXL) forward graph out
     # of the DRaFT backward; the transformer still gets grad via the latents.
     with torch.no_grad():
-        conditions = pipeline.build_conditions(texts, negatives=negatives, guidance_scale=float(params.guidance_scale))
+        conditions = pipeline._conditions_for(texts, params)
 
     shift = float(getattr(model_config, "shift", 3.0))
     schedule = get_sigma_schedule(int(params.num_inference_steps), shift=shift, device=device)
