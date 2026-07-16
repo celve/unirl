@@ -41,6 +41,7 @@ verbs below forward to the inner engine.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import threading
 from collections import deque
@@ -54,6 +55,7 @@ from unirl.config.require import require
 from unirl.distributed.group.dispatch import Dispatch, Execute, distributed
 from unirl.rollout.engine.agentic.config import AgenticRolloutEngineConfig
 from unirl.rollout.engine.base import BaseRolloutEngine, BaseSingleTurnRolloutEngine
+from unirl.types.primitives import Texts
 from unirl.types.sample import Sample, _part_with_field
 from unirl.types.sampling import total_samples_per_prompt
 
@@ -112,6 +114,18 @@ class AgenticRolloutEngine(BaseRolloutEngine):
         self._sp = config.episode_sampling  # per-turn sampling params; carries n via samples_per_prompt
         self._n = total_samples_per_prompt(self._sp)  # GRPO group size
         self._max_turns = int(config.max_turns)
+        # Per-trajectory token budget → force-answer guard (LIN-564, AReaL tongyi
+        # parity). When set, the loop forces a final answer at ``force_answer_fraction``
+        # of the budget so a deep trajectory emits an <answer> instead of overflowing
+        # the context to reward 0. ``None`` ⇒ disabled (other agentic recipes unchanged).
+        self._traj_token_budget = (
+            int(config.max_tokens_per_trajectory) if config.max_tokens_per_trajectory else None
+        )
+        self._force_threshold = (
+            int(config.force_answer_fraction * self._traj_token_budget)
+            if self._traj_token_budget is not None
+            else None
+        )
         self._partial_rollout = bool(getattr(config, "partial_rollout", False))
         # Guard: the env's own turn bound (set independently in the recipe under
         # ``env.max_turns``) must agree with the engine's ``config.max_turns``, else
@@ -374,8 +388,17 @@ class AgenticRolloutEngine(BaseRolloutEngine):
                     env_reward = float(info["reward"])
                 if done:
                     return self._attach_env_reward(sample, env_reward), True
+                # Force-answer guard (LIN-564): once the trajectory nears the token
+                # budget, stop looping — inject "answer now" and force a final turn
+                # instead of growing context until it overflows to reward 0.
+                if self._force_threshold is not None and self._accumulated_tokens(sample) >= self._force_threshold:
+                    return self._force_final_answer(sample, env_reward)
                 if observation is not None:
                     sample = sample.observe(observation)  # +[obs(1)]
+            # max_turns reached: salvage an answer when a budget is configured
+            # (deep-research), else terminate with whatever the last turn produced.
+            if self._force_threshold is not None:
+                return self._force_final_answer(sample, env_reward)
             return self._attach_env_reward(sample, env_reward), True  # max_turns reached = terminal
         except Exception as exc:  # noqa: BLE001 — isolate: one bad trajectory must not sink the drain
             logger.warning("AgenticRolloutEngine: trajectory failed, returning partial: %s", exc, exc_info=True)
@@ -408,6 +431,54 @@ class AgenticRolloutEngine(BaseRolloutEngine):
             last, "rewards", torch.full((int(last.batch_size),), float(reward), dtype=torch.float32)
         )
         return sample.with_parts([rewarded if p is last else p for p in sample.parts])
+
+    # ------------------------------------------------------------------
+    # Force-answer token-budget guard (LIN-564, AReaL tongyi_deepresearch parity)
+    # ------------------------------------------------------------------
+
+    #: The user nudge injected when a trajectory hits the token budget — from AReaL's
+    #: react_agent force-answer prompt (asks for <think>…</think> then <answer>…</answer>,
+    #: which the thinking-on policy produces).
+    _FORCE_ANSWER_NUDGE = (
+        "You have now reached the maximum context length you can handle. You should stop "
+        "making tool calls and, based on all the information above, think again and provide "
+        "what you consider the most likely answer in the following format:"
+        "<think>your final thinking</think>\n<answer>your answer</answer>"
+    )
+
+    def _accumulated_tokens(self, sample: Sample) -> int:
+        """Tokens consumed so far = the last generated turn's rendered prompt (system +
+        tools + every prior turn/observation) plus that turn's own output. Reads what
+        rollout already computed (``conditions['prompt']`` + ``segment.lengths``); no
+        re-tokenization. Returns 0 if unavailable, which safely disables the guard for
+        that trajectory (``_run_one`` must never raise over token accounting)."""
+        for part in reversed(sample.parts):
+            try:
+                prompt = part.conditions["prompt"]
+            except (AttributeError, KeyError, TypeError):
+                continue
+            try:
+                prompt_tok = int(prompt.attention_mask[0].sum())
+                seg = getattr(part, "segment", None)
+                gen_tok = int(seg.lengths[0]) if seg is not None and getattr(seg, "lengths", None) is not None else 0
+                return prompt_tok + gen_tok
+            except Exception:  # noqa: BLE001 — accounting must never sink the trajectory
+                return 0
+        return 0
+
+    def _force_final_answer(self, sample: Sample, env_reward: Optional[float]) -> Tuple[Sample, bool]:
+        """Append a "stop and answer now" user turn and force ONE final generation,
+        capped so it cannot overflow the context, then terminate. Mirrors AReaL's
+        force-answer-at-80%-context behaviour so a budget-exhausted trajectory produces
+        an ``<answer>`` (gradable) instead of overflowing to reward 0."""
+        sample = sample.observe(Texts(texts=[self._FORCE_ANSWER_NUDGE]), role="user")
+        cap = int(self._sp.max_new_tokens)
+        if self._traj_token_budget is not None:
+            headroom = self._traj_token_budget - self._accumulated_tokens(sample)
+            cap = max(256, min(cap, headroom))
+        final_sp = dataclasses.replace(self._sp, max_new_tokens=cap)
+        sample = self._inner.generate(sample.fork(1, sampling_params=final_sp))
+        return self._attach_env_reward(sample, env_reward), True
 
     def _pull(self, coordinator: Any, role_name: str) -> Optional[Sample]:
         """Pull the next task from the coordinator — a blocking Ray RPC on this

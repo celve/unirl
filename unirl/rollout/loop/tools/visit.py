@@ -116,7 +116,14 @@ class VisitTool(Tool):
     def _visit_one(self, url: str, goal: str) -> str:
         content = self._read(url)
         if content.startswith("[visit] "):
-            return f"The useful information in {url} for goal {goal}:\n{content}"
+            # LIN-564 (AReaL parity): don't leak the raw sentinel (e.g. a Jina 422)
+            # into the model's context disguised as "useful information" — that fed a
+            # re-visit loop. Return a clean, un-disguised "couldn't access" message.
+            return (
+                f"The useful information in {url} for goal {goal}:\n"
+                "The provided webpage content could not be accessed. "
+                "Please check the URL or try a different source."
+            )
         summary = self._summarize(content[: self._max_content_chars], goal)
         return f"The useful information in {url} for goal {goal}:\n{summary}"
 

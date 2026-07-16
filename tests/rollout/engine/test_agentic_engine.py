@@ -186,6 +186,41 @@ def test_run_one_builds_a_multi_turn_trajectory():
     engine.shutdown()
 
 
+def test_force_answer_guard_caps_trajectory_at_budget(monkeypatch):
+    """LIN-564 force-answer guard: once a trajectory crosses the token budget, the loop
+    injects a 'stop and answer now' user turn and forces ONE final generation, ending
+    early — instead of running to the env's turn count (which would overflow → reward 0)."""
+    cfg = AgenticRolloutEngineConfig(
+        inner=_FakeInnerConfig(concurrency=16, yields=4),
+        env=FakeEnv(turns_by_prompt={"p0": 5}),  # env alone would run 5 turns
+        max_turns=8,
+        episode_sampling=ARSamplingParams(samples_per_prompt=1, max_new_tokens=8192),
+        per_worker_concurrency=1,
+        max_tokens_per_trajectory=1000,  # threshold = 0.8 * 1000 = 800
+    )
+    engine = AgenticRolloutEngine(cfg, rank=0)
+    assert engine._force_threshold == 800
+    # Pretend the trajectory is already over budget from the first turn.
+    monkeypatch.setattr(engine, "_accumulated_tokens", lambda sample: 900)
+
+    traj, done = engine._run_one(_req("p0"))
+    assert done is True  # terminal via the forced final answer, not the env's 5th turn
+    # [input, gen(turn1), obs(nudge,user), gen(forced-final)] — cut short at 2 gen parts
+    assert len(traj.gen_parts()) == 2
+    assert [p.sampling_params is not None for p in traj.parts] == [False, True, False, True]
+    engine.shutdown()
+
+
+def test_force_answer_guard_disabled_without_budget():
+    """No budget configured ⇒ guard is off ⇒ trajectory runs to the env's turn count
+    (byte-identical to pre-LIN-564 behaviour)."""
+    engine = _make_engine(env=FakeEnv(turns_by_prompt={"p0": 3}))
+    assert engine._force_threshold is None
+    traj, done = engine._run_one(_req("p0"))
+    assert done is True and len(traj.gen_parts()) == 3  # unchanged
+    engine.shutdown()
+
+
 def test_drain_returns_flat_list_of_n_times_P():
     """The drain returns one trajectory per task; count == n × P."""
     engine = _make_engine(n=2)

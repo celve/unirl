@@ -98,6 +98,21 @@ def test_visit_summarizes(monkeypatch):
     assert "SUMMARY" in out
 
 
+def test_visit_failure_is_clean(monkeypatch):
+    import unirl.rollout.loop.tools.visit as mod
+
+    # Every Jina read fails -> the tool must surface a clean "couldn't access" message,
+    # NOT leak the raw [visit] sentinel / HTTP error disguised as useful info (LIN-564).
+    monkeypatch.setattr(mod.time, "sleep", lambda *a, **k: None)
+    monkeypatch.setattr(
+        mod.requests, "get", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("422 Client Error"))
+    )
+    out = VisitTool(max_read_retries=1).execute({"url": "http://dead", "goal": "g"})
+    assert "could not be accessed" in out
+    assert "[visit]" not in out  # no disguised-failure leak
+    assert "422" not in out  # raw HTTP error not surfaced to the model
+
+
 # --------------------------------------------------------------------------- #
 # LLMJudgeRewardScorer
 # --------------------------------------------------------------------------- #

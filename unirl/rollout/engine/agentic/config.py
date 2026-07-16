@@ -16,7 +16,7 @@ worker gets its **own local** inner engine + environment instance.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Optional
 
 from unirl.rollout.engine.base import BaseEngineConfig
 
@@ -52,6 +52,16 @@ class AgenticRolloutEngineConfig(BaseEngineConfig):
     #: to the barrier ``generate``. The engine provides the mechanism; the policy
     #: (how many, when to sync) lives in the trainer.
     partial_rollout: bool = False
+
+    #: Per-trajectory token budget (AReaL tongyi_deepresearch: 27648). When set, the
+    #: agent loop forces a final answer once a trajectory's accumulated tokens reach
+    #: ``force_answer_fraction`` of it — capping runaway tool loops and preventing the
+    #: context overflow that would otherwise zero the reward. ``None`` disables the
+    #: guard, so other agentic recipes (calculator / ALFWorld) stay byte-identical.
+    max_tokens_per_trajectory: Optional[int] = None
+    #: Fraction of ``max_tokens_per_trajectory`` at which to force the final answer,
+    #: leaving headroom for the forced answer turn (AReaL forces at 0.8 of context).
+    force_answer_fraction: float = 0.8
 
     def make_engine(self, **deps: Any):
         """Construct the runtime :class:`AgenticRolloutEngine` (lazy import)."""
