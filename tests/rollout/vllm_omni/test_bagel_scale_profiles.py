@@ -55,6 +55,7 @@ def test_production_profile_matches_unigrpo_scale() -> None:
     assert (cfg.num_devices, cfg.devices_per_node, cfg.batch_size) == (32, 8, 32)
     assert cfg.enable_fsdp_offload is False
     assert cfg.backend.fsdp_cfg.cpu_offload is False
+    assert cfg.algorithm.image.stage_prepared_replay_to_cpu is True
     assert cfg.sampling.ar.samples_per_prompt == 24
     assert cfg.sampling.diffusion.samples_per_prompt == 1
     assert cfg.sampling.ar.max_new_tokens == 1024
@@ -85,6 +86,7 @@ def test_single_gpu_smoke_profile_composes_reduced_overrides() -> None:
     assert smoke.reward.backend.config.device == "cpu"
     assert smoke.reward.backend.config.batch_size == 2
     assert smoke.stack.num_updates_per_batch == 1
+    assert smoke.algorithm.image.stage_prepared_replay_to_cpu is False
 
     # Smoke changes capacity, not the native two-stage or strict-sync contract.
     assert smoke.rollout == production.rollout
