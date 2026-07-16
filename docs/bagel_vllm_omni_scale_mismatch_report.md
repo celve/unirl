@@ -67,13 +67,14 @@ CUDA OOM. This is a post-round trainer/rollout lifecycle overlap, not a failure
 of the completed replay/backward round.
 
 Run `5c4ftuky` subsequently completed the same exact one-node geometry with an
-explicit flow-many H20 gate. Its first three rounds completed in 3,109.997 s,
-3,170.273 s, and 3,128.286 s end to end, with 2,266.816 s, 2,244.161 s, and
-2,229.779 s in training. Optimizer state was parked across repeated rollout
-boundaries, all three training rounds completed, and the fourth vLLM-Omni wake
-also succeeded. This is direct evidence against r3's trainer/rollout overlap
-and establishes stable repeated execution at this geometry. The three reward
-points fluctuate and do not establish growth.
+explicit flow-many H20 gate. Six consecutive rounds completed in 3,109.997 s to
+3,205.266 s end to end, with 2,229.779 s to 2,266.816 s in training. Optimizer
+state was parked across every post-Adam rollout boundary, all six training
+rounds completed, and the seventh vLLM-Omni wake also succeeded. This is direct
+evidence against r3's trainer/rollout overlap and establishes stable repeated
+execution at this geometry. The sixth reward is a new run high and makes the
+short OLS slope positive, but the low fit and short series do not yet establish
+sustained growth.
 
 A combined experimental one-rollout build completed on one H20 with the same
 incident geometry. It included the one-call collapsed candidate, the
@@ -186,16 +187,16 @@ production-default change: the production recipe still has
 `t2ti_flow_many_enabled=false` and conservatively reclaims the image allocator
 cache at interval 1 with a 0 GiB free-memory floor.
 
-The W&B SDK returned three complete rounds with these driver wall times:
+The W&B SDK returned six complete rounds with these driver wall times:
 
-| Phase | Round 1 | Round 2 | Round 3 |
-| --- | ---: | ---: | ---: |
-| vLLM-Omni wake | 2.336560 s | 2.301511 s | 2.454114015912637 s |
-| native generate | 831.190797 s | 770.781399 s | 739.8469474997837 s |
-| vLLM-Omni sleep | 3.156816 s | 2.965215 s | 3.101416897960007 s |
-| reward | 6.476981 s | 4.885742 s | 3.6439061539713293 s |
-| train, both updates | 2,266.815848 s | 2,244.160700 s | 2,229.779119876912 s |
-| total round | 3,109.996767 s | 3,170.273174 s | 3,128.286250172183 s |
+| Round | Omni wake | Native generate | Omni sleep | Reward | Train, U=2 | Total |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 2.337 s | 831.191 s | 3.157 s | 6.477 s | 2,266.816 s | 3,109.997 s |
+| 2 | 2.302 s | 770.781 s | 2.965 s | 4.886 s | 2,244.161 s | 3,170.273 s |
+| 3 | 2.454 s | 739.847 s | 3.101 s | 3.644 s | 2,229.779 s | 3,128.286 s |
+| 4 | 2.323 s | 790.478 s | 3.288 s | 3.194 s | 2,258.074 s | 3,205.266 s |
+| 5 | 2.422 s | 782.669 s | 3.026 s | 3.257 s | 2,254.549 s | 3,201.919 s |
+| 6 | 2.329 s | 753.860 s | 3.259 s | 3.545 s | 2,248.575 s | 3,162.055 s |
 
 Round one took 51m50.0s, including 37m46.8s of training. Relative to r3, total
 time fell by 874.175 s (21.9%) and train time fell by 881.304 s (28.0%); native
@@ -204,9 +205,11 @@ took 52m50.3s summary-to-summary. Its SDK train interval was 37m24.2s, while
 the console's train-side markers spanned approximately 37m33s. Total wall time
 differed from round one by 1.9%, and SDK train time differed by 1.0%.
 Round three completed at 23:06:37 SGT in 52m08.3s, with 37m09.8s in the SDK
-train interval. Across all three rounds, total runtime stayed within a 60.276 s
-range (1.9%), while train time decreased from 2,266.816 s to 2,244.161 s to
-2,229.779 s.
+train interval. Rounds four through six took 53m25.3s, 53m21.9s, and 52m42.1s;
+their train intervals were 37m38.1s, 37m34.5s, and 37m28.6s. Across all six
+rounds, total runtime averaged 3,162.966 s and stayed within a 95.269 s range
+(3.0% of the mean). Train time averaged 2,250.326 s and stayed within a 37.037 s
+range (1.6% of the mean).
 `perf/step_time_s` is the full summary-to-summary interval; the other phase
 timers are not an exhaustive partition. In rounds two and three, 145.179 s and
 149.461 s of driver and boundary work sit outside the named
@@ -258,6 +261,18 @@ Round three used the same interval-1, floor-0 cache reclamation. Its two image
 backwards totaled 1,124.588 s, while reference preparation totaled 672.228 s
 and cache reclamation totaled 214.312 s.
 
+The same DP-critical-path fields remained stable in rounds four through six:
+
+| Round | Update-0 anchor | U0+U1 prepare | U0+U1 image backward | U0+U1 cache reclaim |
+| ---: | ---: | ---: | ---: | ---: |
+| 4 | 356.694 s | 689.584 s | 1,115.534 s | 216.601 s |
+| 5 | 355.366 s | 702.820 s | 1,097.354 s | 215.611 s |
+| 6 | 342.387 s | 701.412 s | 1,109.231 s | 217.163 s |
+
+All six rounds used interval-1, floor-0 reclamation. Its roughly 215-217 s
+cost in the later rounds remains the clearest measured tuning opportunity, but
+the less-frequent adaptive cadence is not part of this run.
+
 Peak telemetry used a maximum over the DP workers:
 
 | Round / update | Allocated | Reserved |
@@ -268,29 +283,34 @@ Peak telemetry used a maximum over the DP workers:
 | round 2, update 1 | 86.411462 GiB | 91.076172 GiB |
 | round 3, update 0 | 86.41140270233154 GiB | 91.076171875 GiB |
 | round 3, update 1 | 86.41317939758301 GiB | 91.076171875 GiB |
+| round 4, update 0 | 86.406605 GiB | 91.072266 GiB |
+| round 4, update 1 | 86.417075 GiB | 91.054688 GiB |
+| round 5, update 0 | 86.415254 GiB | 91.072266 GiB |
+| round 5, update 1 | 86.417425 GiB | 91.062500 GiB |
+| round 6, update 0 | 86.412889 GiB | 91.076172 GiB |
+| round 6, update 1 | 86.409110 GiB | 91.074219 GiB |
 
-All six updates completed without an image-backward OOM. An external
-`nvidia-smi` sample did catch a brief 96,901 MiB allocation on a 97,871 MiB
-card, leaving only 970 MiB physical headroom before it reclaimed. This is not
+All twelve updates completed without an image-backward OOM. An external
+`nvidia-smi` sample at 23:59:01 SGT during round-four training caught a brief
+97,249 MiB allocation on a 97,871 MiB card, leaving only 622 MiB physical
+headroom before it reclaimed. This is not
 the same quantity as PyTorch's 91.076 GiB peak reserved metric: the external
 sample includes all device consumers, while the PyTorch field covers its
 caching allocator. The transient reclaimed and training completed, but it
 leaves a narrow physical-memory margin.
 
 Each round contained 768 paired samples and 768 image groups. The first r5
-reward payload was bit-for-bit equal to r3 across all 37 common keys. The three
+reward payload was bit-for-bit equal to r3 across all 37 common keys. The six
 PickScore distributions were:
 
-| Reward field | Round 1 | Round 2 | Round 3 |
-| --- | ---: | ---: | ---: |
-| mean | 0.7760822 | 0.7782931 | 0.7685885 |
-| std | 0.0831987 | 0.0759322 | 0.0642781 |
-| min | 0.5376143 | 0.5838361 | 0.5675663 |
-| max | 0.9693484 | 1.0126556 | 0.9315054 |
-| zero-variance group ratio | 0 | 0 | 0 |
-
-The unrounded round-three reward mean/std/min/max was
-`0.7685885429382324/0.06427812576293945/0.5675663352012634/0.9315053820610046`.
+| Round | Mean | Std | Min | Max | Zero-variance groups |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 0.7760822 | 0.0831987 | 0.5376143 | 0.9693484 | 0 |
+| 2 | 0.7782931 | 0.0759322 | 0.5838361 | 1.0126556 | 0 |
+| 3 | 0.7685885 | 0.0642781 | 0.5675663 | 0.9315054 | 0 |
+| 4 | 0.7715023 | 0.0676528 | 0.5432900 | 0.9643868 | 0 |
+| 5 | 0.7768663 | 0.0701084 | 0.5828760 | 0.9487386 | 0 |
+| 6 | 0.7892739 | 0.0611930 | 0.6080350 | 0.9461457 | 0 |
 
 Round-one update-0 image ratios were exactly 1.0. Update-1 image ratio
 mean/std/min/max was
@@ -308,6 +328,14 @@ Update-1 AR ratio mean/std was
 `0.9994839752713839/0.060526347098251186`; its image ratio mean/std was
 `1.0000000558793545/8.648268072046031e-7`.
 
+Round six also remained finite. Update-0 image ratio was exactly 1.0; update-1
+image ratio mean/std/min/max was
+`0.999999975/0.000000749/0.999999219/1.000000643`. AR ratio mean/std was
+`1.000905/0.059554` for update 0 and `1.006027/0.055990` for update 1. The
+shared gradient norm was `0.181753` then `1.465789`. The second value is higher
+than earlier rounds but finite; it coincides with the stronger positive-advantage
+batch and is not accompanied by a ratio, loss, or optimizer failure.
+
 At the second rollout boundary at 21:37:00 SGT, the trainer cleared 48.620 GiB
 (`52,205,002,752` bytes) of completed gradients. Of `104,410,030,592` total
 optimizer-state bytes, exactly `104,410,005,504` bytes (97.239 GiB) were parked
@@ -321,13 +349,24 @@ lifecycle can repeat.
 At the third rollout boundary, the trainer again cleared `52,205,002,752` bytes
 and moved exactly `104,410,005,504` of `104,410,030,592` optimizer-state bytes,
 with zero pending restore slots. Parking took `6.502165818121284` s and restore
-took `2.0432002570014447` s; round three then completed. After the 23:06:37
-summary, the fourth vLLM-Omni wake fully succeeded and generation was active as
-of 23:09. No fourth-round completion is claimed.
+took `2.0432002570014447` s; round three then completed. Rounds four through
+six repeated the same exact byte counts with zero pending restore slots. The
+round-six park/restore times were `6.115648448001593` s and
+`2.0091813639737666` s. After the round-six summary at 01:46:07 SGT, all eight
+AR and diffusion workers completed the seventh wake barrier at 01:46:30 and
+generation continued. This proves five complete post-Adam
+park/wake/sleep/restore round trips and entry through the sixth post-Adam wake
+without the r3 wake OOM.
 
-The reward sequence was `0.7760822177 -> 0.7782931328 -> 0.7685885429`. The
-third value is below both earlier values, so the observed sequence is a
-fluctuation rather than evidence of reward growth.
+The reward sequence was
+`0.7760822177 -> 0.7782931328 -> 0.7685885429 -> 0.7715022564 ->`
+`0.7768662572 -> 0.7892739177`. An OLS fit over rounds 1-6 has slope
+`+0.001845474` per round and `R^2=0.2348`; first-to-last increased by
+`0.013191700`. The last two-point moving average is `0.783070087`, up from
+`0.774184257`, and the last three-point moving average is `0.779214144`, up
+from `0.772319019`. This is promising directional evidence, but one new high,
+six heterogeneous prompt batches, and the low fit are not enough to call a
+sustained learning curve.
 
 ## Scale Mismatch
 
@@ -642,7 +681,7 @@ fallback.
 
 R3 established the timing and memory baseline but ran revision `6e39f70d`.
 The following controls were implemented afterward. R5 has now exercised them
-through three complete rounds and the fourth vLLM-Omni wake.
+through six complete rounds and the seventh vLLM-Omni wake.
 
 **Lazy exact update-0 anchor.** Because the two updates consume disjoint
 mini-batches, update 0's exact current replay occurs at the same weights as its
@@ -674,14 +713,14 @@ and shards remain GPU-resident, and configuration validation requires both
 boundary directly targets the completed-gradients-plus-Adam overlap that caused
 r3's second Stage-1 wake OOM; it is not persistent or whole-trainer FSDP CPU
 offload. R5 repeatedly parked and restored exactly `104,410,005,504` bytes,
-completed three training rounds, and crossed the fourth wake successfully.
+completed six training rounds, and crossed the seventh wake successfully.
 
 **Flow-many remains gated.** An exact CFG=1 implementation can traverse all
 selected SDE velocity streams inside one layer-major decoder pass, reducing
 wrapped-layer entries across anchor, reference, and policy velocity replay. It
 may retain more simultaneous activations. R5 explicitly enabled it and completed
-three finite rounds with a worst PyTorch-reported peak of 86.420 GiB allocated
-and 91.076 GiB reserved. The external 96,901/97,871 MiB transient still leaves
+six finite rounds with a worst PyTorch-reported peak of 86.420 GiB allocated
+and 91.076 GiB reserved. The external 97,249/97,871 MiB transient still leaves
 a narrow physical margin, so the production profile keeps
 `t2ti_flow_many_enabled=false`.
 
@@ -704,10 +743,10 @@ a narrow physical margin, so the production profile keeps
 | Eight-H20 count-equalized hidden padding | **failed** | all anchors, AR backward, and update-0 reference prep completed; cached-vs-no-cache topology deadlocked the first image backward (`uqem9ggy`) |
 | Eight-H20 cache-faithful padding plus DP balancing | optimizer-0 gate passed; update 1 OOMed | `7d62ya97` completed optimizer 0 with no ordering failure, then fragmented at update-1 image micro 0; roughly three-hour first update remains unacceptable |
 | Eight-H20 layer-major batch 32 | full training round passed; next wake OOMed | `rqjoxria` completed all 768 native samples and both updates in 3,984.172 s total; the following Stage-1 wake failed while Adam and completed gradients were resident |
-| Post-r3 memory/lifecycle controls | three-round H20 gate passed; fourth wake passed | r5 completed three rounds, repeatedly cleared 48.620 GiB of gradients, parked/restored 97.239 GiB of optimizer state with no pending slot, and entered fourth generation |
-| Flow-many H20 gate | three finite H20 rounds passed; production disabled | explicit r5 gate completed at 86.420 GiB allocated / 91.076 GiB reserved worst PyTorch peak; external sampling caught 96,901/97,871 MiB, so production remains `t2ti_flow_many_enabled=false` |
-| 32-device production | not run | encoded scale remains `P=32, N=24, M=1, U=2`; the three-round one-node batch-32 gate passed, but 32-device behavior is unmeasured |
-| Reward learning curve | not established; currently fluctuating | reward mean was `0.776082 -> 0.778293 -> 0.768589`; three finite points prove repeated execution, not growth |
+| Post-r3 memory/lifecycle controls | six-round H20 gate passed; seventh wake passed | r5 completed six rounds, repeatedly cleared 48.620 GiB of gradients, parked/restored 97.239 GiB of optimizer state with no pending slot, and entered seventh generation |
+| Flow-many H20 gate | six finite H20 rounds passed; production disabled | explicit r5 gate completed at 86.420 GiB allocated / 91.076 GiB reserved worst PyTorch peak; external sampling caught 97,249/97,871 MiB, so production remains `t2ti_flow_many_enabled=false` |
+| 32-device production | not run | encoded scale remains `P=32, N=24, M=1, U=2`; the six-round one-node batch-32 gate passed, but 32-device behavior is unmeasured |
+| Reward learning curve | promising, not yet sustained | six-point slope is `+0.001845/round` and recent moving averages rose, but `R^2=0.235` and only the latest point is a clear new high |
 
 The standalone checker does compare per-layer K/V, Stage-1 velocity, transition
 mean, log-prob, and representative decoder gradients with fixed stochastic
@@ -729,16 +768,16 @@ in 66m24.2s. That is materially below the prior roughly three-hour first-update
 baseline, but it is not yet sustained throughput: the next Stage-1 wake OOMed.
 
 R5 retains `P=32, N=24, M=1, U=2`, exact replay, and GPU-resident FSDP
-parameters/shards. It completed three consecutive rounds in 51m50.0s, 52m50.3s,
-and 52m08.3s. Total runtime stayed within 1.9%, train time decreased across all
-three rounds, and the fourth Omni wake succeeded after optimizer-only boundary
-parking. The explicit flow-many gate therefore proves repeatable execution on
-one 8xH20 node. It does not remove the capacity risk: external sampling briefly
-left only 970 MiB physical headroom. Production keeps flow-many false,
+parameters/shards. It completed six consecutive rounds in 51m50.0s to 53m25.3s.
+Total runtime stayed within 3.0% of its mean, train time stayed within 1.6%, and
+the seventh Omni wake succeeded after optimizer-only boundary parking. The
+explicit flow-many gate therefore proves repeatable execution on one 8xH20
+node. It does not remove the capacity risk: external sampling briefly left only
+622 MiB physical headroom. Production keeps flow-many false,
 image-micro cache reclamation at interval 1 with a 0 GiB floor, and both forms
 of FSDP CPU offload false.
 
 The next gates are a longer run for a meaningful reward trend, a capacity test
 for any less-frequent cache-reclaim cadence, and the unmeasured 32-device scale.
-The three observed reward means fluctuate
-`0.776082 -> 0.778293 -> 0.768589`; they do not show growth.
+The six-point reward direction is now positive, but the low-fit series still
+needs additional rounds before it can be called sustained growth.
