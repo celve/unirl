@@ -33,6 +33,7 @@ class _BoundaryStage:
         self.context_builds = 0
         self.replay_calls = 0
         self.predict_calls = 0
+        self.predict_many_calls = 0
         self.replay_contexts: list[torch.Tensor] = []
         self.predict_contexts: list[torch.Tensor] = []
         self.last_velocity: torch.Tensor | None = None
@@ -76,6 +77,18 @@ class _BoundaryStage:
         self.predict_calls += 1
         self.predict_contexts.append(forward_kwargs["context"])
         return self.model.transformer.policy_weight * sample + forward_kwargs["context"]
+
+    def predict_velocities_at(self, forward_kwargs, *, samples, sigmas, params):
+        self.predict_many_calls += 1
+        return [
+            self.predict_velocity_at(
+                forward_kwargs,
+                sample=sample,
+                sigma=sigma,
+                params=params,
+            )
+            for sample, sigma in zip(samples, sigmas)
+        ]
 
 
 def _boundary_segment() -> object:
@@ -523,6 +536,7 @@ def test_lazy_first_update_anchor_matches_eager_anchor_and_removes_one_replay() 
     assert all(torch.equal(lazy_grad, eager_grad) for lazy_grad, eager_grad in zip(lazy_gradients, eager_gradients))
     assert lazy_results[0].metrics["ratio_mean"] == pytest.approx(1.0)
     assert lazy_results[0].metrics["rn_delta_mu_sq_mean"] == pytest.approx(0.0)
+    assert eager_stage.predict_many_calls == lazy_stage.predict_many_calls == 2
 
 
 def test_stage_boundary_direct_call_builds_one_shared_context() -> None:
