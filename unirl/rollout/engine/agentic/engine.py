@@ -390,9 +390,15 @@ class AgenticRolloutEngine(BaseRolloutEngine):
                     return self._attach_env_reward(sample, env_reward), True
                 # Force-answer guard (LIN-564): once the trajectory nears the token
                 # budget, stop looping — inject "answer now" and force a final turn
-                # instead of growing context until it overflows to reward 0.
-                if self._force_threshold is not None and self._accumulated_tokens(sample) >= self._force_threshold:
-                    return self._force_final_answer(sample, env_reward)
+                # instead of growing context until it overflows to reward 0. Count the
+                # observation step just produced: a single large search/visit result can
+                # push the NEXT prompt past the context in one turn (est. ~3 chars/token),
+                # so include it before deciding, else the guard undercounts and overflows.
+                if self._force_threshold is not None:
+                    obs_texts = getattr(observation, "texts", None)
+                    obs_tok = (max((len(x or "") for x in obs_texts), default=0) // 3) if obs_texts else 0
+                    if self._accumulated_tokens(sample) + obs_tok >= self._force_threshold:
+                        return self._force_final_answer(sample, env_reward)
                 if observation is not None:
                     sample = sample.observe(observation)  # +[obs(1)]
             # max_turns reached: salvage an answer when a budget is configured

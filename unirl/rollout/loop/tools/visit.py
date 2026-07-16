@@ -70,7 +70,13 @@ class VisitTool(Tool):
         endpoint: str = "",
         model: str = "",
         timeout: float = 60.0,
-        max_content_chars: int = 90000,
+        # Page content sent to the summarizer per URL. Must fit the summarizer's own
+        # context: our judge/summarizer serves at ctx 8192, so ~14000 chars (~4000
+        # tokens) + the extractor prompt leaves room for the evidence/summary output.
+        # Larger (the old 90000) overran 8192 -> the summarize call failed -> the tool
+        # dumped the RAW page (up to 90000 chars, ×N for multi-URL), overflowing the
+        # policy's 32768 context on the next turn (LIN-564).
+        max_content_chars: int = 14000,
         max_read_retries: int = 3,
         max_summary_retries: int = 2,
     ) -> None:

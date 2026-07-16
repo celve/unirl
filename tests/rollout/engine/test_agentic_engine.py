@@ -221,6 +221,35 @@ def test_force_answer_guard_disabled_without_budget():
     engine.shutdown()
 
 
+def test_force_answer_guard_counts_pending_observation():
+    """LIN-564: a single large tool observation (e.g. a raw page dump) must trip the
+    guard even when the accumulated PROMPT is still under budget — otherwise the next
+    turn's prompt (prompt + that observation) overflows the context and generate fails."""
+    cfg = AgenticRolloutEngineConfig(
+        inner=_FakeInnerConfig(concurrency=16, yields=4),
+        env=FakeEnv(turns_by_prompt={"p0": 5}),
+        max_turns=8,
+        episode_sampling=ARSamplingParams(samples_per_prompt=1, max_new_tokens=8192),
+        per_worker_concurrency=1,
+        max_tokens_per_trajectory=1000,  # threshold = 800
+    )
+    engine = AgenticRolloutEngine(cfg, rank=0)
+    engine._accumulated_tokens = lambda s: 100  # prompt itself stays well under budget
+    base_step = engine._env.step
+
+    def big_step(sample):  # inflate the observation to ~2000 est. tokens (6000 chars / 3)
+        obs, done, info = base_step(sample)
+        if obs is not None:
+            obs = Texts(texts=["y" * 6000 for _ in obs.texts])
+        return obs, done, info
+
+    engine._env.step = big_step
+    traj, done = engine._run_one(_req("p0"))
+    # 100 (prompt) + ~2000 (obs) >= 800 -> force-answer after turn 1, not 5 env turns
+    assert done is True and len(traj.gen_parts()) == 2
+    engine.shutdown()
+
+
 def test_drain_returns_flat_list_of_n_times_P():
     """The drain returns one trajectory per task; count == n × P."""
     engine = _make_engine(n=2)
