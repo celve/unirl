@@ -51,21 +51,28 @@ class SearchTool(Tool):
         self._max_retries = max(1, int(max_retries))
 
     def json_schema(self) -> Dict[str, Any]:
+        # Description/schema aligned verbatim to AReaL tongyi_deepresearch (LIN-564): the
+        # neutral "Accepts multiple queries" wording, NOT an instruction to batch. Our prior
+        # "Use multiple complementary queries in one call" made the base model cram ~3 queries
+        # into ONE call (num_search≈1) instead of iterating (search→read→reformulate), which
+        # both lowered the num_search start point and starved GRPO of the deep-search behavior
+        # to amplify. AReaL's base Qwen3-1.7B issues ~3 separate calls at step 0 with this text.
         return {
             "type": "function",
             "function": {
                 "name": self.name,
                 "description": (
-                    "Search the web. Provide an array of query strings; returns the top "
-                    "results for each query. Use multiple complementary queries in one call."
+                    "Perform Google web searches then returns a string of the top search "
+                    "results. Accepts multiple queries."
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "query": {
                             "type": "array",
-                            "items": {"type": "string"},
-                            "description": "One or more search query strings.",
+                            "items": {"type": "string", "description": "The search query."},
+                            "minItems": 1,
+                            "description": "The list of search queries.",
                         }
                     },
                     "required": ["query"],
