@@ -149,5 +149,5 @@ class LLMJudgeSpec(BaseRewardComponentSpec):
     timeout: float = 60.0
     max_tokens: int = 512
     max_retries: int = 3
-    max_prediction_chars: int = 4000
+    max_prediction_chars: int = 200  # tongyi_deepresearch caps the graded answer at 200 chars (LIN-564)
     prompt_template: str = _DEFAULT_JUDGE_PROMPT

@@ -150,3 +150,17 @@ def test_judge_missing_answer_scores_zero():
         metadata=[None],
     )
     assert scorer._compute_model_rewards(req) == [0.0]
+
+
+def test_extract_answer_require_tag(monkeypatch):
+    from unirl.trainer.agentic import _extract_answer
+
+    # <answer> tags always extract the span
+    assert _extract_answer("<think>reasoning</think>\n<answer>42</answer>") == "42"
+    # no tags, default (tolerant — the math/calc \boxed path): fall back to whole text
+    monkeypatch.delenv("REQUIRE_ANSWER_TAG", raising=False)
+    assert _extract_answer("the answer is 42") == "the answer is 42"
+    # no tags with REQUIRE_ANSWER_TAG (deep-research): scored as no answer -> "" -> reward 0
+    monkeypatch.setenv("REQUIRE_ANSWER_TAG", "1")
+    assert _extract_answer("the answer is 42") == ""
+    assert _extract_answer("<answer>42</answer>") == "42"  # tags still honored

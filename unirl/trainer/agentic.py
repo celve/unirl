@@ -23,6 +23,7 @@ Everything else — worker construction, weight sync, checkpointing, the ``train
 from __future__ import annotations
 
 import logging
+import os
 import re
 import time
 from collections import Counter
@@ -47,12 +48,21 @@ _ANSWER_RE = re.compile(r"<answer>(.*?)</answer>", re.DOTALL)
 
 
 def _extract_answer(text: Optional[str]) -> str:
-    """The last ``<answer>…</answer>`` span, else the whole text (the verifier is
-    tolerant of an unwrapped / ``\\boxed{}`` answer)."""
+    """The last ``<answer>…</answer>`` span. With no tags the fallback is the whole
+    text (math/calc verifiers tolerate an unwrapped / ``\\boxed{}`` answer), UNLESS
+    ``$REQUIRE_ANSWER_TAG`` is set: then a missing ``<answer>`` scores as no answer
+    (empty -> reward 0). Matches AReaL's tongyi judge (no ``<answer>`` -> "No answer
+    found.") and stops the policy reward-hacking the LLM judge with unwrapped verbose
+    prose (LIN-564: our prose fallback let untagged answers out-score tagged ones, so
+    GRPO abandoned the format — tag usage fell 70%->11% and the reward stalled)."""
     if not text:
         return ""
     matches = list(_ANSWER_RE.finditer(text))
-    return matches[-1].group(1).strip() if matches else text.strip()
+    if matches:
+        return matches[-1].group(1).strip()
+    if os.environ.get("REQUIRE_ANSWER_TAG", "").lower() in ("1", "true", "yes"):
+        return ""
+    return text.strip()
 
 
 def _validate_agentic_cfg(kw: dict) -> None:
