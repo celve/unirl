@@ -32,6 +32,16 @@ def main() -> None:
     ap.add_argument("--split", default="train")
     ap.add_argument("--limit", type=int, default=0, help="cap number of games (0 = all)")
     ap.add_argument(
+        "--repeat-each",
+        type=int,
+        default=1,
+        help=(
+            "emit this many independent driver rows per selected game. Repeating a "
+            "small fixed task set is useful for controlled policy-learning checks "
+            "where prompts_per_rollout must still equal the rollout-worker count"
+        ),
+    )
+    ap.add_argument(
         "--task-filter",
         default="",
         help="keep only games whose path contains this substring, e.g. a task type "
@@ -40,13 +50,15 @@ def main() -> None:
     )
     args = ap.parse_args()
 
+    if args.repeat_each < 1:
+        ap.error("--repeat-each must be at least 1")
+
     games = list_alfworld_games(args.split)
     if args.task_filter:
         games = [g for g in games if args.task_filter in g]
     if not games:
         raise SystemExit(
-            "No ALFWorld games found (check $ALFWORLD_DATA / --task-filter). "
-            "Run `alfworld-download` first."
+            "No ALFWorld games found (check $ALFWORLD_DATA / --task-filter). Run `alfworld-download` first."
         )
     if args.limit and args.limit < len(games):
         # Evenly spaced across the sorted games so a small fixed set spans task types
@@ -59,12 +71,18 @@ def main() -> None:
     os.makedirs(args.out_dir, exist_ok=True)
     out_path = os.path.join(args.out_dir, f"{args.split}.jsonl")
     with open(out_path, "w", encoding="utf-8") as f:
-        for i in range(len(games)):
-            # Carry the exact game FILE so the env plays precisely this row's game
-            # (index alone drifts once the list is filtered/sampled).
-            row = {"prompt": f"{_PLACEHOLDER} (game {i})", "metadata": {"game_index": i, "game_file": games[i]}}
-            f.write(json.dumps(row) + "\n")
-    print(f"wrote {len(games)} rows -> {out_path}")
+        for i, game_file in enumerate(games):
+            for repeat_index in range(args.repeat_each):
+                # Carry the exact game FILE so the env plays precisely this row's
+                # game (index alone drifts once the list is filtered/sampled). Each
+                # repeated row remains a distinct prompt/sample while selecting the
+                # same deterministic environment task.
+                row = {
+                    "prompt": f"{_PLACEHOLDER} (game {i}, repeat {repeat_index})",
+                    "metadata": {"game_index": i, "game_file": game_file},
+                }
+                f.write(json.dumps(row) + "\n")
+    print(f"wrote {len(games) * args.repeat_each} rows -> {out_path}")
 
 
 if __name__ == "__main__":
