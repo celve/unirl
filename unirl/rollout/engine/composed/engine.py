@@ -473,6 +473,7 @@ class ComposedRolloutEngine(BaseSingleTurnRolloutEngine):
         group_name: str,
         target_modules: Optional[List[str]] = None,
         flush_cache: bool = True,
+        publication_complete: Optional[bool] = None,
         track_prefix: str = "",
     ) -> None:
         """Route a NCCL-broadcast weight push to one child via ``track_prefix``."""
@@ -489,6 +490,7 @@ class ComposedRolloutEngine(BaseSingleTurnRolloutEngine):
                 group_name=group_name,
                 target_modules=target_modules,
                 flush_cache=flush_cache,
+                publication_complete=publication_complete,
             )
 
     def destroy_weights_update_group(

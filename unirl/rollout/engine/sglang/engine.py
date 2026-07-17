@@ -331,6 +331,7 @@ class SGLangRolloutEngine(BaseSingleTurnRolloutEngine):
         group_name: str,
         target_modules: Optional[List[str]] = None,
         flush_cache: bool = True,
+        publication_complete: Optional[bool] = None,
         track_prefix: str = "",
     ) -> None:
         """Receive weights via NCCL broadcast from training actors.
@@ -346,7 +347,10 @@ class SGLangRolloutEngine(BaseSingleTurnRolloutEngine):
             group_name=group_name,
             flush_cache=flush_cache,
         )
-        self._weight_version += 1  # weights changed → bump the version stamped onto gens
+        if publication_complete is not False:
+            # Bucketed NCCL updates advance provenance once, after the complete
+            # actor publication. None keeps legacy direct callers compatible.
+            self._weight_version += 1
 
     def destroy_weights_update_group(
         self,

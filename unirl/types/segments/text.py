@@ -1,7 +1,10 @@
 """TextSegment — SoA container for AR token rollouts (varlen-packed).
 
-``tokens``, ``log_probs``, and ``loss_mask`` are :func:`packed_field`s with
-shape ``[total_tokens]`` along dim 0. The framework manages the
+All token-aligned fields are :func:`packed_field`s with shape
+``[total_tokens]`` along dim 0. In addition to rollout ``tokens``,
+``log_probs``, and ``loss_mask``, the optional ``token_advantages``,
+``value_targets``, and ``value_mask`` fields carry SAO learner signals without
+losing alignment through concat/select/slice operations. The framework manages the
 ``cu_seqlens`` metadata behind a hidden ``_packed_cu_seqlens`` attribute on
 the instance — read it via the inherited :attr:`Batch.cu_seqlens` property
 and per-sample sizes via :attr:`Batch.lengths`. Segment ``k``'s tokens are
@@ -37,6 +40,12 @@ class TextSegment(Segment):
     tokens: Optional[torch.Tensor] = packed_field(default=None)
     log_probs: Optional[torch.Tensor] = packed_field(default=None)
     loss_mask: Optional[torch.Tensor] = packed_field(default=None)
+    # Learner-side, action-token-aligned SAO signals.  They deliberately live on
+    # the segment instead of Part.advantages (which is sequence-aligned) so
+    # variable-length token values survive Batch packing and DP slicing exactly.
+    token_advantages: Optional[torch.Tensor] = packed_field(default=None)
+    value_targets: Optional[torch.Tensor] = packed_field(default=None)
+    value_mask: Optional[torch.Tensor] = packed_field(default=None)
 
     def as_condition_with(self, encoder: Callable[..., Any]) -> Condition:
         """Re-embed packed tokens via the supplied encoder into a TextEmbedCondition.

@@ -101,6 +101,29 @@ def test_cross_turn_state_via_step():
     assert done2 is False and obs2.texts == ["2"]  # state persisted across turns
 
 
+def test_partial_resume_preserves_trajectory_and_rehydrates_stateful_calls():
+    """A turn-boundary abort closes process-local state; reset on the next
+    worker must keep prior Parts and rebuild state from the recorded calls."""
+    counter = _CounterTool()
+    env = ToolEnvironment([counter])
+    base = env.reset(_request("r0"))
+    first = _turn(base)
+    obs, done, _ = env.step(first)
+    assert done is False and obs.texts == ["1"]
+    carried = first.observe(obs)
+    env.close(carried)
+
+    resumed = env.reset(carried)
+    assert len(resumed.parts) == len(carried.parts)
+    assert len(resumed.gen_parts()) == 1
+    assert resumed.parts[0].control["tool_sessions"] != carried.parts[0].control["tool_sessions"]
+
+    second = _turn(resumed)
+    obs2, done2, _ = env.step(second)
+    assert done2 is False and obs2.texts == ["2"]
+    env.close(second.observe(obs2))
+
+
 def test_teardown_fires_once_on_success():
     counter = _CounterTool()
     env = ToolEnvironment([counter])

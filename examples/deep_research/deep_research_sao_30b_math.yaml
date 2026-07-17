@@ -1,0 +1,240 @@
+# @package _global_
+# SAO paper-scale agentic-math recipe (arXiv:2607.07508).  This is a
+# compose-only cluster blueprint, not an executable acceptance run:
+#   - Qwen3-30B-A3B-Thinking-2507 actor, full-parameter FSDP
+#   - independent pretrained token-value critic, frozen attention/router
+#   - batch 128, one rollout per prompt, critic K=2
+#   - DIS interval 0.7 < pi/pi_rollout < 6.0
+#   - action-only token GAE, alpha=1.5, lambda_critic=1
+#
+# IMPORTANT: UniRL's current resident AgenticRolloutEngine and NCCLWeightSync
+# each support one rollout GPU per engine (TP=1).  The paper-scale actor needs
+# grouped TP=8 rollout workers and TP-aware weight synchronization, which are
+# intentionally outside LIN-562.  Consequently this file is validated for
+# Hydra composition only and MUST NOT be launched until that topology exists.
+#
+# Both checkpoints must be local directories. VALUE_MODEL_PATH must contain
+# HF config/tokenizer metadata plus safetensors keys model.* and
+# value_head.weight; random critic initialization is intentionally unavailable.
+#
+# QWEN3_INSTRUCT_PATH=/local/Qwen3-30B-A3B-Thinking-2507 \
+# VALUE_MODEL_PATH=/local/qwen3-30b-token-value DATA_PATH=/local/tir.jsonl \
+# python -m unirl.train_sao_deep_research \
+#   --config-name=deep_research/deep_research_sao_30b_math
+
+num_devices: 128
+devices_per_node: 8
+batch_size: 128
+num_rollouts: 1000
+weight_sync_interval: 1
+save_interval: 50
+save_mode: full
+
+train_fraction: 0.5
+oversample_batch_size: 256
+# DIS remains the source of truth for off-policy rejection. Set an integer here
+# only when an operational deployment wants a harder oldest-turn lag bound.
+max_oldest_version_lag: null
+worker_max_concurrency: 32
+stop: ["</tool_call>"]
+
+logging:
+  report_to_wandb: true
+  project_name: unirl-sao
+  run_name: sao-qwen3-30b-a3b-thinking-agentic-math
+  entity: ${oc.env:WANDB_ENTITY,null}
+  tags: [sao, qwen3, 30b-a3b, agentic, async, tir, lin-562]
+
+actor:
+  bundle:
+    _target_: unirl.models.qwen3.Qwen3Bundle.from_config
+    config:
+      _target_: unirl.models.qwen3.Qwen3PipelineConfig
+      pretrained_model_ckpt_path: ${oc.env:QWEN3_INSTRUCT_PATH}
+      model_precision: fp32
+      use_gradient_checkpointing: true
+      attn_implementation: flex_attention
+      meta_init_transformer: true
+  pipeline:
+    _target_: unirl.models.qwen3.Qwen3Pipeline.from_bundle
+    enable_thinking: true
+    autocast_precision: bf16
+    logprob_precision: fp32
+  backend:
+    _target_: unirl.train.backend.fsdp.FSDPBackend
+    block_class_names: ["Qwen3MoeDecoderLayer"]
+    trainable_attr: transformer
+    fsdp_cfg:
+      _target_: unirl.train.configs.FSDPConfig
+      param_dtype: bf16
+      cpu_offload: false
+      mixed_precision: true
+      fsdp_mode: full
+      reshard_after_forward: true
+      activation_checkpointing: true
+      use_torch_compile: false
+      forward_prefetch: true
+      defer_grad_sync: false
+      checkpoint_format: dcp
+    optimizer_cfg:
+      _target_: unirl.train.backend.base.OptimizerConfig
+      learning_rate: 1.0e-6
+      adam_beta1: 0.9
+      adam_beta2: 0.999
+      adam_epsilon: 1.0e-8
+      weight_decay: 0.01
+    scheduler_cfg:
+      _target_: unirl.train.backend.base.LrSchedulerConfig
+      type: constant
+      warmup_steps: 0
+      total_steps: 1000
+  algorithm:
+    _target_: unirl.algorithms.SAO
+    stage_attr: ar
+    eps_low: 0.3
+    eps_high: 5.0
+    sampling_temperature: 1.0
+    conditions_cls:
+      _target_: hydra.utils.get_class
+      path: unirl.models.qwen3.Qwen3ARConditions
+
+critic:
+  bundle:
+    _target_: unirl.models.qwen3.Qwen3ValueBundle.from_config
+    config:
+      _target_: unirl.models.qwen3.Qwen3ValueConfig
+      pretrained_value_ckpt_path: ${oc.env:VALUE_MODEL_PATH}
+      tokenizer_ckpt_path: ${oc.env:QWEN3_INSTRUCT_PATH}
+      model_precision: fp32
+      use_gradient_checkpointing: true
+      attn_implementation: flex_attention
+      meta_init_transformer: true
+      allow_random_value_init: false
+  pipeline:
+    _target_: unirl.models.qwen3.Qwen3ValuePipeline.from_bundle
+    autocast_precision: bf16
+  backend:
+    _target_: unirl.train.backend.fsdp.FSDPBackend
+    block_class_names: ["Qwen3MoeDecoderLayer"]
+    trainable_attr: transformer
+    fsdp_cfg:
+      _target_: unirl.train.configs.FSDPConfig
+      param_dtype: bf16
+      cpu_offload: false
+      mixed_precision: true
+      fsdp_mode: full
+      reshard_after_forward: true
+      activation_checkpointing: true
+      use_torch_compile: false
+      forward_prefetch: true
+      defer_grad_sync: false
+      checkpoint_format: dcp
+    optimizer_cfg:
+      _target_: unirl.train.backend.base.OptimizerConfig
+      learning_rate: 5.0e-6
+      adam_beta1: 0.9
+      adam_beta2: 0.999
+      adam_epsilon: 1.0e-8
+      weight_decay: 0.01
+    scheduler_cfg:
+      _target_: unirl.train.backend.base.LrSchedulerConfig
+      type: constant_with_warmup
+      warmup_steps: 10
+      total_steps: 2000
+  algorithm:
+    _target_: unirl.algorithms.TokenValueAlgorithm
+    stage_attr: value
+    conditions_cls:
+      _target_: hydra.utils.get_class
+      path: unirl.models.qwen3.Qwen3ARConditions
+
+rollout:
+  _target_: unirl.rollout.engine.agentic.engine.AgenticRolloutEngine
+  config:
+    _target_: unirl.rollout.engine.agentic.config.AgenticRolloutEngineConfig
+    max_turns: 50
+    per_worker_concurrency: 16
+    partial_rollout: true
+    inner:
+      _target_: unirl.rollout.engine.sglang.config.SGLangEngineConfig
+      backend: native
+      pretrained_model_ckpt_path: ${oc.env:QWEN3_INSTRUCT_PATH}
+      # Blueprint value only; see the compose-only topology warning above.
+      tp_size: 8
+      max_new_tokens: 131072
+      temperature: 1.0
+      top_p: 1.0
+      top_k: 0
+      concurrency: 16
+      chat_template_kwargs:
+        enable_thinking: true
+      engine_kwargs:
+        context_length: 131072
+        mem_fraction_static: 0.8
+        skip_server_warmup: true
+        attention_backend: triton
+        disable_cuda_graph: false
+        cuda_graph_max_bs: 16
+        enable_lora: false
+    env:
+      _target_: unirl.rollout.loop.tool_environment.ToolEnvironment
+      max_turns: 50
+      tools:
+        - _target_: unirl.rollout.loop.tools.sandbox.SandboxTool
+          timeout_s: 10.0
+          max_output_chars: 4000
+    episode_sampling:
+      _target_: unirl.types.sampling.ARSamplingParams
+      samples_per_prompt: 1
+      temperature: 1.0
+      top_p: 1.0
+      top_k: 0
+      max_new_tokens: 131072
+
+reward:
+  _target_: unirl.reward.service.RewardService
+  truncated_reward: keep
+  backend:
+    _target_: unirl.reward.local.mathverify.MathVerifyRewardScorer
+    base_device: cpu
+    config:
+      _target_: unirl.reward.local.mathverify.MathVerifySpec
+
+sync:
+  # Only actor weights cross to rollout; the critic never leaves the train slab.
+  _target_: unirl.distributed.weight_sync.full.nccl.NCCLWeightSync
+  group_name: weight_sync
+  lora_merged: false
+  bucket_size_mb: 512
+  flush_cache: true
+
+stack:
+  _target_: unirl.train.stack.SAOTrainStack
+  actor_micro_batch_size: 1
+  critic_micro_batch_size: 1
+  actor_token_budget: 262144
+  critic_token_budget: 262144
+  actor_max_grad_norm: 1.0
+  critic_max_grad_norm: 1.0
+  critic_updates_per_actor: 2
+  gamma: 1.0
+  gae_alpha: 1.5
+  critic_lambda: 1.0
+
+data_source:
+  _target_: unirl.data.data_source.MultimodalRLDataSource
+  args:
+    run:
+      data_path: ${oc.env:DATA_PATH}
+      eval_data_path: ${oc.env:EVAL_DATA_PATH,${oc.env:DATA_PATH}}
+      seed: 42
+    algorithm:
+      prompts_per_rollout: 256
+
+sampling:
+  _target_: unirl.types.sampling.ARSamplingParams
+  samples_per_prompt: 1
+  temperature: 1.0
+  top_p: 1.0
+  top_k: 0
+  max_new_tokens: 131072

@@ -36,6 +36,11 @@ from unirl.utils.dtypes import parse_torch_dtype
 
 from .bundle import Qwen3Bundle
 from .conditions import Qwen3ARConditions
+from .replay_layout import (
+    build_packed_replay_layout,
+    build_padded_replay_layout,
+    pack_padded_token_outputs,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -460,61 +465,25 @@ class Qwen3ARStage(ARStage[Qwen3ARConditions]):
         if segment.tokens is None or segment.cu_seqlens is None or segment.lengths is None:
             return None
         device = next(self.model.transformer.parameters()).device
-        prompt_ids = conditions.prompt.input_ids.to(device)
-        prompt_mask = conditions.prompt.attention_mask.to(device)
-        batch_size = int(prompt_ids.shape[0])
-        if batch_size <= 1:
-            return None
-
-        lengths = [int(n) for n in segment.lengths.tolist()]
         pad_id = self.model.tokenizer.pad_token_id or 0
-        real_prompt_lens_p = prompt_mask.long().sum(dim=-1)  # [B] (right-padded layout)
-
-        cu_p = [int(c) for c in segment.cu_seqlens.tolist()]
-        flat_resp = segment.tokens.to(device=device, dtype=torch.long)
-        streams: List[torch.Tensor] = []
-        pos_parts: List[torch.Tensor] = []
-        pred_parts: List[torch.Tensor] = []
-        offset = 0
-        for b in range(batch_size):
-            n_p = int(real_prompt_lens_p[b].item())
-            n_r = lengths[b]
-            # The predict-index math below (offset + n_p - 1) assumes each stream has
-            # >=1 real prompt token; n_p == 0 would gather the PRIOR stream's last
-            # hidden state (silent cross-sequence logp corruption), so fail loud.
-            assert n_p >= 1, "packed_replay: stream has 0 real prompt tokens"
-            seq = torch.cat([prompt_ids[b, :n_p], flat_resp[cu_p[b] : cu_p[b] + n_r]])
-            streams.append(seq)
-            pos_parts.append(torch.arange(seq.numel(), device=device))
-            if n_r > 0:
-                pred_parts.append(torch.arange(offset + n_p - 1, offset + n_p - 1 + n_r, device=device))
-            offset += int(seq.numel())
-        packed_ids = torch.cat(streams).unsqueeze(0)
-        packed_pos = torch.cat(pos_parts).unsqueeze(0)
-        predict_index = torch.cat(pred_parts) if pred_parts else torch.zeros(0, dtype=torch.long, device=device)
-        # Bucket the packed length to a multiple of 1024 so flex_attention compiles
-        # O(10) shapes instead of one per distinct L (a ~40s first-compile per
-        # shape). Filler tokens carry restarting position_ids, forming their own
-        # isolated "sequence" under the packed block-causal mask (no prediction
-        # gathered from them). sdpa/eager only pay filler FLOPs, so skip bucketing.
-        bucket = 1024
-        L = int(packed_ids.shape[1])
-        target = ((L + bucket - 1) // bucket) * bucket
         attn_impl = getattr(getattr(self.model.transformer, "config", None), "_attn_implementation", None)
-        if attn_impl != "flex_attention":
-            target = L
-        if target > L:
-            n_fill = target - L
-            fill_ids = torch.full((1, n_fill), pad_id, dtype=packed_ids.dtype, device=device)
-            fill_pos = torch.arange(n_fill, device=device).unsqueeze(0)
-            packed_ids = torch.cat([packed_ids, fill_ids], dim=1)
-            packed_pos = torch.cat([packed_pos, fill_pos], dim=1)
+        layout = build_packed_replay_layout(
+            prompt_ids=conditions.prompt.input_ids,
+            prompt_mask=conditions.prompt.attention_mask,
+            segment=segment,
+            device=device,
+            pad_id=pad_id,
+            caller="Qwen3ARStage.packed_replay",
+            pad_to_multiple=1024 if attn_impl == "flex_attention" else None,
+        )
+        if layout is None:
+            return None
         per_token_flat = self.model.transformer(
-            input_ids=packed_ids,
+            input_ids=layout.input_ids,
             attention_mask=None,
-            position_ids=packed_pos,
-            response_tokens=flat_resp,
-            packed_predict_index=predict_index,
+            position_ids=layout.position_ids,
+            response_tokens=layout.response_tokens,
+            packed_predict_index=layout.predict_index,
             prompt_len=0,
             temperature=temperature,
             autocast_dtype=(self.autocast_dtype if device.type == "cuda" else None),
@@ -545,80 +514,16 @@ class Qwen3ARStage(ARStage[Qwen3ARConditions]):
                 "cu_seqlens (construct via TextSegment.pack)"
             )
 
-        # Pin inputs to the transformer's parameter device. A decoupled rollout
-        # engine (SGLang) returns ray-serialized CPU tensors, so conditions land
-        # on CPU while the FSDP model is on cuda; without this the FSDP
-        # transformer hits an index_select cpu-vs-cuda mismatch in Embedding
-        # (trainside is already on-device, so these .to calls are no-ops).
-        # Use the live parameter device — not ``self.model.device``, a stored
-        # config device that can carry a fixed index — so each rank moves to its
-        # own shard. Mirrors SD3DiffusionStage.replay.
         device = next(self.model.transformer.parameters()).device
-        prompt_ids = conditions.prompt.input_ids.to(device)
-        prompt_mask = conditions.prompt.attention_mask.to(device)
-        batch_size = int(prompt_ids.shape[0])
-        prompt_len = int(prompt_ids.shape[1])
-
-        lengths = [int(n) for n in segment.lengths.tolist()]
-        T_max = max(lengths) if lengths else 0
         pad_id = self.model.tokenizer.pad_token_id or 0
-
-        response_tokens = torch.full((batch_size, T_max), pad_id, dtype=torch.long, device=device)
-        response_mask = torch.zeros((batch_size, T_max), dtype=torch.long, device=device)
-        cu = [int(c) for c in segment.cu_seqlens.tolist()]
-        for b in range(batch_size):
-            n = lengths[b]
-            if n == 0:
-                continue
-            response_tokens[b, :n] = segment.tokens[cu[b] : cu[b] + n].to(device=device, dtype=torch.long)
-            response_mask[b, :n] = 1
-
-        # Re-pad RIGHT→LEFT so every sample's real prompt ends at index
-        # ``prompt_len - 1`` and the response starts at ``prompt_len``.
-        # Cross-actor concat in TextTokenCondition.concat right-pads to a
-        # global max; without re-padding, samples shorter than the global
-        # max have pad tokens between prompt and response, response RoPE
-        # positions shift by ``prompt_len - n_real``, and the prediction
-        # at ``logits[:, prompt_len - 1, :]`` reads a pad-position hidden
-        # state instead of the last-real-prompt one.
-        real_prompt_lens = prompt_mask.long().sum(dim=-1)  # [B]
-        if int(real_prompt_lens.min().item()) < prompt_len:
-            left_padded_ids = torch.full_like(prompt_ids, pad_id)
-            left_padded_mask = torch.zeros_like(prompt_mask)
-            for b in range(batch_size):
-                n_real = int(real_prompt_lens[b].item())
-                if n_real == 0:
-                    continue
-                left_padded_ids[b, prompt_len - n_real :] = prompt_ids[b, :n_real]
-                left_padded_mask[b, prompt_len - n_real :] = 1
-            prompt_ids = left_padded_ids
-            prompt_mask = left_padded_mask
-
-        # Trim the prompt block to THIS batch's true max length. The track-level
-        # concat right-pads prompts to the global (worker-shard) max, so every
-        # replay micro otherwise forwards at the widest prompt in the shard —
-        # pure dense-pad waste (with token-budget packing the micro members are
-        # length-sorted, making the waste systematic). After the LEFT re-pad all
-        # real tokens sit at the right end, so dropping the leading all-pad
-        # columns preserves prompt-end position (= new prompt_len - 1) and the
-        # cumsum position_ids below are pad-invariant.
-        max_real_prompt = int(real_prompt_lens.max().item())
-        if 0 < max_real_prompt < prompt_len:
-            prompt_ids = prompt_ids[:, prompt_len - max_real_prompt :]
-            prompt_mask = prompt_mask[:, prompt_len - max_real_prompt :]
-            prompt_len = max_real_prompt
-
-        if T_max > 0:
-            full_ids = torch.cat([prompt_ids, response_tokens], dim=1)
-            full_mask = torch.cat([prompt_mask, response_mask], dim=1)
-        else:
-            full_ids = prompt_ids
-            full_mask = prompt_mask
-
-        # Cumsum-derived position_ids so RoPE matches SGLang's positions
-        # under any padding pattern. HF's modeling_qwen3 default falls back
-        # to ``arange(0, L)`` and ignores ``attention_mask``.
-        position_ids = (full_mask.long().cumsum(dim=-1) - 1).clamp(min=0)
+        layout = build_padded_replay_layout(
+            prompt_ids=conditions.prompt.input_ids,
+            prompt_mask=conditions.prompt.attention_mask,
+            segment=segment,
+            device=device,
+            pad_id=pad_id,
+            caller="Qwen3ARStage.padding_replay",
+        )
 
         # Replay goes through the patched dual-mode ``forward`` (see
         # ``_replay_aware_forward``): the decoder body + chunked lm_head run
@@ -627,27 +532,15 @@ class Qwen3ARStage(ARStage[Qwen3ARConditions]):
         # The cuda-vs-cpu autocast decision lives here; dtype validity and the
         # autocast scope live in the patched forward.
         per_token = self.model.transformer(
-            input_ids=full_ids,
-            attention_mask=full_mask,
-            position_ids=position_ids,
-            response_tokens=response_tokens,
-            prompt_len=prompt_len,
+            input_ids=layout.input_ids,
+            attention_mask=layout.attention_mask,
+            position_ids=layout.position_ids,
+            response_tokens=layout.response_tokens,
+            prompt_len=layout.prompt_len,
             temperature=temperature,
             autocast_dtype=(self.autocast_dtype if device.type == "cuda" else None),
         )  # [B, T_max] FP32
-
-        if T_max == 0:
-            return torch.zeros(0, dtype=self.logprob_dtype, device=device)
-
-        flat: List[torch.Tensor] = []
-        for b in range(batch_size):
-            n = lengths[b]
-            if n == 0:
-                continue
-            flat.append(per_token[b, :n])
-        if not flat:
-            return torch.zeros(0, dtype=self.logprob_dtype, device=device)
-        return torch.cat(flat, dim=0).to(dtype=self.logprob_dtype)
+        return pack_padded_token_outputs(per_token, layout.lengths).to(dtype=self.logprob_dtype)
 
     def _resolve_stop_ids(
         self,

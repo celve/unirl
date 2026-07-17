@@ -122,9 +122,7 @@ class ToolEnvironment:
             self._tools[tool.name] = tool
         # Tools that hold per-trajectory session state (LIN-533); the stateless path skips all
         # session plumbing whenever this list is empty (zero regression for calculator/search).
-        self._stateful_tools: List[StatefulTool] = [
-            t for t in self._tools.values() if isinstance(t, StatefulTool)
-        ]
+        self._stateful_tools: List[StatefulTool] = [t for t in self._tools.values() if isinstance(t, StatefulTool)]
         self.max_turns = max_turns
 
     def tool_schemas(self) -> List[Dict[str, Any]]:
@@ -144,6 +142,11 @@ class ToolEnvironment:
         under ``"tool_sessions"`` so :meth:`step`/:meth:`close` recover them position-independently
         across the fork/observe chain. ``uuid4`` avoids collisions between the ``n`` GRPO siblings
         that share a root ``sample_id``.
+
+        A partial-rollout resume carries prior Parts but may land on a different worker, where its
+        old process-local session no longer exists.  In that case this method preserves the full
+        trajectory, opens fresh sessions, and replays only prior *stateful* calls to reconstruct
+        their state.  Stateless calls are never repeated (they may have external side effects).
         """
         if not self._stateful_tools:
             return request
@@ -154,11 +157,38 @@ class ToolEnvironment:
             sid = uuid4().hex
             tool.session_start(sid, context)
             sessions[tool.name] = sid
+
+        # Rehydrate process-local state after a turn-boundary checkpoint moved to
+        # this worker. Agentic engine tasks are single-trajectory, but iterate all
+        # text rows defensively. A failed replay is surfaced in logs; retaining the
+        # already-recorded observation and continuing is safer than rerunning the
+        # whole trajectory from its prompt.
+        if request.gen_parts():
+            for part in request.gen_parts():
+                primitive = part.primitive
+                if not isinstance(primitive, Texts):
+                    continue
+                for text in primitive.texts:
+                    call = parse_tool_call(text)
+                    if call is None:
+                        continue
+                    tool = self._tools.get(call["name"])
+                    if not isinstance(tool, StatefulTool):
+                        continue
+                    try:
+                        tool.execute_session(sessions[tool.name], call.get("arguments") or {})
+                    except Exception:  # noqa: BLE001 — resume remains failure-isolated
+                        logger.warning(
+                            "stateful tool %r failed while restoring a partial rollout",
+                            tool.name,
+                            exc_info=True,
+                        )
         control = dict(root.control or {})
         control["tool_sessions"] = sessions
         # ``_part_with_field`` swaps only ``control`` — preserving the encoded prompt
         # (``primitive``/``segment``/``metadata``), unlike a ``Part.input`` rebuild.
-        return Sample.request(_part_with_field(root, "control", control))
+        resumed_root = _part_with_field(root, "control", control)
+        return request.with_parts([resumed_root, *request.parts[1:]])
 
     def step(self, sample: Sample) -> Tuple[Optional[Primitive], bool, dict]:
         """Consume the frontier action; return ``(observation, done, info)``.
@@ -174,9 +204,7 @@ class ToolEnvironment:
         turn = len(sample.gen_parts())
         frontier = sample.parts[-1].primitive
         if not isinstance(frontier, Texts):
-            raise TypeError(
-                f"ToolEnvironment.step expects a Texts frontier primitive; got {type(frontier).__name__}"
-            )
+            raise TypeError(f"ToolEnvironment.step expects a Texts frontier primitive; got {type(frontier).__name__}")
         texts = frontier.texts
 
         sessions = (sample.parts[0].control or {}).get("tool_sessions", {})

@@ -172,6 +172,10 @@ class NCCLWeightSync(FullWeightSync):
                         "shapes": shapes,
                         "group_name": self._group_name,
                         "flush_cache": (self._flush_cache and is_last),
+                        # A publication can span many buckets. Receivers use
+                        # this explicit boundary for provenance versioning;
+                        # flush_cache is an independent, optional policy.
+                        "publication_complete": bool(is_last),
                         "track_prefix": self._track_prefix,
                     },
                 )

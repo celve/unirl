@@ -82,10 +82,15 @@ class Qwen3Bundle(Bundle):
             from transformers import AutoConfig
 
             hf_config = AutoConfig.from_pretrained(path, trust_remote_code=bool(config.trust_remote_code))
+            model_kwargs: dict[str, Any] = {"trust_remote_code": bool(config.trust_remote_code)}
+            if getattr(config, "attn_implementation", None):
+                # ``from_config`` does not consult the pipeline config.  Pass the
+                # backend explicitly so HF stamps ``config._attn_implementation``
+                # before constructing attention modules, just as
+                # ``from_pretrained(attn_implementation=...)`` does below.
+                model_kwargs["attn_implementation"] = str(config.attn_implementation)
             with init_empty_weights(include_buffers=False):
-                transformer = AutoModelForCausalLM.from_config(
-                    hf_config, trust_remote_code=bool(config.trust_remote_code)
-                )
+                transformer = AutoModelForCausalLM.from_config(hf_config, **model_kwargs)
             # Capture init-computed non-persistent state (RoPE inv_freq etc.) onto
             # the BUNDLE — a robust carrier the backend holds (self._bundle) and
             # replays in load_trainable_weights. The model-bound deferred closure

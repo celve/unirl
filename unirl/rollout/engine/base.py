@@ -172,9 +172,15 @@ class BaseRolloutEngine(Remote, ABC):
         group_name: str,
         target_modules: Optional[List[str]] = None,
         flush_cache: bool = True,
+        publication_complete: Optional[bool] = None,
         track_prefix: str = "",
     ) -> None:
-        """Receive a bucket of weights via the established NCCL group."""
+        """Receive a bucket of weights via the established NCCL group.
+
+        ``publication_complete`` marks the final bucket in one policy
+        publication. ``None`` preserves the legacy one-call/one-publication
+        contract for callers that do not use the bucketed NCCL sender.
+        """
         raise NotImplementedError
 
     def destroy_weights_update_group(

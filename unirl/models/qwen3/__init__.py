@@ -17,8 +17,20 @@ from unirl.models.qwen3.ar import (
 from unirl.models.qwen3.bundle import Qwen3Bundle
 from unirl.models.qwen3.chat_template import Qwen3ChatTemplateStage
 from unirl.models.qwen3.conditions import Qwen3ARConditions
-from unirl.models.qwen3.config import Qwen3PipelineConfig
+from unirl.models.qwen3.config import Qwen3PipelineConfig, Qwen3ValueConfig
 from unirl.models.qwen3.pipeline import Qwen3Pipeline
+from unirl.models.qwen3.value import (
+    Qwen3TokenValueModel,
+    Qwen3ValueStage,
+    configure_value_trainable_parameters,
+    trainable_value_parameter_summary,
+)
+from unirl.models.qwen3.value_bundle import (
+    Qwen3ValueBundle,
+    Qwen3ValueCheckpointManifest,
+    inspect_value_checkpoint,
+)
+from unirl.models.qwen3.value_pipeline import Qwen3ValuePipeline
 
 __all__ = [
     "Qwen3ARConditions",
@@ -29,4 +41,13 @@ __all__ = [
     "Qwen3ChatTemplateStage",
     "Qwen3Pipeline",
     "Qwen3PipelineConfig",
+    "Qwen3TokenValueModel",
+    "Qwen3ValueBundle",
+    "Qwen3ValueCheckpointManifest",
+    "Qwen3ValueConfig",
+    "Qwen3ValuePipeline",
+    "Qwen3ValueStage",
+    "configure_value_trainable_parameters",
+    "inspect_value_checkpoint",
+    "trainable_value_parameter_summary",
 ]

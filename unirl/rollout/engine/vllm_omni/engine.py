@@ -291,6 +291,7 @@ class VLLMOmniRolloutEngine(BaseSingleTurnRolloutEngine):
         group_name: str,
         target_modules: Optional[List[str]] = None,
         flush_cache: bool = True,
+        publication_complete: Optional[bool] = None,
         track_prefix: str = "",
     ) -> None:
         del track_prefix
@@ -302,7 +303,8 @@ class VLLMOmniRolloutEngine(BaseSingleTurnRolloutEngine):
             target_modules=target_modules,
             flush_cache=flush_cache,
         )
-        self._weight_version += 1  # weights changed → bump the version stamped onto gens
+        if publication_complete is not False:
+            self._weight_version += 1  # one version per complete policy publication
 
     def destroy_weights_update_group(
         self,

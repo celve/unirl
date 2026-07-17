@@ -78,4 +78,42 @@ class Qwen3PipelineConfig:
         validate_precision_type(self.model_precision, field="Qwen3PipelineConfig.model_precision")
 
 
-__all__ = ["Qwen3PipelineConfig"]
+@dataclass
+class Qwen3ValueConfig:
+    """Construction args for the training-only Qwen3 token-value critic.
+
+    ``pretrained_value_ckpt_path`` is a local HuggingFace-style directory.  Its
+    safetensors files contain the base decoder under ``model.*`` and the scalar
+    head as ``value_head.weight``.  The critic intentionally has no LM head.
+
+    ``allow_random_value_init`` exists only for small mechanical smoke tests.
+    Paper-faithful training must provide a value-head checkpoint.  It is
+    incompatible with meta init because a missing meta parameter cannot be
+    initialized safely after the generic sharded loader materializes the model.
+    """
+
+    pretrained_value_ckpt_path: str
+    tokenizer_ckpt_path: Optional[str] = None
+    trust_remote_code: bool = True
+
+    model_precision: Any = "bf16"
+    attn_implementation: Optional[str] = None
+    device: Any = None
+    autocast_precision: str = "bf16"
+
+    use_gradient_checkpointing: bool = False
+    meta_init_transformer: bool = False
+    allow_random_value_init: bool = False
+
+    def __post_init__(self) -> None:
+        validate_precision_type(self.model_precision, field="Qwen3ValueConfig.model_precision")
+        if not str(self.pretrained_value_ckpt_path).strip():
+            raise ValueError("Qwen3ValueConfig.pretrained_value_ckpt_path must be a non-empty local path")
+        if self.meta_init_transformer and self.allow_random_value_init:
+            raise ValueError(
+                "Qwen3ValueConfig: allow_random_value_init is test-only and cannot be used with "
+                "meta_init_transformer=True"
+            )
+
+
+__all__ = ["Qwen3PipelineConfig", "Qwen3ValueConfig"]

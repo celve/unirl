@@ -15,10 +15,12 @@ these names, and ``unified_model_stack`` imports ``_build_micro_batch_slices`` f
 
 from unirl.train.stack.base import TrainStack, TrainStepResult
 from unirl.train.stack.planner import CountPlanner, MicroPlanner, TokenBudgetPlanner, _build_micro_batch_slices
+from unirl.train.stack.sao import SAOTrainStack
 
 __all__ = [
     "CountPlanner",
     "MicroPlanner",
+    "SAOTrainStack",
     "TokenBudgetPlanner",
     "TrainStack",
     "TrainStepResult",
