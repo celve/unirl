@@ -281,6 +281,7 @@ class AlfworldEnv:
             logger.warning("AlfworldEnv: env.step failed (%s: %s); ending episode.", type(exc).__name__, exc)
             with self._lock:
                 self._episodes.pop(eid, None)
+            self._close_live_env(ep.env)
             # NaN reward = "engine bug, not a policy failure": the trainer excludes it from
             # the GRPO group (neutral, zero advantage) so a crash doesn't penalize the
             # trajectory's actions. Drop (don't reuse) a template whose game just errored.
@@ -295,6 +296,7 @@ class AlfworldEnv:
         if done:
             with self._lock:
                 self._episodes.pop(eid, None)
+            self._close_live_env(ep.env)
             self._release_template(ep.template)
             return None, True, {"reward": ep.reward, "success": success, "steps": ep.steps}
 
@@ -319,7 +321,23 @@ class AlfworldEnv:
         with self._lock:
             ep = self._episodes.pop(eid, None)
         if ep is not None:
+            self._close_live_env(ep.env)
             self._release_template(ep.template)
+
+    @staticmethod
+    def _close_live_env(env: Any) -> None:
+        """Close the per-episode TextWorld batch environment exactly once.
+
+        ``AlfredTWEnv`` is only the reusable template.  ``init_env`` creates a
+        separate live TextWorld environment which may own subprocesses and file
+        descriptors, so returning the template to the pool is not sufficient.
+        """
+        close = getattr(env, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception as exc:  # noqa: BLE001 — cleanup must not mask rollout results
+                logger.warning("AlfworldEnv: live env close failed (%s: %s)", type(exc).__name__, exc)
 
     # ------------------------------------------------------------------
     # Helpers

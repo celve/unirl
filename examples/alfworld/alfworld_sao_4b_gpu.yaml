@@ -1,0 +1,228 @@
+# @package _global_
+# Eight-GPU ALFWorld acceptance run for the SAO actor/critic implementation.
+# Four GPUs host the independent FSDP actor and critic; four host one resident
+# SGLang engine and one stateful ALFWorld episode each.
+#
+# The drive size deliberately equals the learner batch and rollout-worker count.
+# Every game therefore reaches a terminal/max-turn boundary before each actor
+# weight sync.  This is required until ALFWorld episodes can resume on the same
+# worker across an async abort.
+#
+# Required local paths:
+#   QWEN3_INSTRUCT_PATH=/root/unirl/models/local/Qwen3-4B-Instruct-2507
+#   VALUE_MODEL_PATH=$QWEN3_INSTRUCT_PATH
+#   ALFWORLD_DATA=/root/unirl/data/alfworld
+#   ALFWORLD_CONFIG=/root/unirl/.venv-sglang/lib/python3.12/site-packages/alfworld/configs/base_config.yaml
+#   DATA_PATH=/root/unirl/data/alfworld-sao/train.jsonl
+#
+# Run from the SGLang/cu130 environment:
+#   .venv-sglang/bin/python -m unirl.train_sao_deep_research \
+#     --config-name=alfworld/alfworld_sao_4b_gpu
+
+num_devices: 8
+devices_per_node: 8
+batch_size: 4
+num_rollouts: 12
+weight_sync_interval: 1
+save_interval: 0
+save_mode: full
+
+train_fraction: 0.5
+oversample_batch_size: 4
+max_oldest_version_lag: 1
+worker_max_concurrency: 8
+stop: []
+
+logging:
+  report_to_wandb: true
+  project_name: unirl-sao
+  run_name: ${oc.env:WANDB_RUN_NAME,sao-qwen3-4b-alfworld-gpu}
+  entity: ${oc.env:WANDB_ENTITY,null}
+  tags: [sao, qwen3, 4b, alfworld, agentic, async, gpu, lin-562]
+
+actor:
+  bundle:
+    _target_: unirl.models.qwen3.Qwen3Bundle.from_config
+    config:
+      _target_: unirl.models.qwen3.Qwen3PipelineConfig
+      pretrained_model_ckpt_path: ${oc.env:QWEN3_INSTRUCT_PATH}
+      model_precision: fp32
+      use_gradient_checkpointing: true
+      attn_implementation: flex_attention
+  pipeline:
+    _target_: unirl.models.qwen3.Qwen3Pipeline.from_bundle
+    enable_thinking: false
+    autocast_precision: bf16
+    logprob_precision: fp32
+  backend:
+    _target_: unirl.train.backend.fsdp.FSDPBackend
+    block_class_names: ["Qwen3DecoderLayer"]
+    trainable_attr: transformer
+    fsdp_cfg:
+      _target_: unirl.train.configs.FSDPConfig
+      param_dtype: bf16
+      cpu_offload: false
+      mixed_precision: true
+      fsdp_mode: full
+      reshard_after_forward: true
+      activation_checkpointing: true
+      use_torch_compile: false
+      forward_prefetch: false
+      defer_grad_sync: false
+    optimizer_cfg:
+      _target_: unirl.train.backend.base.OptimizerConfig
+      learning_rate: 1.0e-6
+      adam_beta1: 0.9
+      adam_beta2: 0.999
+      adam_epsilon: 1.0e-8
+      weight_decay: 0.01
+    scheduler_cfg:
+      _target_: unirl.train.backend.base.LrSchedulerConfig
+      type: constant
+      warmup_steps: 0
+      total_steps: 12
+  algorithm:
+    _target_: unirl.algorithms.SAO
+    stage_attr: ar
+    eps_low: 0.3
+    eps_high: 5.0
+    sampling_temperature: 1.0
+    conditions_cls:
+      _target_: hydra.utils.get_class
+      path: unirl.models.qwen3.Qwen3ARConditions
+
+critic:
+  bundle:
+    _target_: unirl.models.qwen3.Qwen3ValueBundle.from_config
+    config:
+      _target_: unirl.models.qwen3.Qwen3ValueConfig
+      pretrained_value_ckpt_path: ${oc.env:VALUE_MODEL_PATH,${oc.env:QWEN3_INSTRUCT_PATH}}
+      tokenizer_ckpt_path: ${oc.env:QWEN3_INSTRUCT_PATH}
+      model_precision: fp32
+      use_gradient_checkpointing: true
+      attn_implementation: flex_attention
+      meta_init_transformer: false
+      allow_random_value_init: true
+  pipeline:
+    _target_: unirl.models.qwen3.Qwen3ValuePipeline.from_bundle
+    autocast_precision: bf16
+  backend:
+    _target_: unirl.train.backend.fsdp.FSDPBackend
+    block_class_names: ["Qwen3DecoderLayer"]
+    trainable_attr: transformer
+    fsdp_cfg:
+      _target_: unirl.train.configs.FSDPConfig
+      param_dtype: bf16
+      cpu_offload: false
+      mixed_precision: true
+      fsdp_mode: full
+      reshard_after_forward: true
+      activation_checkpointing: true
+      use_torch_compile: false
+      forward_prefetch: false
+      defer_grad_sync: false
+    optimizer_cfg:
+      _target_: unirl.train.backend.base.OptimizerConfig
+      learning_rate: 5.0e-6
+      adam_beta1: 0.9
+      adam_beta2: 0.999
+      adam_epsilon: 1.0e-8
+      weight_decay: 0.01
+    scheduler_cfg:
+      _target_: unirl.train.backend.base.LrSchedulerConfig
+      type: constant_with_warmup
+      warmup_steps: 1
+      total_steps: 24
+  algorithm:
+    _target_: unirl.algorithms.TokenValueAlgorithm
+    stage_attr: value
+    conditions_cls:
+      _target_: hydra.utils.get_class
+      path: unirl.models.qwen3.Qwen3ARConditions
+
+rollout:
+  _target_: unirl.rollout.engine.agentic.engine.AgenticRolloutEngine
+  config:
+    _target_: unirl.rollout.engine.agentic.config.AgenticRolloutEngineConfig
+    max_turns: 6
+    per_worker_concurrency: 1
+    partial_rollout: true
+    inner:
+      _target_: unirl.rollout.engine.sglang.config.SGLangEngineConfig
+      backend: native
+      pretrained_model_ckpt_path: ${oc.env:QWEN3_INSTRUCT_PATH}
+      tp_size: 1
+      max_new_tokens: 64
+      temperature: 1.0
+      top_p: 1.0
+      top_k: 0
+      concurrency: 1
+      chat_template_kwargs:
+        enable_thinking: false
+      engine_kwargs:
+        mem_fraction_static: 0.8
+        skip_server_warmup: true
+        attention_backend: triton
+        disable_cuda_graph: true
+        enable_lora: false
+    env:
+      _target_: unirl.rollout.loop.alfworld_env.AlfworldEnv
+      split: train
+      max_steps: 6
+      step_penalty: 0.01
+      max_obs_chars: 1200
+      config_file: ${oc.env:ALFWORLD_CONFIG}
+    episode_sampling:
+      _target_: unirl.types.sampling.ARSamplingParams
+      samples_per_prompt: 1
+      temperature: 1.0
+      top_p: 1.0
+      top_k: 0
+      max_new_tokens: 64
+
+# Environment returns bypass this fallback.  Keep it dependency-free so a real
+# ALFWorld smoke does not require the paper's math-verification package.
+reward:
+  _target_: unirl.reward.service.RewardService
+  truncated_reward: keep
+  backend:
+    _target_: unirl.reward.local.gsm8k_exact_match.GSM8KExactMatchRewardScorer
+    base_device: cpu
+    config:
+      _target_: unirl.reward.local.gsm8k_exact_match.GSM8KExactMatchSpec
+
+sync:
+  _target_: unirl.distributed.weight_sync.full.nccl.NCCLWeightSync
+  group_name: weight_sync
+  lora_merged: false
+  bucket_size_mb: 512
+  flush_cache: true
+
+stack:
+  _target_: unirl.train.stack.SAOTrainStack
+  actor_micro_batch_size: 1
+  critic_micro_batch_size: 1
+  actor_max_grad_norm: 1.0
+  critic_max_grad_norm: 1.0
+  critic_updates_per_actor: 2
+  gamma: 1.0
+  gae_alpha: 1.5
+  critic_lambda: 1.0
+
+data_source:
+  _target_: unirl.data.data_source.MultimodalRLDataSource
+  args:
+    run:
+      data_path: ${oc.env:DATA_PATH}
+      eval_data_path: ${oc.env:EVAL_DATA_PATH,${oc.env:DATA_PATH}}
+      seed: 42
+    algorithm:
+      prompts_per_rollout: 4
+
+sampling:
+  _target_: unirl.types.sampling.ARSamplingParams
+  samples_per_prompt: 1
+  temperature: 1.0
+  top_p: 1.0
+  top_k: 0
+  max_new_tokens: 64

@@ -29,7 +29,10 @@ class _FakeTW:
         self.closed = False
 
     def reset(self):
-        return (["You are in a room. There is a mug 1."], {"admissible_commands": [["look", "take mug 1", "win"]], "won": [False]})
+        return (
+            ["You are in a room. There is a mug 1."],
+            {"admissible_commands": [["look", "take mug 1", "win"]], "won": [False]},
+        )
 
     def step(self, actions):
         won = actions[0] == self.solve_on
@@ -86,6 +89,7 @@ def test_reset_builds_react_prompt_and_episode(monkeypatch):
 def test_step_reward_on_done(monkeypatch):
     env = _env(monkeypatch, solve_on="win")
     s = env.reset(_request("r0:g0", 0))
+    tw = next(iter(env._episodes.values())).env
     obs, done, info = env.step(_turn(s, "Thought: look.\nAction: look"))
     assert not done and obs is not None and info["reward"] == 0.0
     s = s.observe(obs)
@@ -93,6 +97,7 @@ def test_step_reward_on_done(monkeypatch):
     assert done2 and obs2 is None
     assert info2["reward"] == 1.0 and info2["success"] == 1.0
     assert not env._episodes  # episode popped on done
+    assert tw.closed  # the live TextWorld env, not just its template, is reclaimed
 
 
 def test_max_steps_terminates(monkeypatch):
@@ -130,10 +135,12 @@ def test_close_reclaims_episode_and_template(monkeypatch):
     template = object()  # a sentinel pooled template to prove it returns to _free
     monkeypatch.setattr(env, "_open_episode", lambda gi: (_FakeTW("win"), template))
     s = env.reset(_request("r0:g0", 0))
+    tw = next(iter(env._episodes.values())).env
     assert len(env._episodes) == 1 and env._free == []  # leased, not yet released
 
     env.close(s)
     assert env._episodes == {} and env._free == [template]  # episode popped, template pooled
+    assert tw.closed
 
     env.close(s)  # idempotent: no double-release, no error
     assert env._episodes == {} and env._free == [template]

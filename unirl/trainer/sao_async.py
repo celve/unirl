@@ -33,6 +33,11 @@ from unirl.utils.hydra import parse_hydra_cfg, remote_hydra
 logger = logging.getLogger(__name__)
 
 
+def _normalize_stop(stop: Optional[Sequence[str]]) -> List[str]:
+    """Preserve an explicit empty stop list for free-text environments."""
+    return ["</tool_call>"] if stop is None else list(stop)
+
+
 def _trajectory_versions(trajectory: Sample, fallback: int) -> Tuple[int, int]:
     versions = [int(p.weight_version) for p in trajectory.gen_parts() if p.weight_version is not None]
     if not versions:
@@ -132,7 +137,11 @@ class AsyncSAOTrainer(AsyncAgenticTrainer):
         self.data_source = instantiate(data_source_cfg)
         self.sampling_params: Dict[str, BaseSamplingParams] = build_sampling_dict(sampling_cfg)
         self.weight_sync = None
-        self._stop = list(stop) if stop else ["</tool_call>"]
+        # ``None`` means "use the tool-calling default" while an explicit empty
+        # list disables stop strings.  Stateful free-text environments such as
+        # ALFWorld must be able to generate a complete ``Action: ...`` turn and
+        # therefore deliberately pass ``stop: []``.
+        self._stop = _normalize_stop(stop)
 
         self._train_fraction = float(train_fraction)
         self._max_oldest_version_lag = None if max_oldest_version_lag is None else int(max_oldest_version_lag)

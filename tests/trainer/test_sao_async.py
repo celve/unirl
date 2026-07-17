@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from unirl.trainer.sao_async import AsyncSAOTrainer, _trajectory_versions, _TrajectoryBuffer
+from unirl.trainer.sao_async import AsyncSAOTrainer, _normalize_stop, _trajectory_versions, _TrajectoryBuffer
 from unirl.types.sample import Part, Sample
 from unirl.types.sampling import ARSamplingParams
 from unirl.types.segments import TextSegment
@@ -65,6 +65,11 @@ def test_fifo_waits_for_full_batch_and_preserves_completion_order() -> None:
 def test_trajectory_versions_fall_back_only_without_turn_stamps() -> None:
     assert _trajectory_versions(_trajectory("a", [7, 3, 9]), fallback=100) == (3, 9)
     assert _trajectory_versions(Sample.request(Part.input(["empty"])), fallback=11) == (11, 11)
+
+
+def test_explicit_empty_stop_list_disables_tool_call_default() -> None:
+    assert _normalize_stop(None) == ["</tool_call>"]
+    assert _normalize_stop([]) == []
 
 
 def test_final_poll_reaps_completion_before_a_drained_drive_is_reset() -> None:
