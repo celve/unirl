@@ -28,6 +28,10 @@ export REPORT_TO_WANDB="${REPORT_TO_WANDB:-true}"
 export WANDB_ENTITY="${WANDB_ENTITY:-linyuwus}"
 export WANDB_PROJECT="${WANDB_PROJECT:-unirl-sao}"
 export WANDB_RUN_NAME="${WANDB_RUN_NAME:-lin562-sao-alfworld-$(date -u +%Y%m%d-%H%M%S)}"
+if [ -z "${WANDB_API_KEY:-}" ] && [ ! -f "${HOME}/.netrc" ]; then
+    export WANDB_MODE="${WANDB_MODE:-offline}"
+    echo "W&B credentials are absent; recording an offline run under ${REPO_ROOT}/wandb."
+fi
 
 case "${QWEN3_INSTRUCT_PATH}" in
     /root/unirl/models/local/*) ;;
