@@ -20,7 +20,7 @@ cd "${REPO_ROOT}"
 export QWEN3_INSTRUCT_PATH="${QWEN3_INSTRUCT_PATH:-${REPO_ROOT}/models/local/Qwen3-4B-Instruct-2507}"
 export VALUE_MODEL_PATH="${VALUE_MODEL_PATH:-${QWEN3_INSTRUCT_PATH}}"
 export ALFWORLD_DATA="${ALFWORLD_DATA:-${REPO_ROOT}/data/alfworld}"
-export ALFWORLD_CONFIG="${ALFWORLD_CONFIG:-${REPO_ROOT}/.venv-sglang/lib/python3.12/site-packages/alfworld/configs/base_config.yaml}"
+export ALFWORLD_CONFIG="${ALFWORLD_CONFIG:-${ALFWORLD_DATA}/base_config.yaml}"
 export DATA_PATH="${DATA_PATH:-${REPO_ROOT}/data/alfworld-sao/train.jsonl}"
 export EVAL_DATA_PATH="${EVAL_DATA_PATH:-${DATA_PATH}}"
 

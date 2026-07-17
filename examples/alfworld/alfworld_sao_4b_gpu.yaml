@@ -12,7 +12,7 @@
 #   QWEN3_INSTRUCT_PATH=/root/unirl/models/local/Qwen3-4B-Instruct-2507
 #   VALUE_MODEL_PATH=$QWEN3_INSTRUCT_PATH
 #   ALFWORLD_DATA=/root/unirl/data/alfworld
-#   ALFWORLD_CONFIG=/root/unirl/.venv-sglang/lib/python3.12/site-packages/alfworld/configs/base_config.yaml
+#   ALFWORLD_CONFIG=/root/unirl/data/alfworld/base_config.yaml
 #   DATA_PATH=/root/unirl/data/alfworld-sao/train.jsonl
 #
 # Run from the SGLang/cu130 environment:
