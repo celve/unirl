@@ -255,12 +255,11 @@ class AsyncSAOTrainer(AsyncAgenticTrainer):
 
     @staticmethod
     def _has_action_tokens(trajectory: Sample) -> bool:
-        return any(
-            p.segment is not None
-            and getattr(p.segment, "tokens", None) is not None
-            and int(p.segment.tokens.numel()) > 0
-            for p in trajectory.gen_parts()
-        )
+        for part in trajectory.gen_parts():
+            tokens = getattr(part.segment, "tokens", None) if part.segment is not None else None
+            if tokens is not None and int(hydrate(tokens).numel()) > 0:
+                return True
+        return False
 
     def _next_n(self, n: int, rollout_id: int) -> List[Sample]:
         refills = 0

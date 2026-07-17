@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+import unirl.trainer.sao_async as sao_async
 from unirl.trainer.sao_async import AsyncSAOTrainer, _normalize_stop, _trajectory_versions, _TrajectoryBuffer
 from unirl.types.sample import Part, Sample
 from unirl.types.sampling import ARSamplingParams
@@ -99,6 +100,15 @@ def test_final_poll_reaps_completion_before_a_drained_drive_is_reset() -> None:
     )
 
     assert trainer._next_n(1, rollout_id=0) == [trajectory]
+
+
+def test_action_token_check_hydrates_distributed_tensor_refs(monkeypatch: pytest.MonkeyPatch) -> None:
+    trajectory = _trajectory("remote", [0])
+    token_ref = object()  # deliberately has no .numel(), like TensorRef
+    trajectory.parts[1].segment.tokens = token_ref
+    monkeypatch.setattr(sao_async, "hydrate", lambda value: torch.ones(1) if value is token_ref else value)
+
+    assert AsyncSAOTrainer._has_action_tokens(trajectory)
 
 
 def _valid_sampling() -> tuple[dict, dict, dict]:
