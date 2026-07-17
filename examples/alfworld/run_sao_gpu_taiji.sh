@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Launch the LIN-562 SAO/ALFWorld GPU acceptance run on one TaiJi node.
-set -euo pipefail
 
 # TaiJi's default shell omits the egress setup.  Keep this inside the launcher
 # as well as in the outer taiji_client invocation because Ray/SGLang children
 # and libraries such as W&B and Transformers read proxy variables directly.
 # shellcheck disable=SC1091
 source /etc/bashrc
+set -euo pipefail
 export http_proxy="${http_proxy:-http://star-proxy.oa.com:3128}"
 export https_proxy="${https_proxy:-http://star-proxy.oa.com:3128}"
 export HTTP_PROXY="${HTTP_PROXY:-${http_proxy}}"
