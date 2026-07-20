@@ -32,7 +32,12 @@ weight_sync_interval: 1
 eval_interval: 0
 
 worker_max_concurrency: 8
-stop: ["</tool_call>"]
+# AReaL parity (LIN-564): stop at the hallucinated <tool_response>, NOT at </tool_call>.
+# Proven decisive for rollout-0: replicating AReaL's harness on vanilla Qwen3-1.7B, swapping ONLY
+# this stop from <tool_response> to </tool_call> turned 0 loops into 4/12 max-turn loops (the model
+# concludes in \boxed{} and re-searches forever instead of emitting <answer>). </tool_call> ends the
+# search turn one token early and derails the multi-turn protocol; <tool_response> keeps it on-track.
+stop: ["\n<tool_response>", "<tool_response>"]
 
 adv_normalization_scope: global # tongyi_deepresearch: batch-level adv normalization
 normalize_adv_by_std: true
@@ -103,18 +108,37 @@ rollout:
       temperature: 1.0
       top_p: 1.0
       concurrency: 8
-      # The deep-research framing — verbatim from AReaL's tongyi_deepresearch
-      # SYSTEM_PROMPT, adapted for UniRL: the <tools> JSON block is dropped because
-      # the tool SCHEMAS are auto-injected into the chat template from the env.
-      # Set on the inner engine, so it is frozen into the stored rollout
-      # conditions the trainer replays -> one edit covers generation AND training.
+      # The deep-research framing — VERBATIM from AReaL's tongyi_deepresearch SYSTEM_PROMPT,
+      # INCLUDING the <tools> JSON block embedded as TEXT (LIN-564 rollout-0 fix). Do NOT drop
+      # the tools block and rely on tools= auto-injection: passing tools= puts Qwen3 into native
+      # tool-calling mode, where the model self-terminates at </tool_call> (emits <|im_end|>) and
+      # then falls back to \boxed{} answers → re-searches forever → rollout-0 turns blow up to the
+      # 100-turn cap (mean 5.7). Embedding tools as text (AReaL's way) keeps the model generating
+      # through the tool boundary so it emits <answer> and converges (~2.28 turns). Proven by a
+      # faithful AReaL-harness replica on vanilla Qwen3-1.7B: tools-in-system → 0 loops on the 12
+      # worst questions; tools= injection → 4 loops. See docs/unirl-vs-areal-turn-growth-causes.md.
       system_instruction: |-
         You are a deep research assistant. Your core function is to conduct thorough, multi-source investigations into any topic. You must handle both broad, open-domain inquiries and queries within specialized academic fields. For every request, synthesize information from credible, diverse sources to deliver a comprehensive, accurate, and objective response. When you have gathered sufficient information and are ready to provide the definitive response, you must enclose the entire final answer within <answer></answer> tags.
+
+        # Tools
+
+        You may call one or more functions to assist with the user query.
+
+        You are provided with function signatures within <tools></tools> XML tags:
+        <tools>
+        {"type": "function", "function": {"name": "search", "description": "Perform Google web searches then returns a string of the top search results. Accepts multiple queries.", "parameters": {"type": "object", "properties": {"query": {"type": "array", "items": {"type": "string", "description": "The search query."}, "minItems": 1, "description": "The list of search queries."}}, "required": ["query"]}}}
+        {"type": "function", "function": {"name": "visit", "description": "Visit webpage(s) and return the summary of the content.", "parameters": {"type": "object", "properties": {"url": {"type": "array", "items": {"type": "string"}, "description": "The URL(s) of the webpage(s) to visit. Can be a single URL or an array of URLs."}, "goal": {"type": "string", "description": "The specific information goal for visiting webpage(s)."}}, "required": ["url", "goal"]}}}
+        </tools>
+
+        For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:
+        <tool_call>
+        {"name": <function-name>, "arguments": <args-json-object>}
+        </tool_call>
 
         Current date: ${oc.env:RUN_DATE,2026-07-16}
       chat_template_kwargs:
         enable_thinking: true # tongyi_deepresearch runs thinking-on (LIN-564); must agree with pipeline.enable_thinking
-        # `tools` is auto-injected from the env's tool_schemas() at engine build.
+        tools: null # AReaL parity (LIN-564): tools are embedded in system_instruction as TEXT (above); do NOT auto-inject via tools= (native tool mode → self-terminate at </tool_call> → \boxed{} loops). null suppresses the _maybe_inject_tool_schemas setdefault.
       engine_kwargs:
         mem_fraction_static: 0.3
         context_length: 32768 # aligned to tongyi_deepresearch trajectory budget

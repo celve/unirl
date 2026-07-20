@@ -95,7 +95,10 @@ class LLMJudgeRewardScorer(LocalRewardBackend):
         # predictions "correct", which GRPO exploits — the policy collapses to a
         # single empty EOS token, abandons tool use, and the reward curve climbs
         # deceptively. Hard-zero it so real research always out-scores silence.
-        if not (prediction or "").strip():
+        # Gated by $HARD_ZERO_EMPTY (default on). Set to 0 to reproduce AReaL's
+        # process faithfully: AReaL routes empty/untagged predictions to the judge
+        # (lenient), which is the reward-sign difference that lets its turns grow.
+        if os.environ.get("HARD_ZERO_EMPTY", "1").lower() in ("1", "true", "yes") and not (prediction or "").strip():
             return 0.0
         prompt = self._spec.prompt_template.format(
             question=question,

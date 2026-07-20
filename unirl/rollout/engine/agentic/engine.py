@@ -387,6 +387,15 @@ class AgenticRolloutEngine(BaseRolloutEngine):
                 if isinstance(info, dict) and info.get("reward") is not None:
                     env_reward = float(info["reward"])
                 if done:
+                    # AReaL parity (LIN-564): the env signals ``done`` both for a real
+                    # ``<answer>`` AND for hitting ``max_turns`` (tool_environment.py). If it's
+                    # ONLY the turn cap (no answer this turn), force a final answer instead of
+                    # terminating on a non-answer turn — else the hardest ~7% loop to max_turns
+                    # and end NEITHER (ungradable). Mirrors react_agent's max-llm-calls nudge.
+                    _turn = info.get("turn") if isinstance(info, dict) else 0
+                    _capped = isinstance(_turn, int) and _turn >= self._max_turns
+                    if self._force_threshold is not None and _capped:
+                        return self._force_final_answer(sample, env_reward)
                     return self._attach_env_reward(sample, env_reward), True
                 # Force-answer guard (LIN-564): once the trajectory nears the token
                 # budget, stop looping — inject "answer now" and force a final turn

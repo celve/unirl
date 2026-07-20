@@ -31,6 +31,9 @@ logger = logging.getLogger(__name__)
 _TOOL_CALL_RE = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL)
 # Opener for a tool call whose ``</tool_call>`` was trimmed by a ``stop`` string mid-generation.
 _TOOL_CALL_OPEN_RE = re.compile(r"<tool_call>\s*(\{)", re.DOTALL)
+# ``<answer>…</answer>`` — the explicit final-answer tag. AReaL's react_agent terminates a
+# trajectory ONLY when both tags are present (LIN-564), never on the mere absence of a tool call.
+_ANSWER_RE = re.compile(r"<answer>(.*?)</answer>", re.DOTALL)
 
 
 def _balanced_json(text: str, start: int) -> Optional[str]:
@@ -182,8 +185,16 @@ class ToolEnvironment:
         sessions = (sample.parts[0].control or {}).get("tool_sessions", {})
         calls = [parse_tool_call(t) for t in texts]
         results: List[Optional[str]] = [self._run(c, sessions) if c is not None else None for c in calls]
-        per_sample_done = [c is None for c in calls]
-        any_call = any(c is not None for c in calls)
+        # AReaL react_agent parity (LIN-564): a sample terminates ONLY when it emits an explicit
+        # ``<answer>…</answer>`` tag — NOT merely because this generation lacked a tool call. A
+        # generation that is neither a tool call nor a tagged answer (truncated ``<think>``, a
+        # failed-search deliberation, "let me reconsider…") keeps the trajectory alive so the model
+        # can continue, exactly like react_agent.py (which breaks only on ``<answer>``). unirl
+        # previously terminated on the FIRST tool-call-free generation, cutting ~16% of base-policy
+        # trajectories a turn+ short of AReaL — the dominant rollout-0 turn-count gap. Trajectories
+        # that never answer are bounded by the engine's force-answer/token-budget guard + max_turns.
+        has_answer = [bool(_ANSWER_RE.search(t or "")) for t in texts]
+        per_sample_done = has_answer
 
         info = {
             "turn": turn,
@@ -192,12 +203,20 @@ class ToolEnvironment:
             "per_sample_done": per_sample_done,
         }
 
-        if (not any_call) or (turn >= self.max_turns):
+        # Terminal once every frontier sample has answered, or the turn bound is hit.
+        if all(per_sample_done) or (turn >= self.max_turns):
             return None, True, info
 
-        # Row-aligned observation: the tool result for rows that called a tool; "" placeholder for
-        # rows that already produced a final answer while siblings continue (the n>1 heterogeneous
-        # case — a known follow-up that belongs to the loop/Sample layer, not the environment).
+        # Single-sample frontier (AgenticRolloutEngine drain — the deep-research path): a tool call
+        # yields its result as the next observation; a NEITHER generation yields ``observation=None``
+        # so the engine loop re-generates with nothing appended (AReaL's "keep going" — see
+        # ``_run_one``, which skips ``observe`` when the observation is None).
+        if len(texts) == 1:
+            obs0 = results[0]
+            return (Texts(texts=[obs0]) if obs0 is not None else None), False, info
+
+        # Batched frontier (AgentLoop, n>1): row-aligned observation — the tool result for rows that
+        # called a tool; "" for rows continuing without one (already answered, or NEITHER).
         observation = Texts(texts=[r if r is not None else "" for r in results])
         return observation, False, info
 
