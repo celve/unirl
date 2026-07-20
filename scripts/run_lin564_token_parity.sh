@@ -2,9 +2,9 @@
 # LIN-564 U3: AReaL token-normalization/token-loss parity on Qwen3-1.7B.
 # Run persistently from tmux. Secrets stay in a pod-local mode-600 env file.
 
-set -euo pipefail
-
 source /etc/bashrc
+
+set -euo pipefail
 
 ROOT=/root/unirl
 ENV_FILE=${LIN564_ENV_FILE:-$ROOT/.lin564_deep_research.env}
