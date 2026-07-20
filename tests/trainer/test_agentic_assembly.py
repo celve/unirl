@@ -17,6 +17,7 @@ pytest.importorskip("torch")  # the unirl types import torch at module load
 import torch  # noqa: E402
 
 from unirl.trainer.agentic import AgenticTrainer, _extract_answer, _trajectory_token_counts  # noqa: E402
+from unirl.distributed.tensor import TensorRef, TensorSpan  # noqa: E402
 from unirl.types.sample import Part  # noqa: E402
 from unirl.types.segments.text import TextSegment  # noqa: E402
 
@@ -144,6 +145,36 @@ def test_pad_to_dp_multiple_marks_synthetic_tokens_inactive():
     cu = out.segment.cu_seqlens
     assert bool(out.segment.loss_mask[: int(cu[3])].all())
     assert not bool(out.segment.loss_mask[int(cu[3]) : int(cu[4])].any())
+
+
+def test_pad_to_dp_multiple_builds_mask_for_tensorref_tokens():
+    class LocalHandle:
+        def __init__(self, value):
+            self.value = value
+            self.shape = tuple(value.shape)
+            self.dtype = value.dtype
+            self.device = str(value.device)
+
+        def local(self):
+            return self.value
+
+    segment = TextSegment.pack(
+        tokens=[torch.tensor([1, 2]), torch.tensor([3]), torch.tensor([4, 5, 6])],
+        log_probs=[torch.zeros(2), torch.zeros(1), torch.zeros(3)],
+    )
+    handle = LocalHandle(segment.tokens)
+    segment.tokens = TensorRef(
+        spans=[TensorSpan(handle, 0, 6)],
+        shape=(6,),
+        dtype=torch.long,
+        device="cpu",
+    )
+    part = Part(sample_ids=["a", "b", "c"], segment=segment, advantages=torch.ones(3))
+
+    out = _pad(part, 2)
+
+    assert isinstance(out.segment.tokens, TensorRef)
+    assert out.segment.loss_mask.tolist() == [True, True, True, True, True, True, False]
 
 
 def test_pad_to_dp_multiple_never_uses_zero_token_source():

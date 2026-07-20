@@ -83,7 +83,7 @@ def _trajectory_token_counts(trajs: List[Sample]) -> torch.Tensor:
                 continue
             loss_mask = getattr(segment, "loss_mask", None)
             if loss_mask is not None:
-                count += int(loss_mask.count_nonzero().item())
+                count += int(hydrate(loss_mask).count_nonzero().item())
             elif segment.lengths is not None:
                 count += int(segment.lengths.sum().item())
             elif getattr(segment, "tokens", None) is not None:
@@ -481,7 +481,18 @@ class AgenticTrainer(ARTrainer):
         if segment is not None and getattr(segment, "tokens", None) is not None and hasattr(segment, "loss_mask"):
             segment = segment.clone()
             if segment.loss_mask is None:
-                segment.loss_mask = torch.ones_like(segment.tokens, dtype=torch.bool)
+                token_shape = getattr(segment.tokens, "shape", None)
+                if not token_shape:
+                    raise ValueError("AgenticTrainer cannot build a loss mask without packed token shape metadata")
+                # Rollout tensors reach the driver as TensorRef proxies.  The
+                # mask is controller-owned metadata, so construct it from the
+                # proxy's shape instead of calling a torch op on the proxy.
+                segment.loss_mask = torch.ones(int(token_shape[0]), dtype=torch.bool)
+            else:
+                # Keep pre-existing rollout masks usable when they too arrived
+                # as TensorRef proxies; Part.select/concat can then pad them as
+                # ordinary packed CPU metadata.
+                segment.loss_mask = hydrate(segment.loss_mask).to(dtype=torch.bool)
             part = _part_with_field(part, "segment", segment)
         pad_block = part.select(torch.full((pad,), src, dtype=torch.long))
         pad_block = _part_with_field(pad_block, "advantages", torch.zeros(pad, dtype=torch.float32))
