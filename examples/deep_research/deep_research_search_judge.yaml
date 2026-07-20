@@ -39,7 +39,7 @@ worker_max_concurrency: 8
 # search turn one token early and derails the multi-turn protocol; <tool_response> keeps it on-track.
 stop: ["\n<tool_response>", "<tool_response>"]
 
-adv_normalization_scope: global # tongyi_deepresearch: batch-level adv normalization
+adv_normalization_scope: token-global # exact AReaL loss-mask/token-weighted batch normalization
 normalize_adv_by_std: true
 
 logging:
@@ -184,7 +184,7 @@ algorithm:
   clip_range: 0.4 # tongyi_deepresearch eps_clip
   clip_range_high: null
   clip_schedule: constant
-  loss_agg_mode: seq-mean-token-mean
+  loss_agg_mode: global-token-mean # exact flat active-token mean across micros + DP ranks
   horizon: 8192
   sampling_temperature: 1.0 # MUST equal episode_sampling.temperature
   conditions_cls:

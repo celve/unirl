@@ -45,6 +45,7 @@ from dataclasses import dataclass, replace
 from typing import Dict, List, Mapping, Optional, Tuple
 
 import torch
+import torch.distributed as dist
 
 from unirl.algorithms import AlgorithmStepResult, StageAlgorithm
 from unirl.distributed.group.dispatch import Dispatch, distributed
@@ -56,6 +57,47 @@ from unirl.types.sample import Part
 from unirl.utils.misc import aggregate_numeric_metrics
 
 logger = logging.getLogger(__name__)
+
+_GLOBAL_TOKEN_MEAN = "global-token-mean"
+
+
+def _global_token_loss_scales(
+    micro_token_counts: List[int], *, global_token_count: int, dp_world_size: int
+) -> List[float]:
+    """Micro scales whose DP-averaged gradient is one global flat token mean.
+
+    FSDP averages gradients across ``dp_world_size`` ranks.  Multiplying each
+    micro token-mean by ``world_size * micro_tokens / global_tokens`` therefore
+    cancels that average and gives every active token weight ``1/global_tokens``.
+    Kept pure so the distributed algebra can be tested without launching ranks.
+    """
+    if global_token_count <= 0:
+        raise ValueError(f"global-token-mean requires at least one active token; got {global_token_count}")
+    if dp_world_size <= 0:
+        raise ValueError(f"dp_world_size must be positive; got {dp_world_size}")
+    if any(count < 0 for count in micro_token_counts):
+        raise ValueError(f"micro token counts must be non-negative; got {micro_token_counts}")
+    return [dp_world_size * count / float(global_token_count) for count in micro_token_counts]
+
+
+def _micro_token_counts(part: Part, micros: UpdatePlan) -> List[int]:
+    """Count active packed tokens in each contiguous micro range."""
+    segment = part.segment
+    if segment is None or segment.lengths is None:
+        raise ValueError("global-token-mean requires segment.lengths for every training row")
+    loss_mask = getattr(segment, "loss_mask", None)
+    if loss_mask is None:
+        return [int(segment.lengths[start:end].sum().item()) for start, end in micros]
+
+    cu = segment.cu_seqlens
+    if cu is None:
+        raise ValueError("global-token-mean requires packed cu_seqlens when segment.loss_mask is set")
+    counts: List[int] = []
+    for start, end in micros:
+        token_start = int(cu[start].item())
+        token_end = int(cu[end].item())
+        counts.append(int(loss_mask[token_start:token_end].count_nonzero().item()))
+    return counts
 
 
 @dataclass(frozen=True)
@@ -159,6 +201,17 @@ class TrainStack(Remote):
             )
         self.fsdp_backend = fsdp_backend
         self.algorithm = algorithm
+        if getattr(algorithm, "loss_agg_mode", None) == _GLOBAL_TOKEN_MEAN:
+            if not getattr(algorithm, "supports_global_token_mean", False):
+                raise ValueError(
+                    f"{type(algorithm).__name__} does not implement the masked micro loss required by "
+                    f"loss_agg_mode={_GLOBAL_TOKEN_MEAN!r}"
+                )
+            if not isinstance(fsdp_backend, FSDPBackend):
+                raise ValueError(
+                    "global-token-mean currently requires the flat-DP FSDPBackend; "
+                    "a backend with model/sequence parallelism needs an explicit DP process group"
+                )
         self.micro_batch_size = int(micro_batch_size)
         self.max_grad_norm = float(max_grad_norm)
         # Composition: the micro-batch grouping strategy. None → the historical
@@ -241,6 +294,32 @@ class TrainStack(Remote):
         micro_results: List[AlgorithmStepResult] = []
         total_loss = 0.0
         has_backward = False
+        global_token_mean = getattr(self.algorithm, "loss_agg_mode", None) == _GLOBAL_TOKEN_MEAN
+
+        # AReaL parity mode: its loss engine weights micro-batches by the number
+        # of active loss-mask tokens and all-reduces that denominator across DP.
+        # Existing modes intentionally keep the historical sample-share behavior.
+        if global_token_mean:
+            micro_token_counts = _micro_token_counts(part, micros)
+            local_token_count = sum(micro_token_counts)
+            segment = part.segment
+            token_device = (
+                segment.tokens.device
+                if segment is not None and getattr(segment, "tokens", None) is not None
+                else segment.lengths.device
+            )
+            global_token_count_tensor = torch.tensor(local_token_count, dtype=torch.long, device=token_device)
+            dp_world_size = 1
+            if dist.is_available() and dist.is_initialized():
+                dist.all_reduce(global_token_count_tensor, op=dist.ReduceOp.SUM)
+                dp_world_size = dist.get_world_size()
+            loss_scales = _global_token_loss_scales(
+                micro_token_counts,
+                global_token_count=int(global_token_count_tensor.item()),
+                dp_world_size=dp_world_size,
+            )
+        else:
+            loss_scales = [(end - start) / float(update_total) for start, end in micros]
 
         single_micro = len(micros) == 1 and micros[0] == (0, bs)
         last_micro = len(micros) - 1
@@ -255,7 +334,7 @@ class TrainStack(Remote):
             # the whole-update mean only when each micro is weighted by its share of
             # samples. With equal count-based micros this reduces to 1/len(micros);
             # with token-budget packing micros vary in size.
-            loss_scale = (end - start) / float(update_total)
+            loss_scale = loss_scales[i]
             result = self.algorithm.compute_loss_and_backward(
                 conditions=micro_track.conditions,
                 segment=micro_track.segment,
@@ -264,12 +343,22 @@ class TrainStack(Remote):
                 loss_scale=loss_scale,
             )
             micro_results.append(result)
-            total_loss += result.loss
+            total_loss += result.loss * loss_scale if global_token_mean else result.loss
             has_backward = has_backward or result.has_backward
+
+        if global_token_mean and dist.is_available() and dist.is_initialized():
+            # Scalars returned through DP_SCATTER take rank 0's value. Make the
+            # logged loss identical on every rank and equal to the global token
+            # mean before returning it through that collector.
+            reduced_loss = torch.tensor(total_loss, dtype=torch.float64, device=token_device)
+            dist.all_reduce(reduced_loss, op=dist.ReduceOp.SUM)
+            total_loss = float(reduced_loss.item()) / dist.get_world_size()
 
         aggregated_metrics: Mapping[str, object] = aggregate_numeric_metrics(
             [r.metrics for r in micro_results if r.metrics]
         )
+        if global_token_mean:
+            aggregated_metrics = {**dict(aggregated_metrics), "policy_loss": total_loss}
 
         # Under defer_grad_sync the deferred reduce-scatter only runs inside a
         # backward that executes after set_grad_sync(True) — the last micro's. If

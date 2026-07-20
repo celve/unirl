@@ -65,6 +65,33 @@ def _extract_answer(text: Optional[str]) -> str:
     return text.strip()
 
 
+def _trajectory_token_counts(trajs: List[Sample]) -> torch.Tensor:
+    """Generated-token count for each trajectory, summed across assistant turns.
+
+    AReaL broadcasts the terminal reward onto every token selected by its loss
+    mask before batch-level advantage normalization.  Agentic UniRL stores each
+    assistant turn as a separate generated ``Part``, so summing their packed
+    lengths reconstructs the equivalent per-trajectory multiplicity.  Prompt and
+    tool/context parts are not generated parts and therefore do not contribute.
+    """
+    counts: List[int] = []
+    for tr in trajs:
+        count = 0
+        for gp in tr.gen_parts():
+            segment = gp.segment
+            if segment is None:
+                continue
+            loss_mask = getattr(segment, "loss_mask", None)
+            if loss_mask is not None:
+                count += int(loss_mask.count_nonzero().item())
+            elif segment.lengths is not None:
+                count += int(segment.lengths.sum().item())
+            elif getattr(segment, "tokens", None) is not None:
+                count += int(segment.tokens.shape[0])
+        counts.append(count)
+    return torch.tensor(counts, dtype=torch.long)
+
+
 def _validate_agentic_cfg(kw: dict) -> None:
     """Fail fast on cross-config invariants only jointly visible at the trainer.
 
@@ -201,8 +228,10 @@ class AgenticTrainer(ARTrainer):
         finite = torch.isfinite(rewards)
         mean_reward = float(rewards[finite].mean().item()) if bool(finite.any()) else 0.0
 
-        # GROUP-relative GRPO advantage over the ``n`` siblings per prompt.
-        advantages = self._group_advantages(rewards, group_ids)
+        # GROUP-relative GRPO by default; ``token-global`` reconstructs AReaL's
+        # batch-level masked normalization by weighting each terminal reward by
+        # the number of generated tokens onto which AReaL broadcasts it.
+        advantages, token_counts = self._compute_agentic_advantages(trajs, rewards, group_ids)
 
         # Debug: dump every trajectory of this rollout (decoded turns + reward/advantage)
         # when $TRAJ_DUMP_DIR is set — a no-op otherwise, and never raises. Placed BEFORE
@@ -214,6 +243,11 @@ class AgenticTrainer(ARTrainer):
         for i, tr in enumerate(trajs):
             adv_i = float(advantages[i].item())
             for gp in tr.gen_parts():
+                # Empty SGLang generations have no connected replay backward.
+                # Remove them before DP scatter so every rank executes the same
+                # number of real FSDP collectives; synthetic pads are added later.
+                if gp.segment is None or gp.segment.lengths is None or int(gp.segment.lengths.sum().item()) == 0:
+                    continue
                 gp = _part_with_field(gp, "advantages", torch.full((gp.batch_size,), adv_i, dtype=torch.float32))
                 gp = _part_with_field(gp, "primitive", None)  # free decoded text before train
                 # Drop any per-trajectory env reward: it rides only the TERMINAL turn (a
@@ -253,7 +287,16 @@ class AgenticTrainer(ARTrainer):
             "agent/max_turns": max(depths) if depths else 0,
             "agent/genless_trajectories": sum(1 for d in depths if d == 0),
             "agent/train_rows": int(train_part.batch_size),
+            "agent/mean_gen_tokens": float(token_counts.float().mean().item()) if token_counts.numel() else 0.0,
+            "agent/max_gen_tokens": int(token_counts.max().item()) if token_counts.numel() else 0,
         }
+        token_valid = finite & (token_counts.to(device=rewards.device) > 0)
+        if bool(token_valid.any()):
+            token_weights = token_counts.to(device=rewards.device, dtype=torch.float64)[token_valid]
+            token_rewards = rewards.to(torch.float64)[token_valid]
+            metrics["agent/token_weighted_reward"] = float(
+                (token_rewards * token_weights).sum().div(token_weights.sum()).item()
+            )
         if extra_metrics:
             metrics.update(extra_metrics)
         self.wandb_logger.log_rollout_step(
@@ -333,16 +376,63 @@ class AgenticTrainer(ARTrainer):
         frontier = _part_with_field(frontier, "advantages", advantages.to(torch.float32))
         return log_sample.with_parts([*log_sample.parts[:-1], frontier])
 
-    def _group_advantages(self, rewards: torch.Tensor, group_ids: List[str]) -> torch.Tensor:
+    def _compute_agentic_advantages(
+        self, trajs: List[Sample], rewards: torch.Tensor, group_ids: List[str]
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Return per-trajectory advantages and generated-token multiplicities."""
+        token_counts = _trajectory_token_counts(trajs)
+        return self._group_advantages(rewards, group_ids, token_counts=token_counts), token_counts
+
+    def _group_advantages(
+        self,
+        rewards: torch.Tensor,
+        group_ids: List[str],
+        *,
+        token_counts: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         """Group-relative GRPO advantages, ``ARTrainer.compute_advantages`` parity
         (population std), over the ``n`` siblings of each prompt (grouped by root id;
         completion order is fine). ``adv_normalization_scope='global'`` z-scores the
-        whole batch; ``normalize_adv_by_std=False`` mean-centers only."""
+        whole batch; ``normalize_adv_by_std=False`` mean-centers only.
+
+        ``adv_normalization_scope='token-global'`` matches AReaL's batch-level,
+        token-masked normalization: each reward is repeated ``token_counts[i]``
+        times, and AReaL climb4's exact unbiased std + epsilon are used.
+        """
         r = rewards.to(torch.float32)
         # NaN reward = crashed trajectory: excluded from the group's mean/std and given
         # ZERO advantage (neutral), so an env crash neither rewards nor penalizes its
         # actions. All-finite (the answer-graded path) is byte-identical to before.
         finite = torch.isfinite(r)
+        if self.adv_normalization_scope == "token-global":
+            if token_counts is None:
+                raise ValueError("adv_normalization_scope='token-global' requires generated token counts")
+            if token_counts.shape != r.shape:
+                raise ValueError(
+                    "token_counts must align one-to-one with rewards; "
+                    f"got {tuple(token_counts.shape)} vs {tuple(r.shape)}"
+                )
+            weights = token_counts.to(device=r.device, dtype=torch.float64)
+            active = finite & torch.isfinite(weights) & (weights > 0)
+            if not bool(active.any()):
+                return torch.zeros_like(r)
+
+            rr = r.to(torch.float64)
+            ww = weights[active]
+            factor = ww.sum()
+            mean = (rr[active] * ww).sum() / factor
+            centered = rr - mean
+            if self.normalize_adv_by_std:
+                # AReaL climb4 normalizes (reward - .5) * 10 with
+                # std_unbiased=true and eps=1e-5. Centering removes the bias;
+                # dividing numerator/denominator by 10 makes the equivalent eps
+                # on UniRL's raw 0/1 reward scale exactly 1e-6.
+                if float(factor.item()) <= 1.0:
+                    std = rr.new_ones(())
+                else:
+                    std = ((centered[active].square() * ww).sum() / (factor - 1.0)).sqrt()
+                centered = centered / (std + 1e-6)
+            return torch.where(active, centered, torch.zeros_like(centered)).to(torch.float32)
         if self.adv_normalization_scope == "global":
             rf = r[finite]
             mean = rf.mean() if rf.numel() else r.new_zeros(())
@@ -375,9 +465,30 @@ class AgenticTrainer(ARTrainer):
         if pad == 0:
             return part
         lengths = part.segment.lengths if part.segment is not None else None
-        src = int(torch.argmin(lengths).item()) if (lengths is not None and lengths.numel()) else 0
+        if lengths is not None and lengths.numel():
+            positive = torch.nonzero(lengths > 0, as_tuple=False).flatten()
+            if positive.numel() == 0:
+                raise ValueError("AgenticTrainer cannot DP-pad an all-zero-token training part")
+            src = int(positive[torch.argmin(lengths[positive])].item())
+        else:
+            src = 0
+
+        # Give real rows an explicit all-active mask before concatenating pads.
+        # The pads must still replay/backward on their DP rank for collective
+        # parity, but a zero mask keeps them out of AReaL's global token
+        # denominator (and makes their connected backward exactly zero).
+        segment = part.segment
+        if segment is not None and getattr(segment, "tokens", None) is not None and hasattr(segment, "loss_mask"):
+            segment = segment.clone()
+            if segment.loss_mask is None:
+                segment.loss_mask = torch.ones_like(segment.tokens, dtype=torch.bool)
+            part = _part_with_field(part, "segment", segment)
         pad_block = part.select(torch.full((pad,), src, dtype=torch.long))
         pad_block = _part_with_field(pad_block, "advantages", torch.zeros(pad, dtype=torch.float32))
+        if pad_block.segment is not None and getattr(pad_block.segment, "loss_mask", None) is not None:
+            pad_segment = pad_block.segment.clone()
+            pad_segment.loss_mask = torch.zeros_like(pad_segment.loss_mask, dtype=torch.bool)
+            pad_block = _part_with_field(pad_block, "segment", pad_segment)
         return Part.concat([part, pad_block])
 
     def evaluate(self, rollout_id: int) -> float:

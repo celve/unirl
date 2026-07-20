@@ -355,12 +355,14 @@ class AsyncAgenticTrainer(AgenticTrainer):
         rewards, group_ids = self._rewards_and_groups(request, trajs, rollout_id)
         finite = torch.isfinite(rewards)
         mean_reward = float(rewards[finite].mean().item()) if bool(finite.any()) else 0.0
-        advantages = self._group_advantages(rewards, group_ids)
+        advantages, token_counts = self._compute_agentic_advantages(trajs, rewards, group_ids)
 
         train_parts: List[Part] = []
         for i, tr in enumerate(trajs):
             adv_i = float(advantages[i].item())
             for gp in tr.gen_parts():
+                if gp.segment is None or gp.segment.lengths is None or int(gp.segment.lengths.sum().item()) == 0:
+                    continue
                 gp = _part_with_field(gp, "advantages", torch.full((gp.batch_size,), adv_i, dtype=torch.float32))
                 gp = _part_with_field(gp, "primitive", None)
                 gp = _part_with_field(gp, "rewards", None)
@@ -384,6 +386,8 @@ class AsyncAgenticTrainer(AgenticTrainer):
             extra_metrics={
                 "agent/mean_turns": (sum(depths) / len(depths)) if depths else 0.0,
                 "agent/max_turns": max(depths) if depths else 0,
+                "agent/mean_gen_tokens": float(token_counts.float().mean().item()) if token_counts.numel() else 0.0,
+                "agent/max_gen_tokens": int(token_counts.max().item()) if token_counts.numel() else 0,
                 "async/buffer_groups": self._buffer.size(),
                 "async/weight_version": self._weight_version,
                 "async/version_span": (max(versions) - min(versions)) if versions else 0,

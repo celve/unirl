@@ -16,8 +16,9 @@ pytest.importorskip("torch")  # the unirl types import torch at module load
 
 import torch  # noqa: E402
 
-from unirl.trainer.agentic import AgenticTrainer, _extract_answer  # noqa: E402
+from unirl.trainer.agentic import AgenticTrainer, _extract_answer, _trajectory_token_counts  # noqa: E402
 from unirl.types.sample import Part  # noqa: E402
+from unirl.types.segments.text import TextSegment  # noqa: E402
 
 
 # --------------------------------------------------------------------------- #
@@ -40,9 +41,10 @@ def test_extract_answer_last_wins_and_fallback():
 # --------------------------------------------------------------------------- #
 
 
-def _adv(scope, by_std, rewards, group_ids):
+def _adv(scope, by_std, rewards, group_ids, token_counts=None):
     stub = SimpleNamespace(adv_normalization_scope=scope, normalize_adv_by_std=by_std)
-    return AgenticTrainer._group_advantages(stub, torch.tensor(rewards), group_ids)
+    weights = None if token_counts is None else torch.tensor(token_counts)
+    return AgenticTrainer._group_advantages(stub, torch.tensor(rewards), group_ids, token_counts=weights)
 
 
 def test_group_advantages_group_zscore():
@@ -70,6 +72,41 @@ def test_group_advantages_global_is_mean_zero():
     assert abs(float(adv.mean())) < 1e-5
 
 
+def test_token_global_advantages_match_areal_unbiased_masked_normalization():
+    # Conceptual token-expanded rewards are [1, 1, 1, 0]: mean=.75 and
+    # unbiased std=sqrt((3*.25^2 + .75^2)/(4-1))=.5. AReaL adds eps=1e-5
+    # after reward_scaling=10, equivalent to eps=1e-6 on the raw 0/1 scale.
+    adv = _adv("token-global", True, [1.0, 0.0], ["p0", "p1"], token_counts=[3, 1])
+    expected = torch.tensor([0.25 / 0.500001, -0.75 / 0.500001])
+    assert torch.allclose(adv, expected, atol=1e-6)
+    assert abs(float((adv * torch.tensor([3.0, 1.0])).sum())) < 1e-5
+    assert float(adv.mean()) < 0  # sequence-weighted baseline sees a negative stop bias
+
+
+def test_token_global_mean_center_and_inactive_rows():
+    adv = _adv(
+        "token-global",
+        False,
+        [1.0, 0.0, float("nan"), 1.0],
+        ["p0", "p1", "p2", "p3"],
+        token_counts=[3, 1, 100, 0],
+    )
+    assert torch.allclose(adv, torch.tensor([0.25, -0.75, 0.0, 0.0]))
+
+
+def test_trajectory_token_counts_sum_generated_turns_only():
+    turn_a = SimpleNamespace(segment=SimpleNamespace(lengths=torch.tensor([2])))
+    turn_b = SimpleNamespace(
+        segment=SimpleNamespace(
+            lengths=torch.tensor([5]),
+            loss_mask=torch.tensor([True, False, True, False, True]),
+        )
+    )
+    genless = SimpleNamespace(gen_parts=lambda: [])
+    two_turn = SimpleNamespace(gen_parts=lambda: [turn_a, turn_b])
+    assert torch.equal(_trajectory_token_counts([two_turn, genless]), torch.tensor([5, 0]))
+
+
 # --------------------------------------------------------------------------- #
 # DP-divisibility padding
 # --------------------------------------------------------------------------- #
@@ -93,3 +130,27 @@ def test_pad_to_dp_multiple_noop_when_divisible():
     out = _pad(part, 2)
     assert out.batch_size == 2
     assert out is part  # exact no-op when already divisible
+
+
+def test_pad_to_dp_multiple_marks_synthetic_tokens_inactive():
+    segment = TextSegment.pack(
+        tokens=[torch.tensor([1, 2]), torch.tensor([3]), torch.tensor([4, 5, 6])],
+        log_probs=[torch.zeros(2), torch.zeros(1), torch.zeros(3)],
+    )
+    part = Part(sample_ids=["a", "b", "c"], segment=segment, advantages=torch.ones(3))
+    out = _pad(part, 2)
+    assert out.batch_size == 4
+    assert out.segment.loss_mask is not None
+    cu = out.segment.cu_seqlens
+    assert bool(out.segment.loss_mask[: int(cu[3])].all())
+    assert not bool(out.segment.loss_mask[int(cu[3]) : int(cu[4])].any())
+
+
+def test_pad_to_dp_multiple_never_uses_zero_token_source():
+    segment = TextSegment.pack(
+        tokens=[torch.tensor([], dtype=torch.long), torch.tensor([2, 3]), torch.tensor([4, 5, 6])],
+        log_probs=[torch.tensor([]), torch.zeros(2), torch.zeros(3)],
+    )
+    part = Part(sample_ids=["empty", "short", "long"], segment=segment, advantages=torch.ones(3))
+    out = _pad(part, 2)
+    assert out.segment.lengths.tolist() == [0, 2, 3, 2]
