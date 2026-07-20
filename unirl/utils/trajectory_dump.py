@@ -4,8 +4,9 @@ Opt-in via ``$TRAJ_DUMP_DIR``: when set, :func:`maybe_dump_trajectories` writes 
 JSONL file per rollout (``rollout_<id>.jsonl``) with **one line per trajectory**
 (GRPO sibling). Each line carries the decoded multi-turn conversation (prompt →
 assistant/tool turns → final answer), the per-turn token counts, the trajectory's
-scalar reward + GRPO advantage, the reference answer, and a pre-rendered
-``transcript`` string for eyeballing. Unset → a no-op (zero overhead).
+scalar reward + GRPO advantage, the reference answer, an explicit terminal
+``has_answer_tag`` diagnostic, and a pre-rendered ``transcript`` string for
+eyeballing. Unset → a no-op (zero overhead).
 
 Granularity: **rollout → file**, **sample (trajectory) → line**, **turn (Part) →
 an element of the line's ``turns`` array**.
@@ -103,11 +104,16 @@ def _render_trajectory(
             }
         )
 
-    # Final answer: the last decoded generation's ``<answer>…</answer>`` (else its text).
-    last_gen = next((t for t in (_turn_text(p.primitive) for p in reversed(traj.gen_parts())) if t), None)
+    # Final answer: the TERMINAL generation's ``<answer>…</answer>`` (else its
+    # text). Do not skip an empty terminal turn and accidentally report an older
+    # tool call as the answer; reward grading uses this same terminal-turn rule.
+    gen_parts = traj.gen_parts()
+    last_gen = _turn_text(gen_parts[-1].primitive) if gen_parts else None
     final_answer: Optional[str] = None
-    if last_gen:
+    has_answer_tag = False
+    if last_gen is not None:
         m = list(_ANSWER_RE.finditer(last_gen))
+        has_answer_tag = bool(m)
         final_answer = m[-1].group(1).strip() if m else last_gen.strip()
 
     root = parts[0] if parts else None
@@ -125,6 +131,7 @@ def _render_trajectory(
         "num_parts": len(parts),
         "prompt": _turn_text(root.primitive) if root is not None else None,
         "reference_answer": (root.metadata[0] or {}).get("answer") if (root is not None and root.metadata) else None,
+        "has_answer_tag": has_answer_tag,
         "final_answer": final_answer,
         "turns": turns,
     }
@@ -137,7 +144,8 @@ def _render_transcript(record: Dict[str, Any]) -> str:
     header = (
         f"# rollout {record['rollout_id']} · traj {record['traj_index']} · {record['leaf_id']}\n"
         f"# reward={record['reward']} advantage={record['advantage']} "
-        f"turns={record['num_turns']} crashed={record['crashed']}\n"
+        f"turns={record['num_turns']} crashed={record['crashed']} "
+        f"has_answer_tag={record['has_answer_tag']}\n"
         f"# reference_answer: {record['reference_answer']}"
     )
     blocks = [header]

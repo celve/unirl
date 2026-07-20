@@ -16,11 +16,12 @@ pytest.importorskip("torch")  # the unirl types import torch at module load
 
 import torch  # noqa: E402
 
-from unirl.trainer.agentic import AgenticTrainer, _extract_answer, _trajectory_token_counts  # noqa: E402
 from unirl.distributed.tensor import TensorRef, TensorSpan  # noqa: E402
+from unirl.trainer.agentic import AgenticTrainer, _extract_answer, _trajectory_token_counts  # noqa: E402
+from unirl.types.primitives import Texts  # noqa: E402
+from unirl.types.prompts import RolloutInputs  # noqa: E402
 from unirl.types.sample import Part  # noqa: E402
 from unirl.types.segments.text import TextSegment  # noqa: E402
-
 
 # --------------------------------------------------------------------------- #
 # <answer> extraction
@@ -106,6 +107,37 @@ def test_trajectory_token_counts_sum_generated_turns_only():
     genless = SimpleNamespace(gen_parts=lambda: [])
     two_turn = SimpleNamespace(gen_parts=lambda: [turn_a, turn_b])
     assert torch.equal(_trajectory_token_counts([two_turn, genless]), torch.tensor([5, 0]))
+
+
+# --------------------------------------------------------------------------- #
+# per-request tool-boundary control
+# --------------------------------------------------------------------------- #
+
+
+def _request_with_boundary_control(*, no_stop_trim: bool):
+    trainer = object.__new__(AgenticTrainer)
+    trainer._stop = ["</tool_call>"]
+    trainer._no_stop_trim = no_stop_trim
+    inputs = RolloutInputs(
+        primitives={"text": Texts(texts=["question"])},
+        sample_ids=["prompt-0"],
+        metadata=[{"answer": "reference"}],
+    )
+    return AgenticTrainer._build_request_sample(trainer, inputs, rollout_id=7)
+
+
+def test_closed_tool_boundary_is_carried_in_request_control():
+    request = _request_with_boundary_control(no_stop_trim=True)
+
+    assert request.parts[0].control == {
+        "ar": {"stop": ["</tool_call>"], "no_stop_trim": True}
+    }
+
+
+def test_default_tool_boundary_omits_no_stop_trim_for_reproducibility():
+    request = _request_with_boundary_control(no_stop_trim=False)
+
+    assert request.parts[0].control == {"ar": {"stop": ["</tool_call>"]}}
 
 
 # --------------------------------------------------------------------------- #

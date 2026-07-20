@@ -35,7 +35,8 @@ def resolve_sampling(config: Any, sample: Sample) -> ResolvedSampling:
 
     Sources: the frontier gen ``Part``'s ``ARSamplingParams`` (temperature /
     top_p / top_k / max_new_tokens) > the input ``Part``'s ``control['ar']`` bag
-    (stop / system_instruction / return_logprob) > engine-config defaults.
+    (stop / no_stop_trim / system_instruction / return_logprob) > engine-config
+    defaults.
 
     - ``n`` (the per-prompt fan-out the backend must generate) is the **last-fork
       branch** ``len(gen) // len(parts[-2])`` (children per frontier parent), so the
@@ -68,7 +69,12 @@ def resolve_sampling(config: Any, sample: Sample) -> ResolvedSampling:
         "top_k": raw_top_k if raw_top_k > 0 else -1,
         "n": n,
     }
-    for key in ("stop", "stop_token_ids", "skip_special_tokens"):
+    # Boundary/decoding controls stay in the request control bag rather than
+    # ``BaseSamplingParams``: they are SGLang wire policy, not modality-generic
+    # sampling provenance. In particular, ``no_stop_trim=True`` keeps a matched
+    # stop string in decoded text, matching SGLang's already-included generated
+    # token stream, so the conversation and replay share the same boundary.
+    for key in ("stop", "stop_token_ids", "skip_special_tokens", "no_stop_trim"):
         if key in stage_ar:
             block[key] = stage_ar[key]
 

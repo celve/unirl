@@ -38,6 +38,11 @@ worker_max_concurrency: 8
 # concludes in \boxed{} and re-searches forever instead of emitting <answer>). </tool_call> ends the
 # search turn one token early and derails the multi-turn protocol; <tool_response> keeps it on-track.
 stop: ["\n<tool_response>", "<tool_response>"]
+# SGLang's default trimming remains active for this literal AReaL stop-parameter
+# baseline. A separate clean react-style serialization ablation intentionally
+# overrides both this and ``stop`` together; it is behavioral alignment, not a
+# claim that AReaL itself stops at ``</tool_call>``.
+no_stop_trim: false
 
 adv_normalization_scope: token-global # exact AReaL loss-mask/token-weighted batch normalization
 normalize_adv_by_std: true

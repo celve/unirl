@@ -41,6 +41,7 @@ def main(cfg: DictConfig) -> None:
         balance_shards=cfg.get("balance_shards", False),
         eval_interval=cfg.get("eval_interval", 0),
         stop=cfg.get("stop"),
+        no_stop_trim=cfg.get("no_stop_trim", False),
     )
     trainer.train(
         num_rollouts=cfg.get("num_rollouts", 100),

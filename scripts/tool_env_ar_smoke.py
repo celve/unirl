@@ -13,7 +13,9 @@ prompt), so this smoke asserts turn-0 only.
     QWEN3_INSTRUCT_PATH=/root/unirl/models/local/Qwen3-4B-Instruct \
     CUDA_VISIBLE_DEVICES=0 .venv-sglang/bin/python scripts/tool_env_ar_smoke.py
 
-Exits 0 on PASS (model emitted a calculator call → 7006652), non-zero on failure.
+Set ``SGLANG_ASSERT_CLOSED_TOOL_BOUNDARY=1`` to additionally prove that
+``no_stop_trim`` preserves the first ``</tool_call>`` in both decoded text and
+the replay token segment. Exits 0 on PASS, non-zero on failure.
 """
 
 from __future__ import annotations
@@ -33,6 +35,7 @@ from unirl.types.sampling import ARSamplingParams
 
 PROMPT = "What is 1234 multiplied by 5678? Use the calculator tool to compute it, then give the answer."
 EXPECTED = "7006652"
+_ASSERT_CLOSED_BOUNDARY = os.environ.get("SGLANG_ASSERT_CLOSED_TOOL_BOUNDARY", "0") == "1"
 
 
 def _log(msg: str) -> None:
@@ -58,6 +61,7 @@ def main() -> int:
         # Advertise the calculator to the model — the tokenizer's chat template renders it into the
         # prompt and Qwen3-Instruct emits <tool_call>{...}</tool_call>.
         chat_template_kwargs={"tools": env.tool_schemas()},
+        engine_kwargs={"mem_fraction_static": 0.3, "disable_cuda_graph": True},
     )
 
     engine = None
@@ -65,10 +69,14 @@ def main() -> int:
         _log("constructing SGLangRolloutEngine (boots sglang + loads Qwen3-4B-Instruct) ...")
         engine = SGLangRolloutEngine(config, rank=0)
 
-        # Stop right after the tool call so the model can't hallucinate its own tool response;
-        # parse_tool_call's balanced-brace fallback recovers the stop-trimmed </tool_call>.
+        # Stop right after the tool call so the model can't hallucinate its own tool
+        # response. The ordinary smoke exercises the legacy balanced-brace recovery;
+        # LIN-564's closed-boundary mode retains the delimiter explicitly.
+        ar_control = {"stop": ["</tool_call>"]}
+        if _ASSERT_CLOSED_BOUNDARY:
+            ar_control["no_stop_trim"] = True
         request = Sample.request(
-            Part.input(["p0"], primitive=Texts(texts=[PROMPT]), control={"ar": {"stop": ["</tool_call>"]}})
+            Part.input(["p0"], primitive=Texts(texts=[PROMPT]), control={"ar": ar_control})
         )
         ar = ARSamplingParams(samples_per_prompt=1, temperature=0.7, max_new_tokens=512, top_p=0.9, top_k=20)
 
@@ -76,6 +84,24 @@ def main() -> int:
         out = engine.generate(request.fork(1, sampling_params=ar))
         text = out.parts[-1].primitive.texts[0]
         _log(f"raw model output:\n{text!r}")
+
+        if _ASSERT_CLOSED_BOUNDARY:
+            assert text.rstrip().endswith("</tool_call>"), (
+                "no_stop_trim did not retain </tool_call> in decoded output"
+            )
+            segment = out.parts[-1].segment
+            assert segment is not None and segment.tokens is not None, "missing replay token segment"
+            replay_text = engine.adapter._tokenizer.decode(
+                [int(t) for t in segment.tokens.tolist()], skip_special_tokens=False
+            )
+            _log(f"decoded replay tokens:\n{replay_text!r}")
+            assert replay_text.rstrip().endswith("</tool_call>"), (
+                "replay tokens do not retain the same </tool_call> boundary as decoded output"
+            )
+            assert text.count("<tool_call>") == 1 and text.count("</tool_call>") == 1, (
+                "closed boundary must contain exactly one complete tool call"
+            )
+            _log("CLOSED TOOL BOUNDARY PASS: decoded output and replay retain </tool_call> ✓")
 
         # ---- assert the model emitted a parseable calculator tool call ----
         call = parse_tool_call(text)

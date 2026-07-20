@@ -67,10 +67,36 @@ export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 export PYTHONUNBUFFERED=1
 
-# These were already disabled in the AReaL-harness baseline. Keep them fixed so
-# U3 changes only advantage/loss token weighting relative to that baseline.
-export REQUIRE_ANSWER_TAG=0
-export HARD_ZERO_EMPTY=0
+# These stay disabled in the default AReaL-harness baseline so U3 changes only
+# advantage/loss token weighting. The named future protocol opts in explicitly.
+PROTOCOL_OVERRIDES=()
+case ${LIN564_TOOL_PROTOCOL:-token-parity} in
+  token-parity)
+    # Default is byte-for-byte the active U3 objective-parity protocol.
+    export REQUIRE_ANSWER_TAG=0
+    export HARD_ZERO_EMPTY=0
+    ;;
+  closed-one-call)
+    # Future LIN-564 clean react-style serialization ablation: one complete XML
+    # tool call per generation. This is intentional behavioral alignment, NOT
+    # literal AReaL stop-parameter parity (AReaL stops at <tool_response>).
+    # SGLang retains the matched delimiter so decoded context and replay agree.
+    export REQUIRE_ANSWER_TAG=1
+    export HARD_ZERO_EMPTY=1
+    PROTOCOL_OVERRIDES=(
+      'stop=["</tool_call>"]'
+      'no_stop_trim=true'
+    )
+    ;;
+  *)
+    echo "unknown LIN564_TOOL_PROTOCOL: $LIN564_TOOL_PROTOCOL" >&2
+    exit 2
+    ;;
+esac
+if ((${#PROTOCOL_OVERRIDES[@]})); then
+  # Append last so the named protocol cannot be weakened by ad-hoc caller args.
+  set -- "$@" "${PROTOCOL_OVERRIDES[@]}"
+fi
 
 test -x "$PYTHON"
 test -f "$MODEL/config.json"
@@ -109,6 +135,12 @@ if [[ ${LIN564_SKIP_PREWARM:-0} != 1 ]]; then
   CUDA_VISIBLE_DEVICES=0 QWEN3_PATH=$MODEL timeout 1200 \
     "$PYTHON" scripts/sglang_ar_multiturn_smoke.py 2>&1 | tee "$RUN_DIR/prewarm.log"
   grep -q 'SGLANG MULTI-TURN SMOKE PASSED' "$RUN_DIR/prewarm.log"
+  if [[ ${LIN564_TOOL_PROTOCOL:-token-parity} == closed-one-call ]]; then
+    CUDA_VISIBLE_DEVICES=0 QWEN3_INSTRUCT_PATH=$MODEL \
+      SGLANG_ASSERT_CLOSED_TOOL_BOUNDARY=1 timeout 1200 \
+      "$PYTHON" scripts/tool_env_ar_smoke.py 2>&1 | tee "$RUN_DIR/closed_boundary_smoke.log"
+    grep -q 'CLOSED TOOL BOUNDARY PASS' "$RUN_DIR/closed_boundary_smoke.log"
+  fi
 fi
 
 exec "$PYTHON" -m unirl.train_deep_research \

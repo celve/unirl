@@ -141,13 +141,24 @@ def _validate_agentic_cfg(kw: dict) -> None:
 class AgenticTrainer(ARTrainer):
     """Agentic (multi-turn tool-use) RL trainer over the ``AgenticRolloutEngine``."""
 
-    def __init__(self, *, stop: Optional[List[str]] = None, **kwargs) -> None:
+    def __init__(
+        self,
+        *,
+        stop: Optional[List[str]] = None,
+        no_stop_trim: bool = False,
+        **kwargs,
+    ) -> None:
         _validate_agentic_cfg(kwargs)
         super().__init__(**kwargs)
         # Per-turn stop: a tool-call turn ends at ``</tool_call>`` and yields to the
         # tool; a final-answer turn runs to EOS. Rides the request root's control bag
         # (``resolve_sampling`` reads ``control["ar"]``).
         self._stop = list(stop) if stop else ["</tool_call>"]
+        # SGLang normally trims a matched stop string from decoded text. Opting in
+        # preserves the closed tool-call delimiter so decoded conversation context
+        # and the replay tokens agree. Keep false absent from the control bag below:
+        # the established launcher must retain its exact request shape/semantics.
+        self._no_stop_trim = bool(no_stop_trim)
         # Wire the rank-0 coordinator (``AgenticRolloutEngine.set_workers`` — the
         # ``NCCLWeightSync.set_rollout_targets`` shape). ``.workers`` / ``.role_name``
         # are ``Handle`` attributes.
@@ -166,11 +177,14 @@ class AgenticTrainer(ARTrainer):
         reward judge."""
         del sampling  # the engine's ``episode_sampling`` owns per-turn params + ``n``
         root_ids = [f"r{rollout_id}:{sid}" for sid in inputs.sample_ids]
+        ar_control: Dict[str, Any] = {"stop": list(self._stop)}
+        if self._no_stop_trim:
+            ar_control["no_stop_trim"] = True
         text = Part.input(
             root_ids,
             primitive=inputs.primitives["text"],
             metadata=list(inputs.metadata) if inputs.metadata else None,
-            control={"ar": {"stop": list(self._stop)}},
+            control={"ar": ar_control},
         )
         return Sample.request(text)
 
