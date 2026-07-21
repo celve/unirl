@@ -247,7 +247,7 @@ def test_neither_repair_continues_same_assistant_stream_without_user_turn():
     prefix, sampling, stop = inner.continuations[0]
     assert prefix == "\n<answer>"
     assert sampling.max_new_tokens == 384
-    assert stop == ["</answer>"]
+    assert stop == ["</answer>", "<tool_call>"]
     engine.shutdown()
 
 

@@ -17,7 +17,13 @@ pytest.importorskip("torch")  # the unirl types import torch at module load
 import torch  # noqa: E402
 
 from unirl.distributed.tensor import TensorRef, TensorSpan  # noqa: E402
-from unirl.trainer.agentic import AgenticTrainer, _extract_answer, _trajectory_token_counts  # noqa: E402
+from unirl.trainer.agentic import (  # noqa: E402
+    AgenticTrainer,
+    _extract_answer,
+    _is_answer_repair,
+    _prepare_agentic_train_part,
+    _trajectory_token_counts,
+)
 from unirl.types.primitives import Texts  # noqa: E402
 from unirl.types.prompts import RolloutInputs  # noqa: E402
 from unirl.types.sample import Part  # noqa: E402
@@ -107,6 +113,37 @@ def test_trajectory_token_counts_sum_generated_turns_only():
     genless = SimpleNamespace(gen_parts=lambda: [])
     two_turn = SimpleNamespace(gen_parts=lambda: [turn_a, turn_b])
     assert torch.equal(_trajectory_token_counts([two_turn, genless]), torch.tensor([5, 0]))
+
+
+def test_train_assembly_strips_heterogeneous_repair_metadata_without_losing_source_marker():
+    """Regression for U5 rollout-0: ordinary generated Parts use ``metadata=[]``
+    while decoder repair suffixes carry one diagnostic dict. Train copies must
+    concat cleanly without mutating the source trajectory marker used by dumps and
+    logical-turn metrics."""
+    segment_a = TextSegment.pack(tokens=[torch.tensor([1, 2])], log_probs=[torch.zeros(2)])
+    segment_b = TextSegment.pack(tokens=[torch.tensor([3])], log_probs=[torch.zeros(1)])
+    ordinary = Part(sample_ids=["a"], segment=segment_a, metadata=[])
+    repair = Part(
+        sample_ids=["b"],
+        segment=segment_b,
+        primitive=Texts(texts=["<answer>42</answer>"]),
+        metadata=[{"answer_injected": True, "format_repair": "neither_answer_prefix"}],
+    )
+
+    assembled = Part.concat(
+        [
+            _prepare_agentic_train_part(ordinary, -0.5),
+            _prepare_agentic_train_part(repair, 0.5),
+        ]
+    )
+
+    assert assembled.batch_size == 2
+    assert assembled.metadata == []
+    assert torch.allclose(assembled.advantages, torch.tensor([-0.5, 0.5]))
+    assert assembled.primitive is None
+    assert _is_answer_repair(repair) is True
+    assert repair.metadata[0]["answer_injected"] is True
+    assert repair.primitive.texts == ["<answer>42</answer>"]
 
 
 # --------------------------------------------------------------------------- #

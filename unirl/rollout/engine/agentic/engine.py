@@ -547,7 +547,11 @@ class AgenticRolloutEngine(BaseRolloutEngine):
             sample,
             prefix=self._neither_answer_prefix,
             sampling_params=repair_sp,
-            stop=[self._neither_answer_stop],
+            # This branch is terminal and answer-only. If the policy tries to
+            # re-enter tool mode after the injected opener, stop at the FIRST tool
+            # opener rather than allowing another within-turn call sequence. The
+            # malformed answer then receives zero reward, but cannot spam tools.
+            stop=[self._neither_answer_stop, "<tool_call>"],
         )
         last = sample.gen_parts()[-1]
         metadata = [

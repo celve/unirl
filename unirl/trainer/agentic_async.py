@@ -51,9 +51,9 @@ from omegaconf import DictConfig
 
 from unirl.distributed.group.placement import placement, remote
 from unirl.train.stack import TrainStepResult
-from unirl.trainer.agentic import AgenticTrainer, _is_answer_repair
+from unirl.trainer.agentic import AgenticTrainer, _is_answer_repair, _prepare_agentic_train_part
 from unirl.trainer.base import BaseTrainer, build_sampling_dict
-from unirl.types.sample import Part, Sample, _part_with_field
+from unirl.types.sample import Part, Sample
 from unirl.types.sampling import BaseSamplingParams
 from unirl.utils.hydra import parse_hydra_cfg, remote_hydra
 
@@ -363,10 +363,7 @@ class AsyncAgenticTrainer(AgenticTrainer):
             for gp in tr.gen_parts():
                 if gp.segment is None or gp.segment.lengths is None or int(gp.segment.lengths.sum().item()) == 0:
                     continue
-                gp = _part_with_field(gp, "advantages", torch.full((gp.batch_size,), adv_i, dtype=torch.float32))
-                gp = _part_with_field(gp, "primitive", None)
-                gp = _part_with_field(gp, "rewards", None)
-                train_parts.append(gp)
+                train_parts.append(_prepare_agentic_train_part(gp, adv_i))
 
         depths = [len(tr.gen_parts()) for tr in trajs]
         repair_counts = [sum(1 for gp in tr.gen_parts() if _is_answer_repair(gp)) for tr in trajs]

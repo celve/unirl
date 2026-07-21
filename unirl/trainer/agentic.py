@@ -97,6 +97,26 @@ def _is_answer_repair(part: Part) -> bool:
     return any(bool((meta or {}).get("answer_injected")) for meta in (part.metadata or []))
 
 
+def _prepare_agentic_train_part(part: Part, advantage: float) -> Part:
+    """Return the policy-only copy of one generated Part used for training.
+
+    Decoded primitives, terminal rewards, and rollout diagnostics have already
+    served their purpose before train assembly. In particular, ``Part.metadata``
+    uses ``[]`` as the ordinary generated-Part sentinel, while decoder repairs
+    carry a batch-aligned marker list. Mixing those two list shapes makes generic
+    ``Part.concat`` ambiguous. Strip diagnostics from the immutable training copy;
+    the original trajectory retains them for dumps and repair metrics.
+    """
+    part = _part_with_field(
+        part,
+        "advantages",
+        torch.full((part.batch_size,), float(advantage), dtype=torch.float32),
+    )
+    part = _part_with_field(part, "primitive", None)
+    part = _part_with_field(part, "rewards", None)
+    return _part_with_field(part, "metadata", [])
+
+
 def _validate_agentic_cfg(kw: dict) -> None:
     """Fail fast on cross-config invariants only jointly visible at the trainer.
 
@@ -267,14 +287,9 @@ class AgenticTrainer(ARTrainer):
                 # number of real FSDP collectives; synthetic pads are added later.
                 if gp.segment is None or gp.segment.lengths is None or int(gp.segment.lengths.sum().item()) == 0:
                     continue
-                gp = _part_with_field(gp, "advantages", torch.full((gp.batch_size,), adv_i, dtype=torch.float32))
-                gp = _part_with_field(gp, "primitive", None)  # free decoded text before train
-                # Drop any per-trajectory env reward: it rides only the TERMINAL turn (a
-                # TensorRef on 1 of the trajectory's k gen parts), so concatenating turns
-                # would leave a short, misaligned rewards field that breaks DP scatter.
-                # The reward was already read into ``advantages`` (row-aligned across turns).
-                gp = _part_with_field(gp, "rewards", None)
-                train_parts.append(gp)
+                # Drop decoded/reward/diagnostic fields from the immutable training
+                # copy. The reward was already read into trajectory advantages.
+                train_parts.append(_prepare_agentic_train_part(gp, adv_i))
 
         depths = [len(tr.gen_parts()) for tr in trajs]
         repair_counts = [sum(1 for gp in tr.gen_parts() if _is_answer_repair(gp)) for tr in trajs]
