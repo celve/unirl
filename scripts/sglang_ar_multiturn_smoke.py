@@ -107,6 +107,38 @@ def main() -> int:
         )
         _log("MULTI-TURN ENCODE PASS: sglang prompt carries user → assistant → tool ✓")
         _log(f"completion: {gen.primitive.texts[0]!r}")
+
+        # Decoder-prefix repair proof: continue the exact assistant token stream
+        # without introducing another chat-template/user turn. This exercises the
+        # real native backend seam used by the NEITHER-answer experiment, not just
+        # its CPU payload construction contract.
+        repair_prefix = "\n<answer>"
+        repair_params = ARSamplingParams(
+            samples_per_prompt=1,
+            temperature=0.7,
+            max_new_tokens=32,
+            top_p=0.9,
+            top_k=20,
+        )
+        _log("calling engine.continue_generation(...) [decoder-prefix repair] ...")
+        repaired = engine.continue_generation(
+            out,
+            prefix=repair_prefix,
+            sampling_params=repair_params,
+            stop=["</answer>"],
+        )
+        repair_gen = repaired.parts[-1]
+        repair_prompt = repair_gen.conditions["prompt"]
+        repair_prompt_ids = repair_prompt.input_ids[0][repair_prompt.attention_mask[0].bool()].tolist()
+        prefix_ids = tok.encode(repair_prefix, add_special_tokens=False)
+        assert repair_prompt_ids[-len(prefix_ids) :] == prefix_ids, "repair conditioning lost injected prefix"
+        assert repair_gen.primitive.texts[0].startswith(repair_prefix), "scorer-visible repair prefix missing"
+        assert repair_gen.metadata[0]["answer_injected"] is True, "repair metadata missing"
+        assert repair_gen.segment.lengths.tolist() == [len(repair_gen.segment.tokens)], (
+            "repair segment is not suffix-only/aligned"
+        )
+        _log(f"decoder-prefix continuation: {repair_gen.primitive.texts[0]!r}")
+        _log("DECODER-PREFIX CONTINUATION PASS ✓")
         _log("SGLANG MULTI-TURN SMOKE PASSED ✅  (the engine conditions on the full trajectory)")
         return 0
     except Exception:
