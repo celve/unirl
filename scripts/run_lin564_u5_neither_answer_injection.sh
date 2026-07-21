@@ -8,6 +8,7 @@ readonly RUN_NAME=lin564_u5_neither_answer_inject_closed_tool_qwen3_1p7b_s42_bj3
 export LIN564_RUN_NAME=$RUN_NAME
 export LIN564_RUN_DIR=/mnt/bj/logs/$RUN_NAME
 export LIN564_TOOL_PROTOCOL=closed-one-call
+export LIN564_ENV_FILE=/root/unirl/.lin564_u5_runtime.env
 
 cd /root/unirl
 exec bash scripts/run_lin564_token_parity.sh 10 \
