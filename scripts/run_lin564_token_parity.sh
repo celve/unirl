@@ -29,7 +29,7 @@ set +a
 # Reassert launch invariants after sourcing the historical snapshot: it contains
 # stale model/data/judge paths that must never override this pod-local run.
 ROOT=/root/unirl
-MODEL=$ROOT/models/local/Qwen3-1.7B
+MODEL=${LIN564_MODEL:-$ROOT/models/local/Qwen3-1.7B}
 DATA=$ROOT/data/asearcher/train.jsonl
 PYTHON=$ROOT/.venv-sglang/bin/python
 RUN_NAME=${LIN564_RUN_NAME:-lin564_u3_tokadv_tokloss_qwen3_1p7b_s42_20260720}
