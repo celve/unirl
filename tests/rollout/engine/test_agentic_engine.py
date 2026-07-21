@@ -52,6 +52,28 @@ class _InvalidInnerConfig(BaseEngineConfig):
         return object()
 
 
+class _ContinuationFakeEngine(FakeEngine):
+    """Fake the optional raw-continuation seam without rendering a chat turn."""
+
+    def __init__(self) -> None:
+        super().__init__(concurrency=1, yields=0)
+        self.continuations: List[Tuple[str, Any, Any]] = []
+
+    def continue_generation(self, sample, *, prefix, sampling_params=None, stop=None):
+        self.continuations.append((prefix, sampling_params, stop))
+        request = sample.fork(1, sampling_params=sampling_params or sample.parts[-1].sampling_params)
+        filled = request.with_filled_frontier(
+            primitive=Texts(texts=[f"{prefix}repaired answer</answer>"])
+        )
+        return self._stamp_weight_version(filled)
+
+
+@dataclass
+class _ContinuationInnerConfig(BaseEngineConfig):
+    def make_engine(self, **deps: Any) -> _ContinuationFakeEngine:
+        return _ContinuationFakeEngine()
+
+
 class FakeEnv:
     """Re-entrant multi-turn env: terminate after ``turns_for(root_id)`` turns.
 
@@ -94,6 +116,14 @@ class FakeEnv:
             return None, True, {"turn": turn}
         rows = sample.parts[-1].sample_ids
         return Texts(texts=[f"obs::{root}::t{turn}" for _ in rows]), False, {"turn": turn}
+
+
+class _NeitherEnv(FakeEnv):
+    """Every normal decode is a true NEITHER frontier needing answer repair."""
+
+    def step(self, sample: Sample) -> Tuple[Optional[Texts], bool, dict]:
+        turn = len(sample.gen_parts())
+        return None, False, {"turn": turn, "per_sample_neither": [True]}
 
 
 def _make_engine(
@@ -183,6 +213,57 @@ def test_run_one_builds_a_multi_turn_trajectory():
     assert [bool(p.sampling_params is not None) for p in traj.parts] == [False, True, False, True, False, True]
     for gp in traj.gen_parts():
         assert gp.weight_version == 0  # FakeEngine stamps version 0
+    engine.shutdown()
+
+
+def test_neither_repair_continues_same_assistant_stream_without_user_turn():
+    """A true NEITHER turn gets one decoder-prefix continuation and terminates.
+
+    The repair is represented as a second generated Part (sampled suffix owns real
+    log-probs), but there is no intervening input/user Part: semantically it is the
+    same assistant message, continued from exact token ids rather than re-templated.
+    """
+    cfg = AgenticRolloutEngineConfig(
+        inner=_ContinuationInnerConfig(),
+        env=_NeitherEnv(),
+        max_turns=8,
+        episode_sampling=ARSamplingParams(samples_per_prompt=1, max_new_tokens=8192),
+        per_worker_concurrency=1,
+        inject_answer_after_neither=True,
+        neither_answer_prefix="\n<answer>",
+        neither_answer_stop="</answer>",
+        neither_answer_max_new_tokens=384,
+    )
+    engine = AgenticRolloutEngine(cfg, rank=0)
+    traj, done = engine._run_one(_req("p0"))
+
+    assert done is True
+    assert [part.is_gen for part in traj.parts] == [False, True, True]
+    assert traj.parts[-1].primitive.texts == ["\n<answer>repaired answer</answer>"]
+    assert traj.parts[-1].metadata[0]["answer_injected"] is True
+    inner = engine._inner
+    assert isinstance(inner, _ContinuationFakeEngine)
+    assert len(inner.continuations) == 1
+    prefix, sampling, stop = inner.continuations[0]
+    assert prefix == "\n<answer>"
+    assert sampling.max_new_tokens == 384
+    assert stop == ["</answer>"]
+    engine.shutdown()
+
+
+def test_neither_repair_is_disabled_by_default():
+    """The new behavior is recipe opt-in; generic agent loops keep their semantics."""
+    cfg = AgenticRolloutEngineConfig(
+        inner=_ContinuationInnerConfig(),
+        env=_NeitherEnv(),
+        max_turns=2,
+        episode_sampling=ARSamplingParams(samples_per_prompt=1, max_new_tokens=512),
+        per_worker_concurrency=1,
+    )
+    engine = AgenticRolloutEngine(cfg, rank=0)
+    traj, done = engine._run_one(_req("p0"))
+    assert done is True and len(traj.gen_parts()) == 2
+    assert not engine._inner.continuations
     engine.shutdown()
 
 

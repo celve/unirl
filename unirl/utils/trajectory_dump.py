@@ -93,6 +93,7 @@ def _render_trajectory(
     turns: List[Dict[str, Any]] = []
     for i, part in enumerate(parts):
         text, truncated = _clip(_turn_text(part.primitive), max_chars)
+        answer_injected = any(bool((m or {}).get("answer_injected")) for m in (part.metadata or []))
         turns.append(
             {
                 "index": i,
@@ -100,6 +101,7 @@ def _render_trajectory(
                 "is_gen": bool(part.is_gen),
                 "tokens": _turn_tokens(part),
                 "truncated": truncated,
+                "answer_injected": answer_injected,
                 "text": text,
             }
         )
@@ -128,7 +130,13 @@ def _render_trajectory(
         "crashed": reward_f is None,  # NaN reward = crashed trajectory (env bug, not a policy outcome)
         "advantage": _finite_or_none(advantage),
         "num_turns": len(traj.gen_parts()),  # assistant turns actually trained
+        "num_logical_turns": sum(
+            1
+            for part in traj.gen_parts()
+            if not any(bool((m or {}).get("answer_injected")) for m in (part.metadata or []))
+        ),
         "num_parts": len(parts),
+        "answer_injected": any(t["answer_injected"] for t in turns),
         "prompt": _turn_text(root.primitive) if root is not None else None,
         "reference_answer": (root.metadata[0] or {}).get("answer") if (root is not None and root.metadata) else None,
         "has_answer_tag": has_answer_tag,

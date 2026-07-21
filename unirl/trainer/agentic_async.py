@@ -51,7 +51,7 @@ from omegaconf import DictConfig
 
 from unirl.distributed.group.placement import placement, remote
 from unirl.train.stack import TrainStepResult
-from unirl.trainer.agentic import AgenticTrainer
+from unirl.trainer.agentic import AgenticTrainer, _is_answer_repair
 from unirl.trainer.base import BaseTrainer, build_sampling_dict
 from unirl.types.sample import Part, Sample, _part_with_field
 from unirl.types.sampling import BaseSamplingParams
@@ -369,6 +369,8 @@ class AsyncAgenticTrainer(AgenticTrainer):
                 train_parts.append(gp)
 
         depths = [len(tr.gen_parts()) for tr in trajs]
+        repair_counts = [sum(1 for gp in tr.gen_parts() if _is_answer_repair(gp)) for tr in trajs]
+        logical_depths = [depth - repairs for depth, repairs in zip(depths, repair_counts)]
         if not train_parts:
             logger.warning("AsyncAgenticTrainer rollout %d produced no trainable turns.", rollout_id)
             return TrainStepResult(0.0, 0.0, 0.0, False, [], {}), mean_reward
@@ -385,7 +387,16 @@ class AsyncAgenticTrainer(AgenticTrainer):
             step_time_s=time.perf_counter() - t0,
             extra_metrics={
                 "agent/mean_turns": (sum(depths) / len(depths)) if depths else 0.0,
+                "agent/mean_logical_turns": (
+                    (sum(logical_depths) / len(logical_depths)) if logical_depths else 0.0
+                ),
                 "agent/max_turns": max(depths) if depths else 0,
+                "agent/answer_injected_count": sum(repair_counts),
+                "agent/answer_injected_rate": (
+                    sum(1 for count in repair_counts if count > 0) / len(repair_counts)
+                    if repair_counts
+                    else 0.0
+                ),
                 "agent/mean_gen_tokens": float(token_counts.float().mean().item()) if token_counts.numel() else 0.0,
                 "agent/max_gen_tokens": int(token_counts.max().item()) if token_counts.numel() else 0,
                 "async/buffer_groups": self._buffer.size(),

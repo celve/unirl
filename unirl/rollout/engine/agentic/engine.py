@@ -126,6 +126,22 @@ class AgenticRolloutEngine(BaseRolloutEngine):
             if self._traj_token_budget is not None
             else None
         )
+        self._inject_answer_after_neither = bool(config.inject_answer_after_neither)
+        self._neither_answer_prefix = str(config.neither_answer_prefix)
+        self._neither_answer_stop = str(config.neither_answer_stop)
+        self._neither_answer_max_new_tokens = int(config.neither_answer_max_new_tokens)
+        require(
+            not self._inject_answer_after_neither or bool(self._neither_answer_prefix),
+            "neither_answer_prefix must be non-empty when decoder-side answer repair is enabled",
+        )
+        require(
+            not self._inject_answer_after_neither or bool(self._neither_answer_stop),
+            "neither_answer_stop must be non-empty when decoder-side answer repair is enabled",
+        )
+        require(
+            self._neither_answer_max_new_tokens > 0,
+            "neither_answer_max_new_tokens must be positive",
+        )
         self._partial_rollout = bool(getattr(config, "partial_rollout", False))
         # Guard: the env's own turn bound (set independently in the recipe under
         # ``env.max_turns``) must agree with the engine's ``config.max_turns``, else
@@ -386,6 +402,14 @@ class AgenticRolloutEngine(BaseRolloutEngine):
                 # return); tool-only envs (calculator/search) omit it — a no-op here.
                 if isinstance(info, dict) and info.get("reward") is not None:
                     env_reward = float(info["reward"])
+                # A true NEITHER completion is an unfinished assistant message, not a
+                # reason to create another chat turn. Optionally repair it in-place:
+                # append ``<answer>`` to the exact token stream and sample one raw
+                # suffix ending at ``</answer>``. No user message or chat-template
+                # boundary is introduced. The continuation is a separate generated
+                # Part so injected prefix tokens never receive fabricated log-probs.
+                if self._inject_answer_after_neither and self._is_single_neither(info):
+                    return self._continue_neither_as_answer(sample, env_reward)
                 if done:
                     # AReaL parity (LIN-564): the env signals ``done`` both for a real
                     # ``<answer>`` AND for hitting ``max_turns`` (tool_environment.py). If it's
@@ -493,6 +517,49 @@ class AgenticRolloutEngine(BaseRolloutEngine):
             cap = max(256, min(cap, headroom))
         final_sp = dataclasses.replace(self._sp, max_new_tokens=cap)
         sample = self._inner.generate(sample.fork(1, sampling_params=final_sp))
+        return self._attach_env_reward(sample, env_reward), True
+
+    @staticmethod
+    def _is_single_neither(info: Any) -> bool:
+        """Whether ``ToolEnvironment`` classified this one-trajectory frontier as
+        true NEITHER. Other environments do not emit the key and remain unchanged."""
+        if not isinstance(info, dict):
+            return False
+        flags = info.get("per_sample_neither")
+        return isinstance(flags, (list, tuple)) and len(flags) == 1 and flags[0] is True
+
+    def _continue_neither_as_answer(
+        self, sample: Sample, env_reward: Optional[float]
+    ) -> Tuple[Sample, bool]:
+        """Inject an assistant-side ``<answer>`` prefix and sample one continuation.
+
+        ``continue_generation`` is deliberately distinct from ``generate``: it
+        consumes exact token ids and must not render a new role/chat turn. The inner
+        engine stores only sampled suffix tokens/log-probs in the new generated Part,
+        while exposing prefix + suffix as its decoded primitive for terminal grading.
+        """
+        cap = min(int(self._sp.max_new_tokens), self._neither_answer_max_new_tokens)
+        if self._traj_token_budget is not None:
+            headroom = self._traj_token_budget - self._accumulated_tokens(sample)
+            cap = min(cap, max(1, headroom))
+        repair_sp = dataclasses.replace(self._sp, max_new_tokens=max(1, cap))
+        sample = self._inner.continue_generation(
+            sample,
+            prefix=self._neither_answer_prefix,
+            sampling_params=repair_sp,
+            stop=[self._neither_answer_stop],
+        )
+        last = sample.gen_parts()[-1]
+        metadata = [
+            {
+                **(meta or {}),
+                "answer_injected": True,
+                "format_repair": "neither_answer_prefix",
+            }
+            for meta in (last.metadata or [{} for _ in range(last.batch_size)])
+        ]
+        repaired = _part_with_field(last, "metadata", metadata)
+        sample = sample.with_parts([repaired if part is last else part for part in sample.parts])
         return self._attach_env_reward(sample, env_reward), True
 
     def _pull(self, coordinator: Any, role_name: str) -> Optional[Sample]:

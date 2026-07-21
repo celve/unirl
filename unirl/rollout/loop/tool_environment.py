@@ -194,6 +194,18 @@ class ToolEnvironment:
         # trajectories a turn+ short of AReaL — the dominant rollout-0 turn-count gap. Trajectories
         # that never answer are bounded by the engine's force-answer/token-budget guard + max_turns.
         has_answer = [bool(_ANSWER_RE.search(t or "")) for t in texts]
+        # A decoder-side answer repair may act only on a *true* NEITHER turn. Keep
+        # malformed/partial protocol markup out of that bucket: blindly injecting a
+        # second ``<answer>`` after an already-open answer (or after a malformed tool
+        # call) would corrupt the assistant stream rather than repair it.
+        has_tool_markup = ["<tool_call>" in (t or "") for t in texts]
+        has_answer_markup = ["<answer>" in (t or "") for t in texts]
+        per_sample_neither = [
+            call is None and not answered and not tool_markup and not answer_markup
+            for call, answered, tool_markup, answer_markup in zip(
+                calls, has_answer, has_tool_markup, has_answer_markup
+            )
+        ]
         per_sample_done = has_answer
 
         info = {
@@ -201,6 +213,7 @@ class ToolEnvironment:
             "tool_calls": calls,
             "results": results,
             "per_sample_done": per_sample_done,
+            "per_sample_neither": per_sample_neither,
         }
 
         # Terminal once every frontier sample has answered, or the turn bound is hit.

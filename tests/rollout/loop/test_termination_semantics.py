@@ -46,6 +46,7 @@ def test_explicit_answer_terminates():
     obs, done, info = env.step(_turn("<think>done thinking</think>\n<answer>42</answer>"))
     assert done is True and obs is None
     assert info["per_sample_done"] == [True]
+    assert info["per_sample_neither"] == [False]
 
 
 def test_neither_answer_nor_toolcall_continues():
@@ -58,6 +59,7 @@ def test_neither_answer_nor_toolcall_continues():
     assert done is False  # would have been True before the LIN-564 fix
     assert obs is None  # nothing to observe → engine re-generates
     assert info["per_sample_done"] == [False]
+    assert info["per_sample_neither"] == [True]
 
 
 def test_tool_call_continues_with_result():
@@ -66,6 +68,7 @@ def test_tool_call_continues_with_result():
     obs, done, info = env.step(_turn(TOOLCALL))
     assert done is False and isinstance(obs, Texts) and obs.texts == ["42"]
     assert info["per_sample_done"] == [False]
+    assert info["per_sample_neither"] == [False]
 
 
 def test_truncated_answer_does_not_terminate():
@@ -76,6 +79,16 @@ def test_truncated_answer_does_not_terminate():
     _, done, info = env.step(_turn("<think>ok</think>\n<answer>the answer is probably"))
     assert done is False
     assert info["per_sample_done"] == [False]
+    assert info["per_sample_neither"] == [False]
+
+
+def test_malformed_tool_markup_is_not_classified_as_neither():
+    """A partial protocol action needs its own recovery path; answer-prefix repair
+    must not silently overwrite it as though it were plain deliberation."""
+    env = ToolEnvironment([CalculatorTool()])
+    obs, done, info = env.step(_turn('<tool_call>{"name": "calculator"'))
+    assert done is False and obs is None
+    assert info["per_sample_neither"] == [False]
 
 
 def test_max_turns_still_terminates_without_answer():

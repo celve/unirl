@@ -92,6 +92,11 @@ def _trajectory_token_counts(trajs: List[Sample]) -> torch.Tensor:
     return torch.tensor(counts, dtype=torch.long)
 
 
+def _is_answer_repair(part: Part) -> bool:
+    """Whether a generated Part is the decoder-prefix repair suffix."""
+    return any(bool((meta or {}).get("answer_injected")) for meta in (part.metadata or []))
+
+
 def _validate_agentic_cfg(kw: dict) -> None:
     """Fail fast on cross-config invariants only jointly visible at the trainer.
 
@@ -272,13 +277,21 @@ class AgenticTrainer(ARTrainer):
                 train_parts.append(gp)
 
         depths = [len(tr.gen_parts()) for tr in trajs]
+        repair_counts = [sum(1 for gp in tr.gen_parts() if _is_answer_repair(gp)) for tr in trajs]
+        # A repair is a second physical decode/Part for honest log-prob ownership,
+        # but semantically continues the same assistant turn. Report both depths so
+        # the experiment cannot claim a mechanical +1 as learned tool-use depth.
+        logical_depths = [depth - repairs for depth, repairs in zip(depths, repair_counts)]
         # Per-trajectory turn distribution — the workload's depth VARIANCE (a straggler-cut only
         # pays when this is wide; ~uniform means over-sample-and-drop is pure waste). LIN-531.
         logger.info(
-            "rollout %d trajectory turns: n=%d mean=%.2f min=%d max=%d hist=%s",
+            "rollout %d trajectory turns: n=%d physical_mean=%.2f logical_mean=%.2f "
+            "repairs=%d min=%d max=%d hist=%s",
             rollout_id,
             len(depths),
             (sum(depths) / len(depths)) if depths else 0.0,
+            (sum(logical_depths) / len(logical_depths)) if logical_depths else 0.0,
+            sum(repair_counts),
             min(depths, default=0),
             max(depths, default=0),
             dict(sorted(Counter(depths).items())),
@@ -298,7 +311,16 @@ class AgenticTrainer(ARTrainer):
         log_sample = self._build_log_sample(trajs, rewards, advantages, rollout_id)
         metrics: Dict[str, Any] = {
             "agent/mean_turns": (sum(depths) / len(depths)) if depths else 0.0,
+            "agent/mean_logical_turns": (
+                (sum(logical_depths) / len(logical_depths)) if logical_depths else 0.0
+            ),
             "agent/max_turns": max(depths) if depths else 0,
+            "agent/answer_injected_count": sum(repair_counts),
+            "agent/answer_injected_rate": (
+                sum(1 for count in repair_counts if count > 0) / len(repair_counts)
+                if repair_counts
+                else 0.0
+            ),
             "agent/genless_trajectories": sum(1 for d in depths if d == 0),
             "agent/train_rows": int(train_part.batch_size),
             "agent/mean_gen_tokens": float(token_counts.float().mean().item()) if token_counts.numel() else 0.0,

@@ -63,6 +63,19 @@ class AgenticRolloutEngineConfig(BaseEngineConfig):
     #: leaving headroom for the forced answer turn (AReaL forces at 0.8 of context).
     force_answer_fraction: float = 0.8
 
+    #: Decoder-side repair for a generation that is neither a parseable tool call
+    #: nor a complete ``<answer>...</answer>``. When enabled, the agent does not add
+    #: a synthetic user turn. Instead it appends ``neither_answer_prefix`` to the
+    #: exact assistant token stream and performs one raw continuation, stopping at
+    #: ``neither_answer_stop``. Disabled by default so existing recipes are unchanged.
+    inject_answer_after_neither: bool = False
+    #: Literal assistant-side prefix inserted before the repair continuation.
+    neither_answer_prefix: str = "\n<answer>"
+    #: Stop boundary for the repair continuation; retained in decoded output.
+    neither_answer_stop: str = "</answer>"
+    #: Maximum sampled suffix length for the one-shot repair continuation.
+    neither_answer_max_new_tokens: int = 1024
+
     def make_engine(self, **deps: Any):
         """Construct the runtime :class:`AgenticRolloutEngine` (lazy import)."""
         from unirl.rollout.engine.agentic.engine import AgenticRolloutEngine

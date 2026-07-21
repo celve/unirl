@@ -103,6 +103,13 @@ rollout:
     _target_: unirl.rollout.engine.agentic.config.AgenticRolloutEngineConfig
     max_turns: 100 # tongyi_deepresearch max_llm_calls_per_run
     max_tokens_per_trajectory: 27648 # tongyi_deepresearch per-trajectory token budget; force-answer at 0.8
+    # Opt-in decoder-side format repair experiment. A true NEITHER turn can be
+    # continued from exact assistant token ids after injecting <answer>, without
+    # adding a synthetic user/chat turn. Keep false for baseline recipes.
+    inject_answer_after_neither: false
+    neither_answer_prefix: "\n<answer>"
+    neither_answer_stop: "</answer>"
+    neither_answer_max_new_tokens: 1024
     per_worker_concurrency: 8
     inner:
       _target_: unirl.rollout.engine.sglang.config.SGLangEngineConfig
