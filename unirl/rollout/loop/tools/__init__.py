@@ -10,7 +10,15 @@ One class per module: the interfaces :class:`~unirl.rollout.loop.tools.tool.Tool
 from unirl.rollout.loop.tools.calculator import CalculatorTool
 from unirl.rollout.loop.tools.sandbox import SandboxTool
 from unirl.rollout.loop.tools.search import SearchTool
-from unirl.rollout.loop.tools.tool import StatefulTool, Tool
+from unirl.rollout.loop.tools.tool import StatefulTool, Tool, ToolExecutionResult
 from unirl.rollout.loop.tools.visit import VisitTool
 
-__all__ = ["Tool", "StatefulTool", "CalculatorTool", "SandboxTool", "SearchTool", "VisitTool"]
+__all__ = [
+    "Tool",
+    "StatefulTool",
+    "ToolExecutionResult",
+    "CalculatorTool",
+    "SandboxTool",
+    "SearchTool",
+    "VisitTool",
+]

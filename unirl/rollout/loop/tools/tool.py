@@ -9,7 +9,27 @@ advertise the tool to the model via ``tokenizer.apply_chat_template(tools=...)``
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict
+from dataclasses import dataclass, field
+from typing import Any, Dict, Mapping
+
+
+@dataclass(frozen=True)
+class ToolExecutionResult:
+    """Text returned to the model plus optional, model-invisible diagnostics.
+
+    ``Tool.execute`` remains the compatibility surface for existing tools and
+    callers.  Web tools override :meth:`Tool.execute_with_info` to attach safe,
+    aggregate transport counters; :class:`ToolEnvironment` consumes the richer
+    result when available while continuing to expose the exact same observation
+    text to the policy.
+
+    Diagnostics must never contain request inputs, response bodies, endpoints,
+    or credentials.  ``ToolEnvironment`` applies a second allow-list before
+    publishing them in ``info``.
+    """
+
+    text: str
+    diagnostics: Mapping[str, Any] = field(default_factory=dict)
 
 
 class Tool(ABC):
@@ -32,6 +52,16 @@ class Tool(ABC):
         catches and surfaces the error to the model as the observation, so the policy can recover.
         """
         ...
+
+    def execute_with_info(self, arguments: Dict[str, Any]) -> ToolExecutionResult:
+        """Run the tool and optionally return safe execution diagnostics.
+
+        The default adapter preserves every existing :class:`Tool`
+        implementation: subclasses only implementing ``execute`` automatically
+        get an empty diagnostic mapping.
+        """
+
+        return ToolExecutionResult(text=self.execute(arguments))
 
 
 class StatefulTool(Tool):
@@ -74,6 +104,13 @@ class StatefulTool(Tool):
         """
         ...
 
+    def execute_session_with_info(
+        self, session_id: str, arguments: Dict[str, Any]
+    ) -> ToolExecutionResult:
+        """Session-scoped equivalent of :meth:`Tool.execute_with_info`."""
+
+        return ToolExecutionResult(text=self.execute_session(session_id, arguments))
+
     def session_end(self, session_id: str) -> None:
         """Tear down a session. Default no-op. Idempotent, no-op on unknown ids, never raises."""
 
@@ -83,4 +120,4 @@ class StatefulTool(Tool):
         raise NotImplementedError("StatefulTool is session-scoped; call execute_session(session_id, ...)")
 
 
-__all__ = ["Tool", "StatefulTool"]
+__all__ = ["Tool", "StatefulTool", "ToolExecutionResult"]

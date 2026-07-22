@@ -45,20 +45,12 @@ import logging
 import time
 from typing import Dict, List, Optional, Set, Tuple
 
-import torch
 from hydra.utils import instantiate
 from omegaconf import DictConfig
 
 from unirl.distributed.group.placement import placement, remote
 from unirl.train.stack import TrainStepResult
-from unirl.trainer.agentic import (
-    AgenticTrainer,
-    _intervention_aware_advantage,
-    _is_answer_repair,
-    _is_answer_rescue,
-    _prepare_agentic_train_part,
-    _trajectory_token_counts,
-)
+from unirl.trainer.agentic import AgenticTrainer
 from unirl.trainer.base import BaseTrainer, build_sampling_dict
 from unirl.types.sample import Part, Sample
 from unirl.types.sampling import BaseSamplingParams
@@ -359,9 +351,16 @@ class AsyncAgenticTrainer(AgenticTrainer):
     def _train_on_groups(
         self, groups: List[List[Sample]], *, training_progress: float, rollout_id: int, t0: float
     ) -> Tuple[TrainStepResult, float]:
-        """Reward + GROUP-relative advantage + one step over ``batch_size`` complete
-        groups. Reuses :class:`AgenticTrainer`'s reward/GRPO/log helpers; the train-part
-        assembly mirrors :meth:`AgenticTrainer.train_step` (steps 5-6)."""
+        """Reward + one infrastructure-aware step over complete groups.
+
+        The producer/buffer is async-specific, but once a complete group batch is
+        selected its policy semantics must be identical to the synchronous and
+        colocated-partial trainers. In particular, auth or exhausted-transient tool
+        failures invalidate every sibling in that GRPO group before advantage
+        normalization, training assembly, trajectory dumping, and rollout logging.
+        Delegate that shared tail instead of maintaining a second subtly divergent
+        copy here.
+        """
         trajs: List[Sample] = [t for group in groups for t in group]
         # Reconstruct a request whose root Part carries every trajectory's root id +
         # ground-truth answer (looked up in _gt_by_root, not the trajectory), so the
@@ -372,76 +371,15 @@ class AsyncAgenticTrainer(AgenticTrainer):
             Part.input(roots, metadata=[{"answer": self._gt_by_root.get(r)} for r in roots])
         )
         rewards, group_ids = self._rewards_and_groups(request, trajs, rollout_id)
-        finite = torch.isfinite(rewards)
-        mean_reward = float(rewards[finite].mean().item()) if bool(finite.any()) else 0.0
-        advantages, token_counts = self._compute_agentic_advantages(trajs, rewards, group_ids)
-        generated_token_counts = _trajectory_token_counts(trajs)
-
-        train_parts: List[Part] = []
-        for i, tr in enumerate(trajs):
-            adv_i = float(advantages[i].item())
-            for gp in tr.gen_parts():
-                if gp.segment is None or gp.segment.lengths is None or int(gp.segment.lengths.sum().item()) == 0:
-                    continue
-                part_advantage = _intervention_aware_advantage(
-                    gp,
-                    adv_i,
-                    mask_trigger_task_credit=self._mask_answer_rescue_trigger_task_credit,
-                    trigger_penalty=self._answer_rescue_trigger_penalty,
-                )
-                train_parts.append(_prepare_agentic_train_part(gp, part_advantage))
-
-        depths = [len(tr.gen_parts()) for tr in trajs]
-        repair_counts = [sum(1 for gp in tr.gen_parts() if _is_answer_repair(gp)) for tr in trajs]
-        rescue_counts = [sum(1 for gp in tr.gen_parts() if _is_answer_rescue(gp)) for tr in trajs]
-        logical_depths = [depth - repairs for depth, repairs in zip(depths, repair_counts)]
-        autonomous_depths = [depth - rescue for depth, rescue in zip(logical_depths, rescue_counts)]
-        if not train_parts:
-            logger.warning("AsyncAgenticTrainer rollout %d produced no trainable turns.", rollout_id)
-            return TrainStepResult(0.0, 0.0, 0.0, False, [], {}), mean_reward
-
-        train_part = self._pad_to_dp_multiple(Part.concat(train_parts))
-        result = self.stack.train_track(train_part, training_progress=float(training_progress))
-
-        log_sample = self._build_log_sample(trajs, rewards, advantages, rollout_id)
         versions = [gp.weight_version for tr in trajs for gp in tr.gen_parts() if gp.weight_version is not None]
-        self.wandb_logger.log_rollout_step(
-            rollout_id,
-            result,
-            log_sample,
-            step_time_s=time.perf_counter() - t0,
+        result, mean_reward = self._advantage_train_and_log(
+            trajs,
+            rewards,
+            group_ids,
+            rollout_id=rollout_id,
+            training_progress=training_progress,
+            t0=t0,
             extra_metrics={
-                "agent/mean_turns": (sum(depths) / len(depths)) if depths else 0.0,
-                "agent/mean_logical_turns": (
-                    (sum(logical_depths) / len(logical_depths)) if logical_depths else 0.0
-                ),
-                "agent/mean_autonomous_turns": (
-                    (sum(autonomous_depths) / len(autonomous_depths)) if autonomous_depths else 0.0
-                ),
-                "agent/max_turns": max(depths) if depths else 0,
-                "agent/answer_injected_count": sum(repair_counts),
-                "agent/answer_injected_rate": (
-                    sum(1 for count in repair_counts if count > 0) / len(repair_counts)
-                    if repair_counts
-                    else 0.0
-                ),
-                "agent/answer_rescued_count": sum(rescue_counts),
-                "agent/answer_rescued_rate": (
-                    sum(1 for count in rescue_counts if count > 0) / len(rescue_counts)
-                    if rescue_counts
-                    else 0.0
-                ),
-                "agent/mean_gen_tokens": (
-                    float(generated_token_counts.float().mean().item())
-                    if generated_token_counts.numel()
-                    else 0.0
-                ),
-                "agent/max_gen_tokens": (
-                    int(generated_token_counts.max().item()) if generated_token_counts.numel() else 0
-                ),
-                "agent/mean_task_credit_tokens": (
-                    float(token_counts.float().mean().item()) if token_counts.numel() else 0.0
-                ),
                 "async/buffer_groups": self._buffer.size(),
                 "async/weight_version": self._weight_version,
                 "async/version_span": (max(versions) - min(versions)) if versions else 0,

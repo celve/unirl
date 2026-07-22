@@ -145,6 +145,10 @@ curl --fail --silent --show-error --max-time 180 \
 JUDGE_PREFLIGHT=$RUN_DIR/judge_preflight.json "$PYTHON" -c \
   'import json, os; x=json.load(open(os.environ["JUDGE_PREFLIGHT"])); assert x.get("choices"), x'
 
+if [[ ${LIN564_WEB_PREFLIGHT:-0} == 1 ]]; then
+  "$PYTHON" scripts/smoke_lin564_web_reliability.py > "$RUN_DIR/web_tool_preflight.json"
+fi
+
 if [[ ${LIN564_SKIP_PREWARM:-0} != 1 ]]; then
   CUDA_VISIBLE_DEVICES=0 QWEN3_PATH=$MODEL timeout 1200 \
     "$PYTHON" scripts/sglang_ar_multiturn_smoke.py 2>&1 | tee "$RUN_DIR/prewarm.log"

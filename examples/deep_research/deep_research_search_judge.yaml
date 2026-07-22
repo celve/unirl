@@ -177,12 +177,26 @@ rollout:
           top_k: 10
           timeout: 65
           provider: serper
+          max_retries: 4
+          gateway_max_in_flight: 2
+          retry_base_s: 0.5
+          retry_cap_s: 8.0
+          retry_after_cap_s: 30.0
+          cache_ttl_s: 900.0
+          cache_max_entries: 2048
         - _target_: unirl.rollout.loop.tools.visit.VisitTool
           endpoint: ${oc.env:SUMMARY_URL,""}
           model: ${oc.env:SUMMARY_MODEL,""}
           timeout: 65
           reader_provider: ${oc.env:JINA_PROVIDER,direct}
           reader_url: ${oc.env:JINA_READER_URL,""}
+          max_read_retries: 4
+          gateway_max_in_flight: 2
+          retry_base_s: 0.5
+          retry_cap_s: 8.0
+          retry_after_cap_s: 30.0
+          cache_ttl_s: 3600.0
+          cache_max_entries: 1024
     episode_sampling:
       _target_: unirl.types.sampling.ARSamplingParams
       samples_per_prompt: 8

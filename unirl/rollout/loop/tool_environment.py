@@ -18,10 +18,11 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections.abc import Mapping
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 from uuid import uuid4
 
-from unirl.rollout.loop.tools.tool import StatefulTool, Tool
+from unirl.rollout.loop.tools.tool import StatefulTool, Tool, ToolExecutionResult
 from unirl.types.primitives import Texts
 from unirl.types.sample import Primitive, Sample, _part_with_field
 
@@ -34,6 +35,62 @@ _TOOL_CALL_OPEN_RE = re.compile(r"<tool_call>\s*(\{)", re.DOTALL)
 # ``<answer>…</answer>`` — the explicit final-answer tag. AReaL's react_agent terminates a
 # trajectory ONLY when both tags are present (LIN-564), never on the mere absence of a tool call.
 _ANSWER_RE = re.compile(r"<answer>(.*?)</answer>", re.DOTALL)
+
+_TOOL_DIAGNOSTIC_COUNT_FIELDS = (
+    "request_count",
+    "success_count",
+    "cache_hit_count",
+    "retry_count",
+    "recovered_transient_count",
+    "transient_exhausted_count",
+    "permanent_error_count",
+    "auth_error_count",
+)
+_SAFE_DIAGNOSTIC_PROVIDERS = {"polaris", "serper", "serpapi", "jina", "direct", "unknown"}
+_SAFE_STATUS_KEY_RE = re.compile(
+    r"^(?:(?:http|app|app_status)_[1-5][0-9]{2}|"
+    r"app(?:_status)?_malformed|timeout|connection|auth_config|client_error|"
+    r"http_error|http_unknown|malformed_response|malformed_jina_envelope|"
+    r"empty_jina_content|other)$"
+)
+
+
+def _safe_tool_diagnostics(value: Any, *, tool_name: str) -> dict:
+    """Defense-in-depth allow-list for model-invisible tool diagnostics.
+
+    A tool cannot smuggle a query, URL, response body, endpoint, or credential
+    through ``Environment.info``: only canonical aggregate counters and bounded
+    low-cardinality status labels survive.
+    """
+
+    if not isinstance(value, Mapping) or not value:
+        return {}
+    provider = value.get("provider", "unknown")
+    if not isinstance(provider, str) or provider not in _SAFE_DIAGNOSTIC_PROVIDERS:
+        provider = "unknown"
+    sanitized: Dict[str, Any] = {"tool": tool_name, "provider": provider}
+    for field in _TOOL_DIAGNOSTIC_COUNT_FIELDS:
+        raw = value.get(field, 0)
+        try:
+            count = int(raw)
+        except (TypeError, ValueError):
+            count = 0
+        sanitized[field] = max(0, count)
+    statuses: Dict[str, int] = {}
+    raw_statuses = value.get("status_counts", {})
+    if isinstance(raw_statuses, Mapping):
+        for key, raw_count in raw_statuses.items():
+            key = str(key)
+            if not _SAFE_STATUS_KEY_RE.fullmatch(key):
+                continue
+            try:
+                count = int(raw_count)
+            except (TypeError, ValueError):
+                continue
+            if count > 0:
+                statuses[key] = count
+    sanitized["status_counts"] = statuses
+    return sanitized
 
 
 def _balanced_json(text: str, start: int) -> Optional[str]:
@@ -184,7 +241,18 @@ class ToolEnvironment:
 
         sessions = (sample.parts[0].control or {}).get("tool_sessions", {})
         calls = [parse_tool_call(t) for t in texts]
-        results: List[Optional[str]] = [self._run(c, sessions) if c is not None else None for c in calls]
+        executions = [
+            self._run_with_info(call, sessions) if call is not None else None for call in calls
+        ]
+        results: List[Optional[str]] = [
+            execution.text if execution is not None else None for execution in executions
+        ]
+        tool_diagnostics: List[Optional[dict]] = [
+            dict(execution.diagnostics)
+            if execution is not None and execution.diagnostics
+            else None
+            for execution in executions
+        ]
         # AReaL react_agent parity (LIN-564): a sample terminates ONLY when it emits an explicit
         # ``<answer>…</answer>`` tag — NOT merely because this generation lacked a tool call. A
         # generation that is neither a tool call nor a tagged answer (truncated ``<think>``, a
@@ -212,6 +280,7 @@ class ToolEnvironment:
             "turn": turn,
             "tool_calls": calls,
             "results": results,
+            "tool_diagnostics": tool_diagnostics,
             "per_sample_done": per_sample_done,
             "per_sample_neither": per_sample_neither,
         }
@@ -234,6 +303,13 @@ class ToolEnvironment:
         return observation, False, info
 
     def _run(self, call: Dict[str, Any], sessions: Dict[str, str]) -> str:
+        """Backward-compatible text-only dispatch adapter."""
+
+        return self._run_with_info(call, sessions).text
+
+    def _run_with_info(
+        self, call: Dict[str, Any], sessions: Dict[str, str]
+    ) -> ToolExecutionResult:
         """Dispatch one parsed call to its tool; surface any failure to the model as text.
 
         Stateful tools (LIN-533) go through ``execute_session`` with the ``session_id`` recovered
@@ -242,17 +318,32 @@ class ToolEnvironment:
         name = call["name"]
         tool = self._tools.get(name)
         if tool is None:
-            return f"Error: unknown tool {name!r}. Available tools: {sorted(self._tools)}."
+            return ToolExecutionResult(
+                text=f"Error: unknown tool {name!r}. Available tools: {sorted(self._tools)}."
+            )
         args = call.get("arguments") or {}
         try:
             if isinstance(tool, StatefulTool):
                 sid = sessions.get(name)
                 if sid is None:
-                    return f"Error: no active session for stateful tool {name!r}."
-                return tool.execute_session(sid, args)
-            return tool.execute(args)
-        except Exception as exc:  # noqa: BLE001 — tool errors are fed back to the model, not raised
-            return f"Error: {exc}"
+                    return ToolExecutionResult(
+                        text=f"Error: no active session for stateful tool {name!r}."
+                    )
+                result = tool.execute_session_with_info(sid, args)
+            else:
+                result = tool.execute_with_info(args)
+            if not isinstance(result, ToolExecutionResult):
+                # Tolerate a third-party override returning the historical string.
+                result = ToolExecutionResult(text=str(result))
+            return ToolExecutionResult(
+                text=result.text,
+                diagnostics=_safe_tool_diagnostics(result.diagnostics, tool_name=tool.name),
+            )
+        except Exception:  # noqa: BLE001 — isolate tool failures without leaking exception data
+            logger.warning("tool %s execution failed", name, exc_info=False)
+            return ToolExecutionResult(
+                text=f"Error: tool {name!r} execution failed. Check the arguments or use another tool."
+            )
 
     def close(self, sample: Sample) -> None:
         """Guaranteed teardown (LIN-533): end every open tool session for this trajectory.

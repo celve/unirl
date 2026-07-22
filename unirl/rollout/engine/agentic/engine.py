@@ -407,6 +407,13 @@ class AgenticRolloutEngine(BaseRolloutEngine):
                 # turn this into a cross-thread race.
                 sample = self._inner.generate(sample.fork(1, sampling_params=self._sp))  # +[gen(1)]
                 observation, done, info = self._env.step(sample)  # blocking tool boundary, own thread
+                # ToolEnvironment exposes one credential-safe aggregate diagnostic
+                # mapping per frontier row. Persist the current row on the generated
+                # Part before any terminal/rescue branch returns so the trainer can
+                # invalidate an infrastructure-affected GRPO group without parsing
+                # model-visible error prose. Environments that omit diagnostics are
+                # byte-identical to the historical path.
+                sample = self._attach_tool_diagnostics(sample, info)
                 # Env-sourced reward (LIN-519): interactive envs (ALFWorld, …) return a
                 # per-trajectory return in ``info["reward"]`` (last value = the episode
                 # return); tool-only envs (calculator/search) omit it — a no-op here.
@@ -480,6 +487,51 @@ class AgenticRolloutEngine(BaseRolloutEngine):
             last, "rewards", torch.full((int(last.batch_size),), float(reward), dtype=torch.float32)
         )
         return sample.with_parts([rewarded if p is last else p for p in sample.parts])
+
+    @staticmethod
+    def _attach_tool_diagnostics(sample: Sample, info: Any) -> Sample:
+        """Attach row-aligned safe tool aggregates to the generated frontier.
+
+        ``ToolEnvironment.step`` owns the diagnostic schema and guarantees that
+        the mappings contain aggregate counters rather than credentials or raw
+        exception text. This adapter deliberately copies, rather than aliases,
+        each mapping because tool implementations may reuse a mutable accumulator
+        on their next call. A malformed/misaligned optional diagnostic must never
+        turn an otherwise valid policy trajectory into an engine crash.
+        """
+        if not isinstance(info, dict) or "tool_diagnostics" not in info:
+            return sample
+        diagnostics = info.get("tool_diagnostics")
+        if isinstance(diagnostics, dict) and sample.parts[-1].batch_size == 1:
+            diagnostics = [diagnostics]
+        if not isinstance(diagnostics, (list, tuple)):
+            return sample
+        frontier = sample.parts[-1]
+        if not frontier.is_gen or len(diagnostics) != int(frontier.batch_size):
+            logger.warning(
+                "AgenticRolloutEngine: ignoring misaligned tool diagnostics (%s rows for batch %s)",
+                len(diagnostics),
+                frontier.batch_size,
+            )
+            return sample
+        if all(diagnostic is None for diagnostic in diagnostics):
+            # A no-tool/answer row carries ``None`` in ToolEnvironment's aligned
+            # list. Keep the exact historical metadata representation in this
+            # overwhelmingly common terminal case.
+            return sample
+        source = frontier.metadata
+        if not source or len(source) != int(frontier.batch_size):
+            source = [{} for _ in range(int(frontier.batch_size))]
+        metadata: List[Dict[str, Any]] = []
+        for old, diagnostic in zip(source, diagnostics):
+            if diagnostic is None:
+                metadata.append(dict(old or {}))
+                continue
+            if not isinstance(diagnostic, dict):
+                return sample
+            metadata.append({**(old or {}), "tool_diagnostics": dict(diagnostic)})
+        marked = _part_with_field(frontier, "metadata", metadata)
+        return sample.with_parts([marked if part is frontier else part for part in sample.parts])
 
     # ------------------------------------------------------------------
     # Force-answer token-budget guard (LIN-564, AReaL tongyi_deepresearch parity)

@@ -27,7 +27,7 @@ import os
 import re
 import time
 from collections import Counter
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 import torch
 from omegaconf import OmegaConf
@@ -67,6 +67,217 @@ def _extract_answer(text: Optional[str]) -> str:
 
 def _part_has_metadata(part: Part, key: str) -> bool:
     return any(bool((meta or {}).get(key)) for meta in (part.metadata or []))
+
+
+_TOOL_DIAGNOSTIC_ALIASES: Dict[str, Tuple[str, ...]] = {
+    "request_count": ("request_count", "requests"),
+    "success_count": ("success_count", "successes"),
+    "cache_hit_count": ("cache_hit_count", "cache_hits"),
+    "retry_count": ("retry_count", "retries"),
+    "recovered_transient_count": (
+        "recovered_transient_count",
+        "recovered_transient",
+        "recovered",
+    ),
+    "transient_exhausted_count": (
+        "transient_exhausted_count",
+        "transient_exhausted",
+    ),
+    "permanent_error_count": ("permanent_error_count", "permanent_error"),
+    "auth_error_count": ("auth_error_count", "auth_error"),
+}
+
+
+def _diagnostic_count(diagnostic: Mapping[str, Any], canonical: str) -> int:
+    """Read one non-negative diagnostic counter, accepting legacy aliases.
+
+    The first present spelling wins so a producer temporarily emitting both its
+    canonical field and an alias cannot double-count one request.
+    """
+    for key in _TOOL_DIAGNOSTIC_ALIASES[canonical]:
+        if key not in diagnostic:
+            continue
+        try:
+            return max(0, int(diagnostic[key]))
+        except (TypeError, ValueError):
+            return 0
+    return 0
+
+
+def _trajectory_tool_diagnostics(traj: Sample) -> Dict[str, int]:
+    """Sum safe per-turn tool counters across one trajectory."""
+    totals = {key: 0 for key in _TOOL_DIAGNOSTIC_ALIASES}
+    for diagnostic in _trajectory_tool_diagnostic_records(traj):
+        for canonical in totals:
+            totals[canonical] += _diagnostic_count(diagnostic, canonical)
+    return totals
+
+
+def _trajectory_tool_diagnostic_records(traj: Sample) -> List[Mapping[str, Any]]:
+    """Return the sanitized per-call aggregate records carried by a trajectory."""
+    records: List[Mapping[str, Any]] = []
+    for part in traj.gen_parts():
+        for metadata in part.metadata or []:
+            value = (metadata or {}).get("tool_diagnostics")
+            diagnostics = value if isinstance(value, list) else [value]
+            for diagnostic in diagnostics:
+                if not isinstance(diagnostic, Mapping):
+                    continue
+                records.append(diagnostic)
+    return records
+
+
+def _infrastructure_group_exclusion(
+    trajs: List[Sample],
+    group_ids: List[str],
+) -> Tuple[torch.Tensor, List[Optional[str]], List[Dict[str, int]], Dict[str, Tuple[str, ...]]]:
+    """Return the trajectory mask/reasons for group-scoped infrastructure loss.
+
+    One exhausted transient or authentication failure makes the reward comparison
+    inside that root's GRPO group causally invalid, so every sibling is excluded.
+    Permanent content/URL failures remain policy outcomes and do not invalidate a
+    group. The returned per-trajectory diagnostics still include all counters for
+    operational metrics.
+    """
+    if len(trajs) != len(group_ids):
+        raise ValueError(
+            "group_ids must align one-to-one with trajectories; "
+            f"got {len(group_ids)} ids for {len(trajs)} trajectories"
+        )
+    per_trajectory = [_trajectory_tool_diagnostics(traj) for traj in trajs]
+    failures: Dict[str, set[str]] = {}
+    for group_id, diagnostic in zip(group_ids, per_trajectory):
+        reasons = failures.setdefault(str(group_id), set())
+        if diagnostic["transient_exhausted_count"] > 0:
+            reasons.add("transient_exhausted")
+        if diagnostic["auth_error_count"] > 0:
+            reasons.add("auth_error")
+    failures = {group: reasons for group, reasons in failures.items() if reasons}
+    mask = torch.tensor([str(group_id) in failures for group_id in group_ids], dtype=torch.bool)
+    reasons: List[Optional[str]] = []
+    for group_id in group_ids:
+        group_reasons = tuple(sorted(failures.get(str(group_id), ())))
+        reasons.append(
+            "infrastructure_group:" + "+".join(group_reasons)
+            if group_reasons
+            else None
+        )
+    frozen_failures = {group: tuple(sorted(reason)) for group, reason in failures.items()}
+    return mask, reasons, per_trajectory, frozen_failures
+
+
+def _tool_diagnostic_metrics(
+    trajs: List[Sample], per_trajectory: List[Dict[str, int]]
+) -> Dict[str, Any]:
+    """Aggregate tool reliability counters with explicit denominators.
+
+    ``request_count`` is physical upstream attempts and can exceed logical tool
+    calls after retries. Cache/single-flight hits make no upstream attempt, so
+    their rates use the logical outcome count instead. Bounded tool/provider and
+    status breakouts make a Jina 429 distinguishable from a Serper failure.
+    """
+    totals = {
+        key: sum(int(row.get(key, 0)) for row in per_trajectory)
+        for key in _TOOL_DIAGNOSTIC_ALIASES
+    }
+    requests = totals["request_count"]
+    trajectories = len(per_trajectory)
+    logical_calls = sum(
+        totals[key]
+        for key in (
+            "success_count",
+            "transient_exhausted_count",
+            "permanent_error_count",
+            "auth_error_count",
+        )
+    )
+    request_denominator = max(1, requests)
+    logical_denominator = max(1, logical_calls)
+    transient_events = totals["recovered_transient_count"] + totals["transient_exhausted_count"]
+    metrics: Dict[str, Any] = {
+        "agent/tool_request_count": requests,
+        "agent/tool_logical_call_count": logical_calls,
+        # Mean upstream requests per trajectory. The companion trajectory rate
+        # distinguishes broad low-volume use from a concentrated retry storm.
+        "agent/tool_request_rate": requests / trajectories if trajectories else 0.0,
+        "agent/tool_request_trajectory_rate": (
+            sum(row.get("request_count", 0) > 0 for row in per_trajectory)
+            / trajectories
+            if trajectories
+            else 0.0
+        ),
+    }
+    metric_names = {
+        "success_count": "success",
+        "retry_count": "retry",
+        "cache_hit_count": "cache_hit",
+        "recovered_transient_count": "recovered_transient",
+        "transient_exhausted_count": "transient_exhausted",
+        "permanent_error_count": "permanent_error",
+        "auth_error_count": "auth_error",
+    }
+    for canonical, label in metric_names.items():
+        metrics[f"agent/tool_{label}_count"] = totals[canonical]
+        denominator = request_denominator if canonical == "retry_count" else logical_denominator
+        metrics[f"agent/tool_{label}_rate"] = totals[canonical] / denominator
+    metrics["agent/tool_transient_recovery_rate"] = (
+        totals["recovered_transient_count"] / transient_events if transient_events else 0.0
+    )
+
+    grouped: Dict[Tuple[str, str], Counter] = {}
+    statuses: Counter = Counter()
+    for traj in trajs:
+        for diagnostic in _trajectory_tool_diagnostic_records(traj):
+            tool = str(diagnostic.get("tool", "unknown"))
+            provider = str(diagnostic.get("provider", "unknown"))
+            group_keys: List[Tuple[str, str]] = []
+            for dimension, name in (("tool", tool), ("provider", provider)):
+                safe_name = re.sub(r"[^A-Za-z0-9_]+", "_", name).strip("_") or "unknown"
+                group_keys.append((dimension, safe_name))
+                bucket = grouped.setdefault((dimension, safe_name), Counter())
+                for canonical in _TOOL_DIAGNOSTIC_ALIASES:
+                    bucket[canonical] += _diagnostic_count(diagnostic, canonical)
+            raw_statuses = diagnostic.get("status_counts", {})
+            if isinstance(raw_statuses, Mapping):
+                for status, count in raw_statuses.items():
+                    status = str(status)
+                    if not re.fullmatch(
+                        r"(?:(?:http|app|app_status)_[1-5][0-9]{2}|"
+                        r"app(?:_status)?_malformed|timeout|connection|auth_config|"
+                        r"client_error|http_error|http_unknown|malformed_response|"
+                        r"malformed_jina_envelope|empty_jina_content|other)",
+                        status,
+                    ):
+                        continue
+                    try:
+                        safe_count = max(0, int(count))
+                    except (TypeError, ValueError):
+                        continue
+                    statuses[status] += safe_count
+                    for group_key in group_keys:
+                        grouped[group_key][f"status::{status}"] += safe_count
+
+    for (dimension, name), bucket in sorted(grouped.items()):
+        prefix = f"agent/tool_{dimension}_{name}"
+        for canonical in _TOOL_DIAGNOSTIC_ALIASES:
+            label = metric_names.get(canonical, canonical.removesuffix("_count"))
+            metrics[f"{prefix}_{label}_count"] = int(bucket[canonical])
+        for key, count in sorted(bucket.items()):
+            if key.startswith("status::"):
+                metrics[f"{prefix}_status_{key.removeprefix('status::')}_count"] = int(count)
+    for status, count in sorted(statuses.items()):
+        metrics[f"agent/tool_status_{status}_count"] = int(count)
+    metrics["agent/tool_rate_limited_count"] = int(
+        sum(count for status, count in statuses.items() if status.endswith("_429"))
+    )
+    metrics["agent/tool_server_error_status_count"] = int(
+        sum(
+            count
+            for status, count in statuses.items()
+            if re.search(r"_5[0-9]{2}$", status)
+        )
+    )
+    return metrics
 
 
 def _trajectory_token_counts(
@@ -251,7 +462,7 @@ class AgenticTrainer(ARTrainer):
         del sampling  # the engine's ``episode_sampling`` owns per-turn params + ``n``
         root_ids = [f"r{rollout_id}:{sid}" for sid in inputs.sample_ids]
         ar_control: Dict[str, Any] = {"stop": list(self._stop)}
-        if self._no_stop_trim:
+        if getattr(self, "_no_stop_trim", False):
             ar_control["no_stop_trim"] = True
         text = Part.input(
             root_ids,
@@ -310,25 +521,67 @@ class AgenticTrainer(ARTrainer):
         (answer vs env) is already resolved into ``rewards``/``group_ids`` by the caller.
         ``extra_metrics`` are merged into the logged ``agent/*`` metrics (e.g. the partial
         trainer's committed/carried/dropped counts)."""
-        # A NaN reward marks a crashed trajectory (env bug, not a policy outcome) —
-        # excluded from the reported mean and from GRPO (see _group_advantages).
-        finite = torch.isfinite(rewards)
-        mean_reward = float(rewards[finite].mean().item()) if bool(finite.any()) else 0.0
+        # Keep judge/env rewards immutable for audit, then derive the only tensor
+        # allowed to influence policy training. A transient-exhaustion/auth event
+        # makes every sibling in that root group incomparable, so all effective
+        # rewards in that group become non-finite. Existing NaN crash semantics are
+        # preserved independently in ``raw_rewards``.
+        raw_rewards = rewards.to(torch.float32).reshape(-1)
+        if raw_rewards.numel() != len(trajs):
+            raise ValueError(
+                "rewards must align one-to-one with trajectories; "
+                f"got {raw_rewards.numel()} rewards for {len(trajs)} trajectories"
+            )
+        (
+            infra_invalid,
+            exclusion_reasons,
+            per_trajectory_diagnostics,
+            invalid_groups,
+        ) = _infrastructure_group_exclusion(trajs, group_ids)
+        effective_rewards = raw_rewards.clone()
+        effective_rewards[infra_invalid.to(device=effective_rewards.device)] = float("nan")
+        raw_finite = torch.isfinite(raw_rewards)
+        finite = torch.isfinite(effective_rewards)
+        raw_mean_reward = (
+            float(raw_rewards[raw_finite].mean().item())
+            if bool(raw_finite.any())
+            else 0.0
+        )
+        mean_reward = (
+            float(effective_rewards[finite].mean().item())
+            if bool(finite.any())
+            else 0.0
+        )
 
         # GROUP-relative GRPO by default; ``token-global`` reconstructs AReaL's
         # batch-level masked normalization by weighting each terminal reward by
         # the number of generated tokens onto which AReaL broadcasts it.
-        advantages, token_counts = self._compute_agentic_advantages(trajs, rewards, group_ids)
+        advantages, token_counts = self._compute_agentic_advantages(
+            trajs, effective_rewards, group_ids
+        )
         generated_token_counts = _trajectory_token_counts(trajs)
 
         # Debug: dump every trajectory of this rollout (decoded turns + reward/advantage)
         # when $TRAJ_DUMP_DIR is set — a no-op otherwise, and never raises. Placed BEFORE
         # the loop below frees each gen Part's decoded ``primitive`` for training.
-        maybe_dump_trajectories(trajs, rewards, advantages, group_ids, rollout_id=rollout_id)
+        maybe_dump_trajectories(
+            trajs,
+            effective_rewards,
+            advantages,
+            group_ids,
+            rollout_id=rollout_id,
+            raw_rewards=raw_rewards,
+            excluded_from_training=infra_invalid,
+            exclusion_reasons=exclusion_reasons,
+        )
 
         # Assign each trajectory's scalar advantage to ALL its assistant turns; gather.
         train_parts: List[Part] = []
         for i, tr in enumerate(trajs):
+            if bool(infra_invalid[i]):
+                # Do not keep zero-advantage replicas: even replaying them would
+                # spend optimizer/normalizer token mass on an invalid comparison.
+                continue
             adv_i = float(advantages[i].item())
             for gp in tr.gen_parts():
                 # Empty SGLang generations have no connected replay backward.
@@ -370,20 +623,68 @@ class AgenticTrainer(ARTrainer):
             max(depths, default=0),
             dict(sorted(Counter(depths).items())),
         )
-        if not train_parts:  # pathological: every sampled trajectory failed to generate
+        train_rows_before_padding = len(train_parts)
+        infra_invalid_count = int(infra_invalid.sum().item())
+        if not train_parts and infra_invalid_count == 0:
+            # Preserve the historical gen-less/zero-token behavior when this is
+            # not an infrastructure-invalid rollout. The U7 exception below
+            # intentionally continues through logging so operators can diagnose
+            # an all-invalid batch without dispatching an optimizer step.
             logger.warning("AgenticTrainer rollout %d produced no trainable turns.", rollout_id)
             return TrainStepResult(0.0, 0.0, 0.0, False, [], {}), mean_reward
-
-        # ONE training Part -> pad to a DP multiple (zero-advantage rows) -> ONE step.
-        train_part = Part.concat(train_parts)
-        train_part = self._pad_to_dp_multiple(train_part)
-        result = self.stack.train_track(train_part, training_progress=float(training_progress))
+        if train_parts:
+            # ONE training Part -> pad to a DP multiple (zero-advantage rows) -> ONE step.
+            train_part = Part.concat(train_parts)
+            train_part = self._pad_to_dp_multiple(train_part)
+            train_rows = int(train_part.batch_size)
+            result = self.stack.train_track(
+                train_part, training_progress=float(training_progress)
+            )
+        else:
+            # An all-invalid rollout is an expected reliability outcome, not an
+            # optimizer error. Still emit rollout/tool diagnostics below, but do
+            # not dispatch an empty Part or advance the optimizer step.
+            logger.warning(
+                "AgenticTrainer rollout %d produced no trainable turns (%d infra-invalid trajectories).",
+                rollout_id,
+                infra_invalid_count,
+            )
+            train_rows = 0
+            result = TrainStepResult(0.0, 0.0, 0.0, False, [], {})
 
         # Logging sample: one row per trajectory whose gen frontier carries the reward +
         # advantage (compute_rollout_sample_metrics reads gen_parts). Built from the
         # computed tensors so it is independent of the reward SOURCE (answer vs env).
-        log_sample = self._build_log_sample(trajs, rewards, advantages, rollout_id)
+        log_sample = self._build_log_sample(
+            trajs, effective_rewards, advantages, rollout_id
+        )
+        group_count = len({str(group_id) for group_id in group_ids})
+        invalid_trajectory_count = infra_invalid_count
+        invalid_group_count = len(invalid_groups)
+        finite_cpu = finite.detach().to("cpu")
+        valid_token_counts = token_counts[finite_cpu]
+        valid_effective_rewards = effective_rewards[finite]
         metrics: Dict[str, Any] = {
+            # Override the generic rollout reward panel, whose plain tensor
+            # reduction would otherwise turn NaN as soon as one invalid group is
+            # present. These are the same valid effective rows used by policy
+            # normalization and the progress-line mean.
+            "reward_mean": mean_reward,
+            "reward_std": (
+                float(valid_effective_rewards.std(unbiased=False).item())
+                if valid_effective_rewards.numel()
+                else 0.0
+            ),
+            "reward_min": (
+                float(valid_effective_rewards.min().item())
+                if valid_effective_rewards.numel()
+                else 0.0
+            ),
+            "reward_max": (
+                float(valid_effective_rewards.max().item())
+                if valid_effective_rewards.numel()
+                else 0.0
+            ),
             "agent/mean_turns": (sum(depths) / len(depths)) if depths else 0.0,
             "agent/mean_logical_turns": (
                 (sum(logical_depths) / len(logical_depths)) if logical_depths else 0.0
@@ -405,21 +706,47 @@ class AgenticTrainer(ARTrainer):
                 else 0.0
             ),
             "agent/genless_trajectories": sum(1 for d in depths if d == 0),
-            "agent/train_rows": int(train_part.batch_size),
+            "agent/train_rows": train_rows,
+            "agent/train_rows_before_padding": train_rows_before_padding,
+            "agent/infra_invalid_groups": invalid_group_count,
+            "agent/infra_invalid_group_rate": (
+                invalid_group_count / group_count if group_count else 0.0
+            ),
+            "agent/infra_invalid_trajectories": invalid_trajectory_count,
+            "agent/infra_invalid_trajectory_rate": (
+                invalid_trajectory_count / len(trajs) if trajs else 0.0
+            ),
+            "agent/raw_all_trajectory_mean_reward": raw_mean_reward,
+            "agent/raw_finite_mean_reward": raw_mean_reward,
+            "agent/raw_finite_trajectory_count": int(raw_finite.sum().item()),
+            "agent/effective_valid_trajectory_count": int(finite.sum().item()),
+            "agent/effective_valid_trajectory_rate": (
+                int(finite.sum().item()) / len(trajs) if trajs else 0.0
+            ),
+            "agent/valid_effective_mean_reward": mean_reward,
+            # Short aliases keep dashboards readable while the explicit names
+            # above define the denominator unambiguously.
+            "agent/raw_mean_reward": raw_mean_reward,
+            "agent/effective_mean_reward": mean_reward,
             "agent/mean_gen_tokens": (
                 float(generated_token_counts.float().mean().item()) if generated_token_counts.numel() else 0.0
             ),
             "agent/max_gen_tokens": (
-                int(generated_token_counts.max().item()) if generated_token_counts.numel() else 0
+                int(generated_token_counts.max().item())
+                if generated_token_counts.numel()
+                else 0
             ),
             "agent/mean_task_credit_tokens": (
-                float(token_counts.float().mean().item()) if token_counts.numel() else 0.0
+                float(valid_token_counts.float().mean().item()) if valid_token_counts.numel() else 0.0
             ),
         }
-        token_valid = finite & (token_counts.to(device=rewards.device) > 0)
+        metrics.update(_tool_diagnostic_metrics(trajs, per_trajectory_diagnostics))
+        token_valid = finite & (token_counts.to(device=effective_rewards.device) > 0)
         if bool(token_valid.any()):
-            token_weights = token_counts.to(device=rewards.device, dtype=torch.float64)[token_valid]
-            token_rewards = rewards.to(torch.float64)[token_valid]
+            token_weights = token_counts.to(
+                device=effective_rewards.device, dtype=torch.float64
+            )[token_valid]
+            token_rewards = effective_rewards.to(torch.float64)[token_valid]
             metrics["agent/token_weighted_reward"] = float(
                 (token_rewards * token_weights).sum().div(token_weights.sum()).item()
             )
