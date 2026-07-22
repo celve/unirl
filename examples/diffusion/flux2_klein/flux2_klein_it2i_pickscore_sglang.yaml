@@ -1,0 +1,244 @@
+# @package _global_
+# FLUX.2-klein ti2i GRPO — SGLang rollout engine, local PickScore reward.
+#
+# This is the e2e smoke sibling of flux2_klein_editreward_sglang.yaml. Same
+# rollout path (text + source image -> image through SGLangDiffusionRolloutEngine,
+# model_family=flux2_klein), but scored with the in-process PickScore backend
+# instead of a remote EditReward service, so the whole run fits on one pod with
+# no Ray reward service to stand up.
+#
+# WHAT THIS VALIDATES / WHAT IT DOES NOT
+#   validates: the ti2i rollout path end-to-end under a real RL loop —
+#     condition-image ingestion, the image_latent/image_latent_ids capture, and
+#     (because algorithm.old_logp_source=replay) that those captured conditions
+#     actually feed Flux2KleinDiffusionStage.replay to produce the pi_old anchor.
+#     A broken conditions round-trip shows up here as a broken GRPO ratio.
+#   does NOT validate: edit QUALITY. PickScore scores text<->image alignment and
+#     never sees the source image, so the policy can raise reward by drifting
+#     away from the source toward a generic match for the instruction text.
+#     Use flux2_klein_editreward_sglang.yaml for an objective that actually
+#     scores the edit.
+#
+# Data: built by scripts/gpu-verify/build_dataset.py from the LIN-560 extraction
+# onto POD-LOCAL disk, every source center-cropped to a single 512x512 so each
+# batch is shape-homogeneous (MultimodalRLDataSource._validate_uniform_image_shapes
+# rejects mixed shapes, since Images.from_list would otherwise zero-pad them).
+#
+# Launch:
+#   export IT2I_DATA=/root/it2i_data
+#   bash examples/run_experiment_single_node.sh diffusion/flux2_klein/flux2_klein_it2i_pickscore_sglang
+
+num_devices: 8
+batch_size: 8                 # prompts/rollout (1 per actor) x 8 samples = 64 images/rollout
+num_rollouts: 60              # >= 50 so the reward trend is readable
+eval_interval: 0              # off: keeps the loop tight for a smoke run
+
+# Pin the edit task so a dataset that lost its (image, condition) media refs
+# fails on rollout 1 in the adapter instead of silently training t2i.
+stage_config:
+  task: it2i
+
+logging:
+  report_to_wandb: true
+  project_name: ${oc.env:WANDB_PROJECT,unirl-lin584-it2i}
+  run_name: ${oc.env:WANDB_RUN_NAME,klein_it2i_pickscore_sglang}
+  entity: ${oc.env:WANDB_ENTITY,linyuwus}
+  tags: [flux2_klein, it2i, sglang, pickscore, lin584]
+  log_media: true             # source|edited preview
+  media_max_items: 4
+  media_log_interval: 10
+
+model_config:
+  _target_: unirl.models.flux2_klein.config.Flux2KleinPipelineConfig
+  pretrained_model_ckpt_path: ${oc.env:FLUX2_KLEIN_PATH,/root/unirl/models/local/FLUX.2-klein-4B}
+  model_precision: bf16
+  max_sequence_length: 512
+  shift: 1.0
+  use_lora: true
+  lora_target_modules:
+    - to_q
+    - to_k
+    - to_v
+    - to_out.0
+    - add_q_proj
+    - add_k_proj
+    - add_v_proj
+    - to_add_out
+    - ff.linear_in
+    - ff.linear_out
+    - ff_context.linear_in
+    - ff_context.linear_out
+    - to_qkv_mlp_proj
+
+strategy:
+  _target_: unirl.sde.kernels.DanceSDEStrategy
+
+bundle:
+  _target_: unirl.models.flux2_klein.bundle.Flux2KleinBundle.from_config
+  config: ${model_config}
+
+pipeline:
+  _target_: unirl.models.flux2_klein.pipeline.Flux2KleinPipeline
+  shift: 1.0
+  autocast_precision: bf16
+  trajectory_precision: fp16
+  logprob_precision: fp32
+  max_sequence_length: 512
+  qwen3_extraction_layers: [9, 18, 27]
+  strategy: ${strategy}
+
+backend:
+  _target_: unirl.train.backend.fsdp.FSDPBackend
+  block_class_names: ["Flux2TransformerBlock", "Flux2SingleTransformerBlock"]
+  trainable_attr: transformer
+  fsdp_cfg:
+    _target_: unirl.train.configs.FSDPConfig
+    param_dtype: bf16
+    cpu_offload: false
+    mixed_precision: true
+    fsdp_mode: full
+    reshard_after_forward: true
+    activation_checkpointing: true   # ti2i replay concatenates condition tokens onto
+                                     # the noise sequence, so activations are larger
+    use_torch_compile: false
+  optimizer_cfg:
+    _target_: unirl.train.backend.base.OptimizerConfig
+    learning_rate: 5.0e-5
+    adam_beta1: 0.9
+    adam_beta2: 0.999
+    adam_epsilon: 1.0e-8
+    weight_decay: 0.0
+  scheduler_cfg:
+    _target_: unirl.train.backend.base.LrSchedulerConfig
+    type: constant
+    warmup_steps: 0
+    total_steps: 60
+  lora_cfg:
+    _target_: unirl.train.configs.LoraConfig
+    rank: 16
+    alpha: 32
+    dropout: 0.0
+    bias: none
+    task_type: FEATURE_EXTRACTION
+    target_modules:
+      - to_q
+      - to_k
+      - to_v
+      - to_out.0
+      - add_q_proj
+      - add_k_proj
+      - add_v_proj
+      - to_add_out
+      - ff.linear_in
+      - ff.linear_out
+      - ff_context.linear_in
+      - ff_context.linear_out
+      - to_qkv_mlp_proj
+
+rollout:
+  _target_: unirl.rollout.engine.sglang_diffusion.engine.SGLangDiffusionRolloutEngine
+  config:
+    _target_: unirl.rollout.engine.sglang_diffusion.config.SGLangDiffusionEngineConfig
+    # Same family as the t2i recipe — Klein serves both modalities off one
+    # checkpoint; the adapter branches on req.primitives['image'].
+    model_family: flux2_klein
+    # LOAD-BEARING for ti2i: replay consumes the SERVER's packed condition tokens
+    # and their RoPE ids, shipped back as image_latent / image_latent_ids.
+    populate_conditions: true
+    init_same_noise: ${sampling.init_same_noise}
+    forward_batch_size: 8
+    num_gpus: 1
+    tp_size: 1
+    local_mode: true
+    target_modules:
+      - to_q
+      - to_k
+      - to_v
+      - to_out.0
+      - add_q_proj
+      - add_k_proj
+      - add_v_proj
+      - to_add_out
+      - ff.linear_in
+      - ff.linear_out
+      - ff_context.linear_in
+      - ff_context.linear_out
+      - to_qkv_mlp_proj
+    engine_kwargs:
+      model_type: flux2_klein
+  model_config: ${model_config}
+  strategy: ${strategy}
+
+# In-process PickScore. Weights are pod-local (copied off ceph once) — a ceph
+# path would be read every load and is what the workspace caveats warn against.
+reward:
+  _target_: unirl.reward.service.RewardService
+  backend:
+    _target_: unirl.reward.local.pickscore.PickScoreRewardScorer
+    base_device: cuda
+    config:
+      _target_: unirl.reward.local.pickscore.PickScoreSpec
+      batch_size: 8
+      device: auto
+      processor_id: ${oc.env:CLIP_H_PATH,/root/unirl/models/local/CLIP-ViT-H-14-laion2B-s32B-b79K}
+      model_id: ${oc.env:PICKSCORE_PATH,/root/unirl/models/local/PickScore_v1}
+
+algorithm:
+  _target_: unirl.algorithms.flowgrpo.FlowGRPO
+  stage_attr: diffusion
+  clip_range: 5.0e-3
+  clip_schedule: constant
+  # replay: the trainer recomputes the pi_old anchor via
+  # Flux2KleinDiffusionStage.replay, conditioned on the engine-captured
+  # image_latent / image_latent_ids. This is what makes the run a real test of
+  # the ti2i conditions round-trip rather than just of the rollout.
+  old_logp_source: replay
+  conditions_cls:
+    _target_: hydra.utils.get_class
+    path: unirl.models.flux2_klein.conditions.Flux2KleinConditions
+  params: ${sampling}
+
+stack:
+  _target_: unirl.train.stack.TrainStack
+  micro_batch_size: 1
+  max_grad_norm: 1.0
+  num_updates_per_batch: 2
+
+data_source:
+  _target_: unirl.data.data_source.MultimodalRLDataSource
+  args:
+    run:
+      data_path: ${oc.env:IT2I_DATA,/root/it2i_data}/train.jsonl
+      eval_data_path: ${oc.env:IT2I_DATA,/root/it2i_data}/test.jsonl
+      seed: 42
+    algorithm:
+      prompts_per_rollout: ${batch_size}
+
+sampling:
+  _target_: unirl.types.sampling.DiffusionSamplingParams
+  num_inference_steps: 8
+  guidance_scale: 1.0
+  height: 512
+  width: 512
+  eta: 0.7
+  samples_per_prompt: 8
+  seed: 42
+  # SGLang draws its own x_T here; the engine's init_same_noise=true path
+  # mis-sizes FLUX.2 latent channels (see flux2_klein_sglang.yaml). GRPO does
+  # not require shared init noise — it is only variance reduction.
+  init_same_noise: false
+  autocast_precision: bf16
+  scheduler:
+    _target_: unirl.utils.scheduler_utils.AllSDEScheduler
+    num_timesteps: ${..num_inference_steps}
+    num_sde_steps: 3
+    timestep_fraction: [0, 0.5]
+
+weight_sync_interval: 1
+
+sync:
+  _target_: unirl.distributed.weight_sync.lora.LocalLoraWeightSync
+  # Must be false on SGLang — only vLLM-Omni implements the checksum read-back.
+  verify: false
+  param_prefix: "transformer."
+  adapter_name: default
