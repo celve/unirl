@@ -34,8 +34,8 @@
 #   bash examples/run_experiment_single_node.sh diffusion/flux2_klein/flux2_klein_it2i_pickscore_sglang
 
 num_devices: 8
-batch_size: 8                 # prompts/rollout (1 per actor) x 8 samples = 64 images/rollout
-num_rollouts: 60              # >= 50 so the reward trend is readable
+batch_size: 48                # ALIGNED to flux2_klein_editreward.yaml (48 x 16 = 768 images/rollout)
+num_rollouts: 55              # >= 50 so the reward trend is readable
 eval_interval: 0              # off: keeps the loop tight for a smoke run
 
 # Pin the edit task so a dataset that lost its (image, condition) media refs
@@ -98,7 +98,14 @@ backend:
   trainable_attr: transformer
   fsdp_cfg:
     _target_: unirl.train.configs.FSDPConfig
+    # The proven recipe trains in fp32. bf16 params are forced by the SGLang
+    # LoRA wire dtype, so master_dtype restores fp32 optimizer state -- the
+    # "fp32 master + bf16 compute" flow_grpo relies on for stable LOW-GRADIENT
+    # RL. Load-bearing: grad norms are ~1e-3, and an all-bf16 master (ulp ~4e-5
+    # at |w|~0.01) rounds updates that small away, which is what pinned the
+    # earlier attempts.
     param_dtype: bf16
+    master_dtype: fp32
     cpu_offload: false
     mixed_precision: true
     fsdp_mode: full
@@ -108,13 +115,12 @@ backend:
     use_torch_compile: false
   optimizer_cfg:
     _target_: unirl.train.backend.base.OptimizerConfig
-    # Bracketed empirically on this recipe (8 prompts x 8 samples, 8 SDE steps):
-    #   5e-5  (the 10k-rollout t2i value) -> no movement at all: grad_norm flat at
-    #         5e-4, policy log-probs shifting 2e-5/step, reward pinned at ~0.80.
-    #   1e-3  -> diverges by rollout 5: grad_norm grows 0.0011 -> 0.0487
-    #         exponentially, clip fraction hits 0.19, reward falls 0.797 -> 0.662.
-    # 2e-4 sits between the two. Raise only alongside a tighter clip_range.
-    learning_rate: 2.0e-4
+    # ALIGNED to flux2_klein_editreward.yaml. Earlier attempts tuned this in
+    # isolation and both ends failed: 2e-4/1e-3 diverged (grad_norm 0.0011 ->
+    # 0.0487, clip 0.19, reward 0.797 -> 0.662) and 5e-5 under an all-bf16 master
+    # never moved. The fix was not the LR -- it was master_dtype (see backend)
+    # plus the 12x larger batch this recipe now inherits.
+    learning_rate: 5.0e-5
     adam_beta1: 0.9
     adam_beta2: 0.999
     adam_epsilon: 1.0e-8
@@ -123,7 +129,7 @@ backend:
     _target_: unirl.train.backend.base.LrSchedulerConfig
     type: constant
     warmup_steps: 0
-    total_steps: 60
+    total_steps: 55
   lora_cfg:
     _target_: unirl.train.configs.LoraConfig
     rank: 16
@@ -157,7 +163,7 @@ rollout:
     # and their RoPE ids, shipped back as image_latent / image_latent_ids.
     populate_conditions: true
     init_same_noise: ${sampling.init_same_noise}
-    forward_batch_size: 8
+    forward_batch_size: 16
     num_gpus: 1
     tp_size: 1
     local_mode: true
@@ -197,8 +203,7 @@ reward:
 algorithm:
   _target_: unirl.algorithms.flowgrpo.FlowGRPO
   stage_attr: diffusion
-  # Loosened with the LR: at 5e-3 a larger policy move would be clipped away.
-  clip_range: 5.0e-2
+  clip_range: 5.0e-3            # ALIGNED
   clip_schedule: constant
   # replay: the trainer recomputes the pi_old anchor via
   # Flux2KleinDiffusionStage.replay, conditioned on the engine-captured
@@ -228,12 +233,12 @@ data_source:
 
 sampling:
   _target_: unirl.types.sampling.DiffusionSamplingParams
-  num_inference_steps: 8
+  num_inference_steps: 10       # ALIGNED
   guidance_scale: 1.0
   height: 512
   width: 512
   eta: 0.7
-  samples_per_prompt: 8
+  samples_per_prompt: 16        # ALIGNED
   seed: 42
   # SGLang draws its own x_T here; the engine's init_same_noise=true path
   # mis-sizes FLUX.2 latent channels (see flux2_klein_sglang.yaml). GRPO does
@@ -243,11 +248,8 @@ sampling:
   scheduler:
     _target_: unirl.utils.scheduler_utils.AllSDEScheduler
     num_timesteps: ${..num_inference_steps}
-    # Every step SDE across the whole schedule: each SDE step contributes a
-    # log-prob term to the objective, so 8/8 gives ~2.7x the gradient signal per
-    # rollout of the 3-step early window. Costs a denser stored trajectory.
-    num_sde_steps: 8
-    timestep_fraction: [0, 1]
+    num_sde_steps: 3            # ALIGNED
+    timestep_fraction: [0, 0.5] # ALIGNED
 
 weight_sync_interval: 1
 

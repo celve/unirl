@@ -127,7 +127,16 @@ backend:
     _target_: unirl.train.configs.FSDPConfig
     # bf16 master — keeps the synced LoRA wire dtype compatible with the SGLang
     # rollout kernels (no separate cast path).
+    # ALIGNED to flux2_klein_editreward.yaml, which trains in fp32. Split here
+    # because the SGLang engine needs bf16 on the wire: param_dtype=bf16 keeps
+    # the synced LoRA dtype compatible with the rollout kernels, while
+    # master_dtype=fp32 keeps optimizer state at the proven recipe's precision.
+    # This is the "fp32 master + bf16 compute" flow_grpo relies on for stable
+    # LOW-GRADIENT RL — load-bearing here: grad norms sit at ~1e-3, and an
+    # all-bf16 master (8-bit mantissa, ulp ~4e-5 at |w|~0.01) rounds updates of
+    # that size away entirely.
     param_dtype: bf16
+    master_dtype: fp32
     cpu_offload: false
     mixed_precision: true
     fsdp_mode: full
@@ -265,11 +274,16 @@ data_source:
   _target_: unirl.data.data_source.MultimodalRLDataSource
   args:
     run:
-      # Edit instructions + source images (media entry with role: condition).
-      # The shipped JSONL uses placeholder image paths — remap them to your
-      # local storage first (see datasets/image_edit/README.md).
-      data_path: ${oc.env:DATA_PATH,datasets/image_edit/train.jsonl}
-      eval_data_path: ${oc.env:EVAL_DATA_PATH,datasets/image_edit/test.jsonl}
+      # REQUIRED: point DATA_PATH / EVAL_DATA_PATH at a remapped dataset.
+      # datasets/image_edit/*.jsonl ships PLACEHOLDER uris
+      # ("data/OpenGPT-4o-Image/editing/input_8743.png") that do not resolve, so
+      # the committed default fails at image load on rollout 1 rather than
+      # training on the wrong thing. Rewrite the media[].uri entries to absolute
+      # POD-LOCAL paths first (ceph paths get re-read every rollout), and
+      # normalise every source to one resolution — Images.from_list packs a batch
+      # into a single tensor, so mixed shapes are not usable.
+      data_path: ${oc.env:DATA_PATH,???}
+      eval_data_path: ${oc.env:EVAL_DATA_PATH,???}
       seed: 42
     algorithm:
       prompts_per_rollout: ${batch_size}
