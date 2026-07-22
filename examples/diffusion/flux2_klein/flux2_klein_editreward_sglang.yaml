@@ -1,0 +1,317 @@
+# @package _global_
+# FLUX.2-klein-9B image-EDIT (ti2i) GRPO — SGLang colocate + remote EditReward.
+#
+# Text + source image -> edited image, with the rollout running OUT OF PROCESS in
+# SGLang (DiffGenerator) instead of trainside. This is flux2_klein_sglang.yaml
+# (t2i, SGLang rollout) crossed with flux2_klein_editreward.yaml (ti2i, trainside
+# rollout, EditReward):
+#   - stage_config.task: it2i  -> pins the modality; a dataset missing its
+#       (image, condition) media refs fails on rollout 1 instead of silently
+#       training t2i and scoring "is this a good image" (see the block below).
+#   - data_source -> the image-edit dataset (edit instruction + source image).
+#   - reward      -> RemoteRewardBackend (HTTP to an EditReward service on its own
+#       GPU; it builds the [source, edited] pair from primitives["image"] itself).
+#   - logging.log_media -> logs the source|edited side-by-side preview.
+#
+# No engine or model-family change: Klein is ONE checkpoint serving both t2i and
+# ti2i (SGLang's pipeline config is ModelTaskType.TI2I unconditionally), and the
+# adapter branches on the presence of primitives["image"]. So model_family stays
+# `flux2_klein` — same as the t2i recipe.
+#
+# Source images must share ONE resolution across a batch. Mixed shapes now raise
+# at collate (MultimodalRLDataSource._validate_uniform_image_shapes) rather than
+# being zero-padded into black-barred sources; upstream also sizes each source to
+# ~1024² preserving its own aspect ratio, so mixed ratios would yield ragged
+# condition-token counts the batched conditions cannot hold. Normalize the
+# dataset, or bucket the dataloader by aspect ratio.
+#
+# Upstream SGLang prerequisites (engine fails fast otherwise) — same as the t2i
+# recipe: the FLUX.2-klein pipeline registered, and the Dance SDE kernel
+# registered under "dance".
+#
+# Deploy (keep EditReward OFF the training GPUs):
+#   reward node:  cd unirl-reward-service && ray start --head --num-gpus=1 \
+#                 && python -m reward_service --config configs/editreward_service.yaml
+#   train node:   export REWARD_SERVICE_URL=http://<reward_node_ip>:8080
+#                 # optional: FLUX2_KLEIN_PATH / DATA_PATH / EVAL_DATA_PATH
+#                 bash examples/run_experiment_single_node.sh diffusion/flux2_klein/flux2_klein_editreward_sglang
+#
+# Compose check (CPU):  python -m unirl.train_diffusion \
+#   --config-name diffusion/flux2_klein/flux2_klein_editreward_sglang --cfg job --resolve
+# Smoke first: override batch_size=2 num_rollouts=2 to exercise the path cheaply.
+
+num_devices: 8                # launcher auto-overrides via NUM_NODES * GPUS_PER_NODE
+batch_size: 48                # prompts_per_rollout (48 x 16 samples = 768 global).
+                              # Inherited from the trainside edit recipe rather than the
+                              # t2i recipe's 64 — start conservative, raise once the
+                              # source-image encode cost is measured.
+num_rollouts: 10000
+
+# Pin the ti2i edit task. This recipe is image-EDIT only: every sample MUST carry
+# a source image (dataset `media` entry with role: condition). Pinning the task
+# makes a dataset with NO source images fail loudly in the adapter's
+# build_prompts instead of silently falling back to t2i. (A batch where only SOME
+# prompts have an image already fails earlier, in _validate_homogeneous_images.)
+stage_config:
+  task: it2i
+
+logging:
+  report_to_wandb: true
+  project_name: ${oc.env:WANDB_PROJECT,unirl-flux2klein-editreward}
+  run_name: flux2klein_editreward_it2i_sglang
+  entity: ${oc.env:WANDB_ENTITY,null}
+  tags: [flux2_klein, it2i, edit, editreward, lora, sglang]
+  log_media: true              # logs the source|edited side-by-side preview for ti2i edits
+  media_max_items: 8
+  media_log_interval: 1
+
+# Shared nodes: model_config + strategy defined once, referenced by
+# bundle / pipeline / rollout (SGLang needs both at init).
+model_config:
+  _target_: unirl.models.flux2_klein.config.Flux2KleinPipelineConfig
+  pretrained_model_ckpt_path: ${oc.env:FLUX2_KLEIN_PATH,black-forest-labs/FLUX.2-klein-base-9B}
+  model_precision: bf16
+  max_sequence_length: 512
+  # Static-shift fallback only; Klein's checkpoint enables empirical-mu dynamic
+  # shifting (build_schedule_policy) and this value is ignored at runtime.
+  shift: 1.0
+  # SGLang builds its LoRA ServerArgs from these fields. This list MUST stay in
+  # lockstep with backend.lora_cfg.target_modules and rollout.config.target_modules
+  # below — three independent consumers (PEFT injection, weight-sync bucket
+  # layout, SGLang ServerArgs.lora_target_modules) each read the names from their
+  # own field.
+  use_lora: true
+  lora_target_modules:
+    # DUAL block (Flux2TransformerBlock × 8) — full attention + FFN coverage:
+    - to_q
+    - to_k
+    - to_v
+    - to_out.0
+    - add_q_proj
+    - add_k_proj
+    - add_v_proj
+    - to_add_out
+    - ff.linear_in
+    - ff.linear_out
+    - ff_context.linear_in
+    - ff_context.linear_out
+    # SINGLE block (Flux2SingleTransformerBlock × 48): fused QKV+MLP only.
+    # `attn.to_out` (single-block bare Linear) is excluded: bare "to_out"
+    # would also endswith-match the dual block's `attn.to_out` ModuleList
+    # (Linear + Dropout), which PEFT refuses to wrap.
+    - to_qkv_mlp_proj
+
+# Shared SDE strategy; SGLang resolves its sde_label ("dance") from it.
+strategy:
+  _target_: unirl.sde.kernels.DanceSDEStrategy
+
+bundle:
+  _target_: unirl.models.flux2_klein.bundle.Flux2KleinBundle.from_config
+  config: ${model_config}
+
+pipeline:
+  _target_: unirl.models.flux2_klein.pipeline.Flux2KleinPipeline
+  shift: 1.0
+  autocast_precision: bf16
+  trajectory_precision: fp16
+  logprob_precision: fp32
+  max_sequence_length: 512
+  qwen3_extraction_layers: [9, 18, 27]
+  strategy: ${strategy}
+
+backend:
+  _target_: unirl.train.backend.fsdp.FSDPBackend
+  block_class_names: ["Flux2TransformerBlock", "Flux2SingleTransformerBlock"]
+  trainable_attr: transformer
+  fsdp_cfg:
+    _target_: unirl.train.configs.FSDPConfig
+    # bf16 master — keeps the synced LoRA wire dtype compatible with the SGLang
+    # rollout kernels (no separate cast path).
+    param_dtype: bf16
+    cpu_offload: false
+    mixed_precision: true
+    fsdp_mode: full
+    reshard_after_forward: true
+    activation_checkpointing: false
+    use_torch_compile: false
+  optimizer_cfg:
+    _target_: unirl.train.backend.base.OptimizerConfig
+    learning_rate: 5.0e-5
+    adam_beta1: 0.9
+    adam_beta2: 0.999
+    adam_epsilon: 1.0e-8
+    weight_decay: 0.0
+  scheduler_cfg:
+    _target_: unirl.train.backend.base.LrSchedulerConfig
+    type: constant
+    warmup_steps: 0
+    total_steps: 10000
+  lora_cfg:
+    _target_: unirl.train.configs.LoraConfig
+    rank: 16
+    alpha: 32
+    dropout: 0.0
+    bias: none
+    task_type: FEATURE_EXTRACTION
+    # Must stay in lockstep with model_config.lora_target_modules above and
+    # rollout.config.target_modules below — see the t2i recipe for the full
+    # per-module coverage breakdown and the to_out exclusion rationale.
+    target_modules:
+      - to_q
+      - to_k
+      - to_v
+      - to_out.0
+      - add_q_proj
+      - add_k_proj
+      - add_v_proj
+      - to_add_out
+      - ff.linear_in
+      - ff.linear_out
+      - ff_context.linear_in
+      - ff_context.linear_out
+      - to_qkv_mlp_proj
+
+rollout:
+  _target_: unirl.rollout.engine.sglang_diffusion.engine.SGLangDiffusionRolloutEngine
+  config:
+    _target_: unirl.rollout.engine.sglang_diffusion.config.SGLangDiffusionEngineConfig
+    # Same family as the t2i recipe — Klein serves both modalities off one
+    # checkpoint. The adapter reads req.primitives['image'] and, when present,
+    # ships the source PIL via the condition_image sampling kwarg so upstream's
+    # InputValidationStage -> ImageVAEEncodingStage sets batch.image_latent and
+    # batch.condition_image_latent_ids.
+    model_family: flux2_klein
+    # LOAD-BEARING for ti2i (not just a nicety as in the t2i recipe): replay
+    # consumes the SERVER's packed condition tokens + their RoPE ids, captured
+    # off the batch and shipped back as the image_latent / image_latent_ids
+    # conditions. Without this the trainer has no source-image conditioning to
+    # replay under and Flux2KleinDiffusionStep.predict_noise runs text-only.
+    populate_conditions: true
+    # Mirrors sampling.init_same_noise (false for SGLang — see the note there;
+    # the fork's flux2 pre-shipped-noise geometry isn't ready). When false the
+    # engine ships no initial_noise and SGLang draws its own.
+    init_same_noise: ${sampling.init_same_noise}
+    # Chunk generate into 16-sample sub-batches so sglang bounds its DiT-forward
+    # / VAE-decode peak memory. NOTE: SGLang rejects cross-request dynamic
+    # batching for image-bearing requests, so ti2i is somewhat slower per sample
+    # than t2i; the num_outputs_per_prompt K-expansion still applies, so
+    # per-group efficiency is retained.
+    forward_batch_size: 16
+    num_gpus: 1
+    tp_size: 1
+    local_mode: true
+    # MUST stay in sync with model_config.lora_target_modules and
+    # backend.lora_cfg.target_modules above. Drift between the three causes
+    # silent LoRA-key drops at sync.
+    target_modules:
+      - to_q
+      - to_k
+      - to_v
+      - to_out.0
+      - add_q_proj
+      - add_k_proj
+      - add_v_proj
+      - to_add_out
+      - ff.linear_in
+      - ff.linear_out
+      - ff_context.linear_in
+      - ff_context.linear_out
+      - to_qkv_mlp_proj
+    engine_kwargs:
+      model_type: flux2_klein
+  # SGLang reads ckpt/LoRA off model_config and sde_label off strategy.
+  model_config: ${model_config}
+  strategy: ${strategy}
+
+# Remote EditReward service (its own GPU). The 2-turn history (source + generated)
+# is built automatically by RemoteRewardBackend when primitives["image"] exists.
+reward:
+  _target_: unirl.reward.service.RewardService
+  backend:
+    _target_: unirl.reward.remote.RemoteRewardBackend
+    base_device: cpu
+    config:
+      _target_: unirl.reward.remote.RemoteRewardSpec
+      base_url: ${oc.env:REWARD_SERVICE_URL,http://localhost:8080}
+      required_rewards: [editreward]
+      reward_weights:
+        editreward: 1.0
+      batch_size: 8
+      timeout: 300.0
+      sub_metric_reduce: mean
+      aggregation_method: weighted_sum
+
+algorithm:
+  _target_: unirl.algorithms.flowgrpo.FlowGRPO
+  stage_attr: diffusion
+  clip_range: 5.0e-3
+  clip_schedule: constant
+  # REPLAY mode: trainer recomputes the π_old anchor via
+  # Flux2KleinDiffusionStage.replay, conditioned on the engine-captured
+  # image_latent / image_latent_ids.
+  old_logp_source: replay
+  conditions_cls:
+    _target_: hydra.utils.get_class
+    path: unirl.models.flux2_klein.conditions.Flux2KleinConditions
+  params: ${sampling}
+
+stack:
+  _target_: unirl.train.stack.TrainStack
+  micro_batch_size: 1
+  max_grad_norm: 1.0
+  num_updates_per_batch: 2
+
+data_source:
+  _target_: unirl.data.data_source.MultimodalRLDataSource
+  args:
+    run:
+      # Edit instructions + source images (media entry with role: condition).
+      # The shipped JSONL uses placeholder image paths — remap them to your
+      # local storage first (see datasets/image_edit/README.md).
+      data_path: ${oc.env:DATA_PATH,datasets/image_edit/train.jsonl}
+      eval_data_path: ${oc.env:EVAL_DATA_PATH,datasets/image_edit/test.jsonl}
+      seed: 42
+    algorithm:
+      prompts_per_rollout: ${batch_size}
+
+sampling:
+  _target_: unirl.types.sampling.DiffusionSamplingParams
+  num_inference_steps: 10
+  guidance_scale: 1.0
+  # Generation size. Independent of the source-image size: upstream sizes the
+  # condition image to ~1024² on its own aspect ratio, and the engine's
+  # height/width are preserved across that preprocessing.
+  height: 512
+  width: 512
+  eta: 0.7
+  samples_per_prompt: 16
+  seed: 42
+  # NOTE (differs from the trainside edit recipe, which uses init_same_noise=true):
+  # SGLang draws its own per-sample initial noise here. The engine's
+  # init_same_noise=true path pre-ships an engine-built noise tensor sized via the
+  # SGLang flux2 pipeline_config.prepare_latent_shape, but that path mis-sizes the
+  # FLUX.2 latent channels (the DiT img_in linear then sees 128 vs the expected 64
+  # and the denoising matmul fails). Keep this false until that is fixed. GRPO
+  # correctness is unaffected — per-prompt-group advantages don't require shared
+  # init noise; it's only a variance-reduction nicety.
+  init_same_noise: false
+  autocast_precision: bf16
+  scheduler:
+    _target_: unirl.utils.scheduler_utils.AllSDEScheduler
+    num_timesteps: ${..num_inference_steps}
+    num_sde_steps: 3
+    timestep_fraction: [0, 0.5]
+
+# LoRA weight-sync cadence (loop concern, read by DiffusionTrainer.train).
+weight_sync_interval: 1
+
+# LoRA weight sync -> SGLang rollout.
+sync:
+  _target_: unirl.distributed.weight_sync.lora.LocalLoraWeightSync
+  # MUST be false on the actual SGLang engine (only vLLM-Omni implements the
+  # checksum read-back API) — see flux2_klein_sglang.yaml for the full rationale.
+  verify: false
+  # Mirrors Flux2KleinPipelineConfig.weight_sync_param_name_prefix; must match
+  # the engine-side LoRA key naming.
+  param_prefix: "transformer."
+  adapter_name: default

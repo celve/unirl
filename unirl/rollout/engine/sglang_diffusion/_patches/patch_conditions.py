@@ -75,24 +75,39 @@ from dataclasses import field
 
 logger = logging.getLogger(__name__)
 
-# The 6 conditions fields, in the fork's order. All default to None and are
-# typed ``list[torch.Tensor] | None`` (one entry per text encoder) on
-# OutputBatch; ``Any``-typed on GenerationResult to match its existing style.
+# The conditions fields, in the fork's order (the first 6 are the text-embed
+# set; the image ones follow). All default to None and are typed
+# ``list[torch.Tensor] | None`` (one entry per text encoder) on OutputBatch;
+# ``Any``-typed on GenerationResult to match its existing style.
 #
-# ``image_latent`` (7th field, Edit-Plus only) is a single packed
-# ``[B, S_img, C*4]`` tensor — NOT a per-encoder list. It is wrapped as a
+# ``image_latent`` (7th field, image-conditioned families) is a single packed
+# source-image tensor — NOT a per-encoder list. It is wrapped as a
 # one-element list ``[tensor]`` at copy time so it flows through the existing
-# list-based merge/slice path unchanged (one "encoder", one tensor). Only
-# Edit-Plus sets ``batch.image_latent`` (via upstream's
-# ``ImageVAEEncodingStage``); T2I models leave it ``None``, so this field is
-# a no-op for every non-Edit-Plus adapter.
+# list-based merge/slice path unchanged (one "encoder", one tensor). Only an
+# image-conditioned request sets ``batch.image_latent`` (via upstream's
+# ``ImageVAEEncodingStage``); T2I leaves it ``None``, so this field is a no-op
+# for text-only rollouts. Edit-Plus packs it ``[B, S_img, C*4]``; FLUX.2-Klein
+# packs it ``[B, N, 128]`` (already the trainside token form).
 #
 # ``image_latent_sizes`` (8th field, Edit-Plus only) carries the per-request
 # ``vae_image_sizes`` (a ``list[tuple[int, int]]`` of pixel (W, H) pairs from
 # upstream's ``preprocess_vae_image``). The adapter needs these to unpack
 # ``image_latent`` from packed ``[S_img, C*4]`` to spatial ``[C, H_img, W_img]``
 # (S_img alone is ambiguous — multiple H×W grids give the same token count).
-# Wrapped as ``[value]`` to fit the list-based merge/slice path.
+# Wrapped as ``[value]`` to fit the list-based merge/slice path. Genuinely
+# Edit-Plus-only: ``preprocess_vae_image`` is a no-op on the base pipeline
+# config and FLUX.2 does not override it, so Klein leaves this ``None``.
+#
+# ``condition_image_latent_ids`` (9th field, FLUX.2 family) carries the 4-axis
+# RoPE position ids ``[B, N, 4]`` that upstream's
+# ``prepare_condition_image_latent_ids`` builds for the condition tokens and the
+# DiT attends under (``get_freqs_cis`` concatenates them onto the noise ids).
+# Trainside replay needs them verbatim: ``Flux2KleinConditions`` requires BOTH
+# ``image_latent`` and ``image_latent_ids``, and they cannot be re-derived from
+# ``image_latent`` alone — N does not determine the h×w factorization, and the
+# usual grid source (``image_latent_sizes``) is None for FLUX.2 per the note
+# above. Same per-sample ``[B, N, *]`` shape family as ``image_latent``, so the
+# generic merge/slice path handles it with no special case.
 _COND_FIELDS = (
     "prompt_embeds",
     "pooled_prompt_embeds",
@@ -102,6 +117,7 @@ _COND_FIELDS = (
     "negative_attention_mask",
     "image_latent",
     "image_latent_sizes",
+    "condition_image_latent_ids",
 )
 
 # result(Req) source attr -> OutputBatch dest attr (the fork's gpu_worker mapping).
@@ -306,24 +322,43 @@ def _copy_conditions(src, output_batch) -> None:
         _copy_mapped_conditions(src, output_batch, _POS_MAP)
     if getattr(src, "return_negative_prompt_embeds", False):
         _copy_mapped_conditions(src, output_batch, _NEG_MAP)
-    # Edit-Plus image_latent: a single packed [B, S_img, C*4] tensor set by
-    # upstream's ImageVAEEncodingStage. Not gated on a SamplingParams flag —
-    # presence on the batch IS the gate (only Edit-Plus sets it; T2I leaves
-    # it None). Wrapped as [tensor] to fit the list-based merge/slice path.
-    image_latent = getattr(src, "image_latent", None)
-    if image_latent is not None:
-        import torch
-
-        if torch.is_tensor(image_latent):
-            output_batch.image_latent = [image_latent.detach().cpu()]
-        elif isinstance(image_latent, (list, tuple)):
-            output_batch.image_latent = [t.detach().cpu() if torch.is_tensor(t) else t for t in image_latent]
+    # Source-image conditioning set by upstream's ImageVAEEncodingStage. Not
+    # gated on a SamplingParams flag — presence on the batch IS the gate (only
+    # an image-bearing request sets these; T2I leaves them None).
+    #
+    #   image_latent               — the packed source-image tokens
+    #   condition_image_latent_ids — their 4-axis RoPE ids (FLUX.2 family)
+    #
+    # Both are single tensors, wrapped as [tensor] to fit the list-based
+    # merge/slice path (one "encoder", one tensor).
+    _copy_single_tensor_condition(src, output_batch, "image_latent", "image_latent")
+    _copy_single_tensor_condition(src, output_batch, "condition_image_latent_ids", "condition_image_latent_ids")
     # Edit-Plus vae_image_sizes: list[tuple[int, int]] of pixel (W, H) pairs
     # from upstream's preprocess_vae_image. The adapter needs these to unpack
     # image_latent to spatial form. Wrapped as [value] for the merge/slice path.
     vae_image_sizes = getattr(src, "vae_image_sizes", None)
     if vae_image_sizes is not None:
         output_batch.image_latent_sizes = [vae_image_sizes]
+
+
+def _copy_single_tensor_condition(src, output_batch, srcattr: str, dst: str) -> None:
+    """Copy a single-tensor conditions field off ``src`` as a one-element list.
+
+    The merge/slice transforms are list-based (one entry per text encoder), so
+    a lone tensor is wrapped ``[tensor]`` to ride the same path. A list/tuple
+    source is copied element-wise. ``None`` (the T2I case) leaves ``dst``
+    untouched.
+    """
+    value = getattr(src, srcattr, None)
+    if value is None:
+        return
+
+    import torch
+
+    if torch.is_tensor(value):
+        setattr(output_batch, dst, [value.detach().cpu()])
+    elif isinstance(value, (list, tuple)):
+        setattr(output_batch, dst, [t.detach().cpu() if torch.is_tensor(t) else t for t in value])
 
 
 def _copy_mapped_conditions(src, output_batch, mapping) -> None:

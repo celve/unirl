@@ -99,7 +99,9 @@ class QwenImageEditPlusAdapter(QwenImageAdapter):
         # means no collapse happened (heterogeneous K or no grouping), so the
         # PILs stay 1:1 with the prompts.
         if k > 1:
-            unique_pils = self._first_per_group(pil_images, list(req.group_ids))
+            from unirl.rollout.engine.sglang_diffusion import utils
+
+            unique_pils = utils.first_per_group(pil_images, list(req.group_ids))
             if len(unique_pils) != len(unique_prompts):
                 raise ValueError(
                     f"build_prompts: collapsed image count {len(unique_pils)} != unique prompt "
@@ -178,22 +180,6 @@ class QwenImageEditPlusAdapter(QwenImageAdapter):
                 f"to ragged-pad."
             )
         return torch.cat(tensors, dim=0)
-
-    @staticmethod
-    def _first_per_group(items: List[Any], group_ids: List[str]) -> List[Any]:
-        """First item of each group, in first-seen group order.
-
-        Mirrors how :func:`utils.deexpand_prompts_from_groups` collapses prompts,
-        so the source-image collapse aligns with the prompt collapse regardless
-        of the sample layout (contiguous or interleaved ``group_ids``).
-        """
-        seen: set[str] = set()
-        out: List[Any] = []
-        for item, gid in zip(items, group_ids):
-            if gid not in seen:
-                seen.add(gid)
-                out.append(item)
-        return out
 
     def _deexpand_prompts(self, prompts: List[str], req: RolloutReq):
         """Collapse K-expanded prompts back to unique + repeat count.

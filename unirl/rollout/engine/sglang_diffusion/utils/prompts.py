@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 
 def deexpand_prompts_from_groups(
@@ -51,4 +51,22 @@ def deexpand_prompts_from_groups(
     return unique_prompts, k
 
 
-__all__ = ["deexpand_prompts_from_groups"]
+def first_per_group(items: List[Any], group_ids: List[str]) -> List[Any]:
+    """First item of each group, in first-seen group order.
+
+    Mirrors how :func:`deexpand_prompts_from_groups` collapses prompts, so a
+    parallel per-sample payload (an image-edit source image) collapses in
+    lockstep with the prompts regardless of the sample layout — contiguous
+    (``[A, A, B, B]``) or interleaved (``[A, B, A, B]``). Indexing ``items[::k]``
+    instead would misalign on the interleaved layout.
+    """
+    seen: set[str] = set()
+    out: List[Any] = []
+    for item, gid in zip(items, group_ids):
+        if gid not in seen:
+            seen.add(gid)
+            out.append(item)
+    return out
+
+
+__all__ = ["deexpand_prompts_from_groups", "first_per_group"]
