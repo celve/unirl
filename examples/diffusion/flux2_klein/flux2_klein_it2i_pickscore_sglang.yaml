@@ -108,12 +108,13 @@ backend:
     use_torch_compile: false
   optimizer_cfg:
     _target_: unirl.train.backend.base.OptimizerConfig
-    # 5e-5 is flux2_klein_sglang.yaml's value, tuned for a 10k-rollout run. With
-    # LoRA's B zero-initialised and Adam stepping ~lr per update, 120 updates at
-    # 5e-5 move the weights ~6e-3 — never out of the zero neighbourhood, which is
-    # exactly what the first attempt showed (grad_norm flat at 5e-4, policy
-    # log-probs moving 2e-5 per step, reward flat). Scaled for a 60-rollout run.
-    learning_rate: 1.0e-3
+    # Bracketed empirically on this recipe (8 prompts x 8 samples, 8 SDE steps):
+    #   5e-5  (the 10k-rollout t2i value) -> no movement at all: grad_norm flat at
+    #         5e-4, policy log-probs shifting 2e-5/step, reward pinned at ~0.80.
+    #   1e-3  -> diverges by rollout 5: grad_norm grows 0.0011 -> 0.0487
+    #         exponentially, clip fraction hits 0.19, reward falls 0.797 -> 0.662.
+    # 2e-4 sits between the two. Raise only alongside a tighter clip_range.
+    learning_rate: 2.0e-4
     adam_beta1: 0.9
     adam_beta2: 0.999
     adam_epsilon: 1.0e-8
