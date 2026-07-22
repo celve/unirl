@@ -1,0 +1,252 @@
+# @package _global_
+# FLUX.2-klein ti2i GRPO — TRAINSIDE rollout engine, local PickScore reward.
+#
+# BASELINE / CONTROL for flux2_klein_it2i_pickscore_sglang.yaml.
+#
+# This file is that recipe with EXACTLY ONE THING CHANGED: the rollout engine.
+# TrainsideRolloutEngine samples with the training model itself (the original,
+# pre-existing it2i path) instead of an out-of-process SGLang engine. Every
+# other knob -- batch 48 x 16, 10 steps, lr 5e-5, clip 5e-3, master_dtype fp32,
+# num_updates_per_batch 2, 3 SDE steps over [0, 0.5], seed 42, LoRA r16/a32,
+# and the same PickScore weights and the same dataset -- is held identical on
+# purpose. Do not "improve" one file without the other; the whole value of this
+# recipe is that a difference in the two reward curves is attributable.
+#
+# WHY IT EXISTS. The SGLang ti2i run's reward curve was flat, and flat is
+# ambiguous between two very different causes:
+#   (a) the SGLang ti2i conditions round-trip is subtly wrong, so replay trains
+#       against a pi_old that does not describe what was actually sampled; or
+#   (b) nothing is wrong with the engine, and PickScore simply cannot see the
+#       thing being optimised -- it scores text<->image alignment and never
+#       looks at the source image, so an edit task has little for it to reward.
+# Running the same task on the trainside engine separates them. Trainside grows
+# and SGLang does not  -> (a), the engine path. Both flat -> (b), the objective.
+# That inference only holds if the two configs differ solely in the engine.
+#
+# WHAT THIS VALIDATES / WHAT IT DOES NOT (as the control)
+#   validates: the ti2i rollout path end-to-end under a real RL loop —
+#     condition-image ingestion, the image_latent/image_latent_ids capture, and
+#     that those captured conditions feed Flux2KleinDiffusionStage.replay
+#     coherently enough to produce a usable pi_old anchor and a learning signal.
+#   does NOT validate: numerical rollout<->replay log-prob parity. With
+#     old_logp_source=replay BOTH pi_old and the current-policy log-prob come
+#     from the same replay path, so the GRPO ratio would sit at ~1 even if the
+#     captured conditions were wrong — it shows replay is self-consistent, not
+#     that it matches what the engine actually sampled under. The real parity
+#     gate compares replay against the engine's emitted trajectory_log_probs.
+#   does NOT validate: edit QUALITY. PickScore scores text<->image alignment and
+#     never sees the source image, so the policy can raise reward by drifting
+#     away from the source toward a generic match for the instruction text.
+#     Use flux2_klein_editreward_sglang.yaml for an objective that actually
+#     scores the edit.
+#
+# Data: built by scripts/gpu-verify/build_dataset.py from the LIN-560 extraction
+# onto POD-LOCAL disk, every source center-cropped to a single 512x512 so each
+# batch is shape-homogeneous. Nothing enforces that: `Images.from_list` zero-pads
+# mismatched shapes to the batch max, silently baking black bars into the edit
+# source. See the editreward_sglang recipe header for the full note.
+#
+# Launch:
+#   export IT2I_DATA=/root/it2i_data
+#   bash examples/run_experiment_single_node.sh diffusion/flux2_klein/flux2_klein_it2i_pickscore_trainside
+
+num_devices: 8
+batch_size: 48                # ALIGNED to flux2_klein_editreward.yaml (48 x 16 = 768 images/rollout)
+num_rollouts: 55              # >= 50 so the reward trend is readable
+eval_interval: 0              # off: keeps the loop tight for a smoke run
+
+# Pin the edit task so a dataset that lost its (image, condition) media refs
+# fails on rollout 1 in the adapter instead of silently training t2i.
+stage_config:
+  task: it2i
+
+logging:
+  report_to_wandb: true
+  project_name: ${oc.env:WANDB_PROJECT,unirl-lin584-it2i}
+  run_name: ${oc.env:WANDB_RUN_NAME,klein_it2i_pickscore_trainside}
+  entity: ${oc.env:WANDB_ENTITY,linyuwus}
+  tags: [flux2_klein, it2i, trainside, pickscore, lin584, baseline]
+  log_media: true             # source|edited preview
+  media_max_items: 4
+  media_log_interval: 10
+
+model_config:
+  _target_: unirl.models.flux2_klein.config.Flux2KleinPipelineConfig
+  pretrained_model_ckpt_path: ${oc.env:FLUX2_KLEIN_PATH,/root/unirl/models/local/FLUX.2-klein-4B}
+  model_precision: bf16
+  max_sequence_length: 512
+  shift: 1.0
+  use_lora: true
+  lora_target_modules:
+    - to_q
+    - to_k
+    - to_v
+    - to_out.0
+    - add_q_proj
+    - add_k_proj
+    - add_v_proj
+    - to_add_out
+    - ff.linear_in
+    - ff.linear_out
+    - ff_context.linear_in
+    - ff_context.linear_out
+    - to_qkv_mlp_proj
+
+strategy:
+  _target_: unirl.sde.kernels.DanceSDEStrategy
+
+bundle:
+  _target_: unirl.models.flux2_klein.bundle.Flux2KleinBundle.from_config
+  config: ${model_config}
+
+pipeline:
+  _target_: unirl.models.flux2_klein.pipeline.Flux2KleinPipeline
+  shift: 1.0
+  autocast_precision: bf16
+  trajectory_precision: fp16
+  logprob_precision: fp32
+  max_sequence_length: 512
+  qwen3_extraction_layers: [9, 18, 27]
+  strategy: ${strategy}
+
+backend:
+  _target_: unirl.train.backend.fsdp.FSDPBackend
+  block_class_names: ["Flux2TransformerBlock", "Flux2SingleTransformerBlock"]
+  trainable_attr: transformer
+  fsdp_cfg:
+    _target_: unirl.train.configs.FSDPConfig
+    # The proven recipe trains in fp32. bf16 params are forced by the SGLang
+    # LoRA wire dtype, so master_dtype restores fp32 optimizer state -- the
+    # "fp32 master + bf16 compute" flow_grpo relies on for stable LOW-GRADIENT
+    # RL. Load-bearing: grad norms are ~1e-3, and an all-bf16 master (ulp ~4e-5
+    # at |w|~0.01) rounds updates that small away, which is what pinned the
+    # earlier attempts.
+    param_dtype: bf16
+    master_dtype: fp32
+    cpu_offload: false
+    mixed_precision: true
+    fsdp_mode: full
+    reshard_after_forward: true
+    # Held at the sglang recipe's value, NOT because trainside needs it -- it
+    # has more headroom, with no colocated engine holding a second model copy --
+    # but because activation checkpointing is numerically neutral and this is a
+    # control. Matching it costs some speed and removes a confound.
+    activation_checkpointing: true
+    use_torch_compile: false
+  optimizer_cfg:
+    _target_: unirl.train.backend.base.OptimizerConfig
+    # ALIGNED to flux2_klein_editreward.yaml. Earlier attempts tuned this in
+    # isolation and both ends failed: 2e-4/1e-3 diverged (grad_norm 0.0011 ->
+    # 0.0487, clip 0.19, reward 0.797 -> 0.662) and 5e-5 under an all-bf16 master
+    # never moved. The fix was not the LR -- it was master_dtype (see backend)
+    # plus the 12x larger batch this recipe now inherits.
+    learning_rate: 5.0e-5
+    adam_beta1: 0.9
+    adam_beta2: 0.999
+    adam_epsilon: 1.0e-8
+    weight_decay: 0.0
+  scheduler_cfg:
+    _target_: unirl.train.backend.base.LrSchedulerConfig
+    type: constant
+    warmup_steps: 0
+    total_steps: 55
+  lora_cfg:
+    _target_: unirl.train.configs.LoraConfig
+    rank: 16
+    alpha: 32
+    dropout: 0.0
+    bias: none
+    task_type: FEATURE_EXTRACTION
+    target_modules:
+      - to_q
+      - to_k
+      - to_v
+      - to_out.0
+      - add_q_proj
+      - add_k_proj
+      - add_v_proj
+      - to_add_out
+      - ff.linear_in
+      - ff.linear_out
+      - ff_context.linear_in
+      - ff_context.linear_out
+      - to_qkv_mlp_proj
+
+rollout:
+  # THE ONE DELTA vs the sglang recipe. The training model is also the sampler,
+  # so there is no engine process, no weight sync, and no captured conditions:
+  # Flux2KleinVAEEncodeStage encodes the source image trainside and replay reads
+  # those conditions directly. forward_batch_size matches the sglang recipe.
+  _target_: unirl.rollout.engine.trainside.engine.TrainsideRolloutEngine
+  stage_attrs:
+    - diffusion
+  forward_batch_size: 16
+
+# In-process PickScore. Weights are pod-local (copied off ceph once) — a ceph
+# path would be read every load and is what the workspace caveats warn against.
+reward:
+  _target_: unirl.reward.service.RewardService
+  backend:
+    _target_: unirl.reward.local.pickscore.PickScoreRewardScorer
+    base_device: cuda
+    config:
+      _target_: unirl.reward.local.pickscore.PickScoreSpec
+      batch_size: 8
+      device: auto
+      processor_id: ${oc.env:CLIP_H_PATH,/root/unirl/models/local/CLIP-ViT-H-14-laion2B-s32B-b79K}
+      model_id: ${oc.env:PICKSCORE_PATH,/root/unirl/models/local/PickScore_v1}
+
+algorithm:
+  _target_: unirl.algorithms.flowgrpo.FlowGRPO
+  stage_attr: diffusion
+  clip_range: 5.0e-3            # ALIGNED
+  clip_schedule: constant
+  # replay: the trainer recomputes the pi_old anchor via
+  # Flux2KleinDiffusionStage.replay, conditioned on the engine-captured
+  # image_latent / image_latent_ids. This is what makes the run a real test of
+  # the ti2i conditions round-trip rather than just of the rollout.
+  old_logp_source: replay
+  conditions_cls:
+    _target_: hydra.utils.get_class
+    path: unirl.models.flux2_klein.conditions.Flux2KleinConditions
+  params: ${sampling}
+
+stack:
+  _target_: unirl.train.stack.TrainStack
+  micro_batch_size: 1
+  max_grad_norm: 1.0
+  num_updates_per_batch: 2
+
+data_source:
+  _target_: unirl.data.data_source.MultimodalRLDataSource
+  args:
+    run:
+      data_path: ${oc.env:IT2I_DATA,/root/it2i_data}/train.jsonl
+      eval_data_path: ${oc.env:IT2I_DATA,/root/it2i_data}/test.jsonl
+      seed: 42
+    algorithm:
+      prompts_per_rollout: ${batch_size}
+
+sampling:
+  _target_: unirl.types.sampling.DiffusionSamplingParams
+  num_inference_steps: 10       # ALIGNED
+  guidance_scale: 1.0
+  height: 512
+  width: 512
+  eta: 0.7
+  samples_per_prompt: 16        # ALIGNED
+  seed: 42
+  # Held at the sglang recipe's value so the control stays clean. Trainside
+  # could use init_same_noise: true (it has no FLUX.2 latent-channel mis-size
+  # issue), but that would change the variance profile and confound the A/B.
+  init_same_noise: false
+  scheduler:
+    _target_: unirl.utils.scheduler_utils.AllSDEScheduler
+    num_timesteps: ${..num_inference_steps}
+    num_sde_steps: 3            # ALIGNED
+    timestep_fraction: [0, 0.5] # ALIGNED
+
+# No `sync` / `weight_sync_interval` keys at all -- the sampler and the trained
+# model are the same weights, so there is nothing to push. Omitted rather than
+# set to null, matching the proven flux2_klein_editreward.yaml exactly (some
+# code paths test for key presence, not value).
