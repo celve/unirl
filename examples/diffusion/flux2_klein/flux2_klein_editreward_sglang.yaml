@@ -132,8 +132,6 @@ backend:
   trainable_attr: transformer
   fsdp_cfg:
     _target_: unirl.train.configs.FSDPConfig
-    # bf16 master — keeps the synced LoRA wire dtype compatible with the SGLang
-    # rollout kernels (no separate cast path).
     # ALIGNED to flux2_klein_editreward.yaml, which trains in fp32. Split here
     # because the SGLang engine needs bf16 on the wire: param_dtype=bf16 keeps
     # the synced LoRA dtype compatible with the rollout kernels, while
