@@ -78,5 +78,46 @@ def test_render_trajectory_distinguishes_physical_repair_decode_from_logical_tur
     )
     assert record["num_turns"] == 2
     assert record["num_logical_turns"] == 1
+    assert record["num_autonomous_turns"] == 1
     assert record["answer_injected"] is True
     assert record["turns"][-1]["answer_injected"] is True
+
+
+def test_render_trajectory_marks_user_rescue_and_autonomous_depth():
+    traj = _trajectory("plain deliberation")
+    trigger = _part_with_field(
+        traj.parts[-1],
+        "metadata",
+        [{"answer_rescue_trigger": True, "format_repair": "neither_user_nudge"}],
+    )
+    traj = traj.with_parts([*traj.parts[:-1], trigger])
+    traj = traj.observe(Texts(texts=["answer now with tags"]), role="user")
+    traj = traj.fork(1, sampling_params=ARSamplingParams()).with_filled_frontier(
+        segment=TextSegment.pack(
+            tokens=[torch.tensor([4, 5, 6])],
+            log_probs=[torch.zeros(3)],
+        ),
+        primitive=Texts(texts=["<answer>42</answer>"]),
+    )
+    rescued = _part_with_field(
+        traj.parts[-1],
+        "metadata",
+        [{"answer_rescued": True, "format_repair": "neither_user_nudge"}],
+    )
+    traj = traj.with_parts([*traj.parts[:-1], rescued])
+
+    record = _render_trajectory(
+        traj,
+        rollout_id=0,
+        traj_index=0,
+        reward=1.0,
+        advantage=1.0,
+        group_id="prompt-0",
+        max_chars=0,
+    )
+    assert record["num_turns"] == 2
+    assert record["num_logical_turns"] == 2
+    assert record["num_autonomous_turns"] == 1
+    assert record["answer_rescued"] is True
+    assert record["turns"][1]["answer_rescue_trigger"] is True
+    assert record["turns"][-1]["answer_rescued"] is True

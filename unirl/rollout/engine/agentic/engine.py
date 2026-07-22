@@ -127,9 +127,15 @@ class AgenticRolloutEngine(BaseRolloutEngine):
             else None
         )
         self._inject_answer_after_neither = bool(config.inject_answer_after_neither)
+        self._nudge_answer_after_neither = bool(config.nudge_answer_after_neither)
         self._neither_answer_prefix = str(config.neither_answer_prefix)
         self._neither_answer_stop = str(config.neither_answer_stop)
         self._neither_answer_max_new_tokens = int(config.neither_answer_max_new_tokens)
+        self._neither_answer_nudge = str(config.neither_answer_nudge)
+        require(
+            not (self._inject_answer_after_neither and self._nudge_answer_after_neither),
+            "decoder-prefix and user-nudge NEITHER rescue are mutually exclusive",
+        )
         require(
             not self._inject_answer_after_neither or bool(self._neither_answer_prefix),
             "neither_answer_prefix must be non-empty when decoder-side answer repair is enabled",
@@ -141,6 +147,10 @@ class AgenticRolloutEngine(BaseRolloutEngine):
         require(
             self._neither_answer_max_new_tokens > 0,
             "neither_answer_max_new_tokens must be positive",
+        )
+        require(
+            not self._nudge_answer_after_neither or bool(self._neither_answer_nudge),
+            "neither_answer_nudge must be non-empty when user-nudge rescue is enabled",
         )
         self._partial_rollout = bool(getattr(config, "partial_rollout", False))
         # Guard: the env's own turn bound (set independently in the recipe under
@@ -402,14 +412,14 @@ class AgenticRolloutEngine(BaseRolloutEngine):
                 # return); tool-only envs (calculator/search) omit it — a no-op here.
                 if isinstance(info, dict) and info.get("reward") is not None:
                     env_reward = float(info["reward"])
-                # A true NEITHER completion is an unfinished assistant message, not a
-                # reason to create another chat turn. Optionally repair it in-place:
-                # append ``<answer>`` to the exact token stream and sample one raw
-                # suffix ending at ``</answer>``. No user message or chat-template
-                # boundary is introduced. The continuation is a separate generated
-                # Part so injected prefix tokens never receive fabricated log-probs.
-                if self._inject_answer_after_neither and self._is_single_neither(info):
-                    return self._continue_neither_as_answer(sample, env_reward)
+                # A true NEITHER completion can use one of two opt-in rescue modes:
+                # the historical decoder-prefix continuation, or an intervention-
+                # aware user nudge followed by an ordinary fully sampled answer.
+                if self._is_single_neither(info):
+                    if self._nudge_answer_after_neither:
+                        return self._nudge_neither_as_answer(sample, env_reward)
+                    if self._inject_answer_after_neither:
+                        return self._continue_neither_as_answer(sample, env_reward)
                 if done:
                     # AReaL parity (LIN-564): the env signals ``done`` both for a real
                     # ``<answer>`` AND for hitting ``max_turns`` (tool_environment.py). If it's
@@ -564,6 +574,48 @@ class AgenticRolloutEngine(BaseRolloutEngine):
         ]
         repaired = _part_with_field(last, "metadata", metadata)
         sample = sample.with_parts([repaired if part is last else part for part in sample.parts])
+        return self._attach_env_reward(sample, env_reward), True
+
+    @staticmethod
+    def _mark_frontier(sample: Sample, **updates: Any) -> Sample:
+        """Copy ``sample`` with metadata updates on its generated frontier."""
+        last = sample.parts[-1]
+        require(last.is_gen, "answer-rescue metadata requires a generated frontier")
+        source = last.metadata or [{} for _ in range(last.batch_size)]
+        metadata = [{**(meta or {}), **updates} for meta in source]
+        marked = _part_with_field(last, "metadata", metadata)
+        return sample.with_parts([marked if part is last else part for part in sample.parts])
+
+    def _nudge_neither_as_answer(
+        self, sample: Sample, env_reward: Optional[float]
+    ) -> Tuple[Sample, bool]:
+        """Rescue one NEITHER turn with a user nudge and a full policy generation.
+
+        The controller contributes only an input observation. The policy samples
+        the complete assistant answer, including ``<answer>``, so replay owns real
+        log-probs for every required output token. Metadata creates an explicit
+        intervention boundary for trainer-side credit assignment.
+        """
+        sample = self._mark_frontier(
+            sample,
+            answer_rescue_trigger=True,
+            format_repair="neither_user_nudge",
+        )
+        sample = sample.observe(Texts(texts=[self._neither_answer_nudge]), role="user")
+        cap = min(int(self._sp.max_new_tokens), self._neither_answer_max_new_tokens)
+        if self._traj_token_budget is not None:
+            # ``_accumulated_tokens`` skips the newly appended input Part, so
+            # reserve a conservative chars/token estimate for the nudge itself.
+            nudge_tokens = max(1, len(self._neither_answer_nudge) // 3)
+            headroom = self._traj_token_budget - self._accumulated_tokens(sample) - nudge_tokens
+            cap = min(cap, max(1, headroom))
+        answer_sp = dataclasses.replace(self._sp, max_new_tokens=max(1, cap))
+        sample = self._inner.generate(sample.fork(1, sampling_params=answer_sp))
+        sample = self._mark_frontier(
+            sample,
+            answer_rescued=True,
+            format_repair="neither_user_nudge",
+        )
         return self._attach_env_reward(sample, env_reward), True
 
     def _pull(self, coordinator: Any, role_name: str) -> Optional[Sample]:

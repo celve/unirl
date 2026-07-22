@@ -94,6 +94,10 @@ def _render_trajectory(
     for i, part in enumerate(parts):
         text, truncated = _clip(_turn_text(part.primitive), max_chars)
         answer_injected = any(bool((m or {}).get("answer_injected")) for m in (part.metadata or []))
+        answer_rescued = any(bool((m or {}).get("answer_rescued")) for m in (part.metadata or []))
+        answer_rescue_trigger = any(
+            bool((m or {}).get("answer_rescue_trigger")) for m in (part.metadata or [])
+        )
         turns.append(
             {
                 "index": i,
@@ -102,6 +106,8 @@ def _render_trajectory(
                 "tokens": _turn_tokens(part),
                 "truncated": truncated,
                 "answer_injected": answer_injected,
+                "answer_rescued": answer_rescued,
+                "answer_rescue_trigger": answer_rescue_trigger,
                 "text": text,
             }
         )
@@ -135,8 +141,18 @@ def _render_trajectory(
             for part in traj.gen_parts()
             if not any(bool((m or {}).get("answer_injected")) for m in (part.metadata or []))
         ),
+        "num_autonomous_turns": sum(
+            1
+            for part in traj.gen_parts()
+            if not any(
+                bool((m or {}).get("answer_injected"))
+                or bool((m or {}).get("answer_rescued"))
+                for m in (part.metadata or [])
+            )
+        ),
         "num_parts": len(parts),
         "answer_injected": any(t["answer_injected"] for t in turns),
+        "answer_rescued": any(t["answer_rescued"] for t in turns),
         "prompt": _turn_text(root.primitive) if root is not None else None,
         "reference_answer": (root.metadata[0] or {}).get("answer") if (root is not None and root.metadata) else None,
         "has_answer_tag": has_answer_tag,

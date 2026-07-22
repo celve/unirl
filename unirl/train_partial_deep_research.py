@@ -48,6 +48,10 @@ def main(cfg: DictConfig) -> None:
         balance_shards=cfg.get("balance_shards", False),
         eval_interval=cfg.get("eval_interval", 0),
         stop=cfg.get("stop"),
+        mask_answer_rescue_trigger_task_credit=cfg.get(
+            "mask_answer_rescue_trigger_task_credit", False
+        ),
+        answer_rescue_trigger_penalty=cfg.get("answer_rescue_trigger_penalty", 0.0),
         oversample_batch_size=cfg.get("oversample_batch_size"),
         buffer_max_staleness=cfg.get("buffer_max_staleness"),
         tail_policy=cfg.get("tail_policy", "carry"),

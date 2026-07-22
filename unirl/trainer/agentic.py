@@ -65,7 +65,13 @@ def _extract_answer(text: Optional[str]) -> str:
     return text.strip()
 
 
-def _trajectory_token_counts(trajs: List[Sample]) -> torch.Tensor:
+def _part_has_metadata(part: Part, key: str) -> bool:
+    return any(bool((meta or {}).get(key)) for meta in (part.metadata or []))
+
+
+def _trajectory_token_counts(
+    trajs: List[Sample], *, exclude_answer_rescue_triggers: bool = False
+) -> torch.Tensor:
     """Generated-token count for each trajectory, summed across assistant turns.
 
     AReaL broadcasts the terminal reward onto every token selected by its loss
@@ -78,6 +84,8 @@ def _trajectory_token_counts(trajs: List[Sample]) -> torch.Tensor:
     for tr in trajs:
         count = 0
         for gp in tr.gen_parts():
+            if exclude_answer_rescue_triggers and _is_answer_rescue_trigger(gp):
+                continue
             segment = gp.segment
             if segment is None:
                 continue
@@ -94,7 +102,37 @@ def _trajectory_token_counts(trajs: List[Sample]) -> torch.Tensor:
 
 def _is_answer_repair(part: Part) -> bool:
     """Whether a generated Part is the decoder-prefix repair suffix."""
-    return any(bool((meta or {}).get("answer_injected")) for meta in (part.metadata or []))
+    return _part_has_metadata(part, "answer_injected")
+
+
+def _is_answer_rescue(part: Part) -> bool:
+    """Whether a full generated Part follows a user-side answer-rescue nudge."""
+    return _part_has_metadata(part, "answer_rescued")
+
+
+def _is_answer_rescue_trigger(part: Part) -> bool:
+    """Whether this NEITHER Part caused the controller's answer rescue."""
+    return _part_has_metadata(part, "answer_rescue_trigger")
+
+
+def _intervention_aware_advantage(
+    part: Part,
+    trajectory_advantage: float,
+    *,
+    mask_trigger_task_credit: bool,
+    trigger_penalty: float,
+) -> float:
+    """Per-Part credit across the user-rescue intervention boundary.
+
+    Earlier research and the fully sampled rescued answer keep the trajectory's
+    task advantage. The NEITHER Part that caused rescue is across the causal cut,
+    so it receives no downstream task credit at all; an optional small intervention
+    penalty makes rescue explicitly costly without treating its prose as the cause
+    of a later correct or incorrect answer.
+    """
+    if mask_trigger_task_credit and _is_answer_rescue_trigger(part):
+        return -float(trigger_penalty)
+    return float(trajectory_advantage)
 
 
 def _prepare_agentic_train_part(part: Part, advantage: float) -> Part:
@@ -171,6 +209,8 @@ class AgenticTrainer(ARTrainer):
         *,
         stop: Optional[List[str]] = None,
         no_stop_trim: bool = False,
+        mask_answer_rescue_trigger_task_credit: bool = False,
+        answer_rescue_trigger_penalty: float = 0.0,
         **kwargs,
     ) -> None:
         _validate_agentic_cfg(kwargs)
@@ -184,6 +224,14 @@ class AgenticTrainer(ARTrainer):
         # and the replay tokens agree. Keep false absent from the control bag below:
         # the established launcher must retain its exact request shape/semantics.
         self._no_stop_trim = bool(no_stop_trim)
+        self._mask_answer_rescue_trigger_task_credit = bool(mask_answer_rescue_trigger_task_credit)
+        self._answer_rescue_trigger_penalty = float(answer_rescue_trigger_penalty)
+        if self._answer_rescue_trigger_penalty < 0:
+            raise ValueError("answer_rescue_trigger_penalty must be non-negative")
+        if self._answer_rescue_trigger_penalty and not self._mask_answer_rescue_trigger_task_credit:
+            raise ValueError(
+                "answer_rescue_trigger_penalty requires mask_answer_rescue_trigger_task_credit=true"
+            )
         # Wire the rank-0 coordinator (``AgenticRolloutEngine.set_workers`` — the
         # ``NCCLWeightSync.set_rollout_targets`` shape). ``.workers`` / ``.role_name``
         # are ``Handle`` attributes.
@@ -271,6 +319,7 @@ class AgenticTrainer(ARTrainer):
         # batch-level masked normalization by weighting each terminal reward by
         # the number of generated tokens onto which AReaL broadcasts it.
         advantages, token_counts = self._compute_agentic_advantages(trajs, rewards, group_ids)
+        generated_token_counts = _trajectory_token_counts(trajs)
 
         # Debug: dump every trajectory of this rollout (decoded turns + reward/advantage)
         # when $TRAJ_DUMP_DIR is set — a no-op otherwise, and never raises. Placed BEFORE
@@ -289,24 +338,34 @@ class AgenticTrainer(ARTrainer):
                     continue
                 # Drop decoded/reward/diagnostic fields from the immutable training
                 # copy. The reward was already read into trajectory advantages.
-                train_parts.append(_prepare_agentic_train_part(gp, adv_i))
+                part_advantage = _intervention_aware_advantage(
+                    gp,
+                    adv_i,
+                    mask_trigger_task_credit=self._mask_answer_rescue_trigger_task_credit,
+                    trigger_penalty=self._answer_rescue_trigger_penalty,
+                )
+                train_parts.append(_prepare_agentic_train_part(gp, part_advantage))
 
         depths = [len(tr.gen_parts()) for tr in trajs]
         repair_counts = [sum(1 for gp in tr.gen_parts() if _is_answer_repair(gp)) for tr in trajs]
+        rescue_counts = [sum(1 for gp in tr.gen_parts() if _is_answer_rescue(gp)) for tr in trajs]
         # A repair is a second physical decode/Part for honest log-prob ownership,
         # but semantically continues the same assistant turn. Report both depths so
         # the experiment cannot claim a mechanical +1 as learned tool-use depth.
         logical_depths = [depth - repairs for depth, repairs in zip(depths, repair_counts)]
+        autonomous_depths = [depth - rescue for depth, rescue in zip(logical_depths, rescue_counts)]
         # Per-trajectory turn distribution — the workload's depth VARIANCE (a straggler-cut only
         # pays when this is wide; ~uniform means over-sample-and-drop is pure waste). LIN-531.
         logger.info(
             "rollout %d trajectory turns: n=%d physical_mean=%.2f logical_mean=%.2f "
-            "repairs=%d min=%d max=%d hist=%s",
+            "autonomous_mean=%.2f injected=%d rescued=%d min=%d max=%d hist=%s",
             rollout_id,
             len(depths),
             (sum(depths) / len(depths)) if depths else 0.0,
             (sum(logical_depths) / len(logical_depths)) if logical_depths else 0.0,
+            (sum(autonomous_depths) / len(autonomous_depths)) if autonomous_depths else 0.0,
             sum(repair_counts),
+            sum(rescue_counts),
             min(depths, default=0),
             max(depths, default=0),
             dict(sorted(Counter(depths).items())),
@@ -329,6 +388,9 @@ class AgenticTrainer(ARTrainer):
             "agent/mean_logical_turns": (
                 (sum(logical_depths) / len(logical_depths)) if logical_depths else 0.0
             ),
+            "agent/mean_autonomous_turns": (
+                (sum(autonomous_depths) / len(autonomous_depths)) if autonomous_depths else 0.0
+            ),
             "agent/max_turns": max(depths) if depths else 0,
             "agent/answer_injected_count": sum(repair_counts),
             "agent/answer_injected_rate": (
@@ -336,10 +398,23 @@ class AgenticTrainer(ARTrainer):
                 if repair_counts
                 else 0.0
             ),
+            "agent/answer_rescued_count": sum(rescue_counts),
+            "agent/answer_rescued_rate": (
+                sum(1 for count in rescue_counts if count > 0) / len(rescue_counts)
+                if rescue_counts
+                else 0.0
+            ),
             "agent/genless_trajectories": sum(1 for d in depths if d == 0),
             "agent/train_rows": int(train_part.batch_size),
-            "agent/mean_gen_tokens": float(token_counts.float().mean().item()) if token_counts.numel() else 0.0,
-            "agent/max_gen_tokens": int(token_counts.max().item()) if token_counts.numel() else 0,
+            "agent/mean_gen_tokens": (
+                float(generated_token_counts.float().mean().item()) if generated_token_counts.numel() else 0.0
+            ),
+            "agent/max_gen_tokens": (
+                int(generated_token_counts.max().item()) if generated_token_counts.numel() else 0
+            ),
+            "agent/mean_task_credit_tokens": (
+                float(token_counts.float().mean().item()) if token_counts.numel() else 0.0
+            ),
         }
         token_valid = finite & (token_counts.to(device=rewards.device) > 0)
         if bool(token_valid.any()):
@@ -431,7 +506,14 @@ class AgenticTrainer(ARTrainer):
         self, trajs: List[Sample], rewards: torch.Tensor, group_ids: List[str]
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Return per-trajectory advantages and generated-token multiplicities."""
-        token_counts = _trajectory_token_counts(trajs)
+        # A user-rescue trigger is across the task-credit boundary. Exclude its
+        # tokens from token-global normalization as well as masking downstream task
+        # advantage on its Part; its separate constant intervention penalty is an
+        # auxiliary objective and deliberately does not shift the task mean/std.
+        token_counts = _trajectory_token_counts(
+            trajs,
+            exclude_answer_rescue_triggers=self._mask_answer_rescue_trigger_task_credit,
+        )
         return self._group_advantages(rewards, group_ids, token_counts=token_counts), token_counts
 
     def _group_advantages(

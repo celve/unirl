@@ -74,6 +74,26 @@ class _ContinuationInnerConfig(BaseEngineConfig):
         return _ContinuationFakeEngine()
 
 
+class _NudgeFakeEngine(FakeEngine):
+    """Two ordinary decodes: NEITHER first, fully tagged answer after the nudge."""
+
+    def __init__(self) -> None:
+        super().__init__(concurrency=1, yields=0)
+        self.generate_requests: List[Sample] = []
+
+    def generate(self, sample):
+        self.generate_requests.append(sample)
+        text = "untagged answer" if len(self.generate_requests) == 1 else "<answer>policy answer</answer>"
+        filled = sample.with_filled_frontier(primitive=Texts(texts=[text]))
+        return self._stamp_weight_version(filled)
+
+
+@dataclass
+class _NudgeInnerConfig(BaseEngineConfig):
+    def make_engine(self, **deps: Any) -> _NudgeFakeEngine:
+        return _NudgeFakeEngine()
+
+
 class FakeEnv:
     """Re-entrant multi-turn env: terminate after ``turns_for(root_id)`` turns.
 
@@ -265,6 +285,52 @@ def test_neither_repair_is_disabled_by_default():
     assert done is True and len(traj.gen_parts()) == 2
     assert not engine._inner.continuations
     engine.shutdown()
+
+
+def test_neither_user_nudge_samples_complete_answer_and_marks_credit_boundary():
+    cfg = AgenticRolloutEngineConfig(
+        inner=_NudgeInnerConfig(),
+        env=_NeitherEnv(),
+        max_turns=8,
+        episode_sampling=ARSamplingParams(samples_per_prompt=1, max_new_tokens=8192),
+        per_worker_concurrency=1,
+        nudge_answer_after_neither=True,
+        neither_answer_nudge="answer now with tags",
+        neither_answer_max_new_tokens=384,
+    )
+    engine = AgenticRolloutEngine(cfg, rank=0)
+    traj, done = engine._run_one(_req("p0"))
+
+    assert done is True
+    assert [part.resolved_role() for part in traj.parts] == [
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+    ]
+    trigger, nudge, rescued = traj.parts[1:]
+    assert trigger.metadata[0]["answer_rescue_trigger"] is True
+    assert nudge.primitive.texts == ["answer now with tags"]
+    assert rescued.metadata[0]["answer_rescued"] is True
+    assert rescued.primitive.texts == ["<answer>policy answer</answer>"]
+    inner = engine._inner
+    assert isinstance(inner, _NudgeFakeEngine)
+    assert len(inner.generate_requests) == 2
+    assert inner.generate_requests[-1].parts[-1].sampling_params.max_new_tokens == 384
+    engine.shutdown()
+
+
+def test_neither_answer_rescue_modes_are_mutually_exclusive():
+    cfg = AgenticRolloutEngineConfig(
+        inner=_NudgeInnerConfig(),
+        env=_NeitherEnv(),
+        max_turns=2,
+        episode_sampling=ARSamplingParams(samples_per_prompt=1),
+        inject_answer_after_neither=True,
+        nudge_answer_after_neither=True,
+    )
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        AgenticRolloutEngine(cfg, rank=0)
 
 
 def test_force_answer_guard_caps_trajectory_at_budget(monkeypatch):

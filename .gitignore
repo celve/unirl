@@ -75,6 +75,8 @@ unirl/reward/local/**/__pycache__/
 *.out
 *.pkl
 *.log
+# Pod-local runtime secrets used by LIN experiment launchers.
+.lin564*.env
 
 # Datasets: keep the committed pickscore prompts, ignore other (local-only) datasets
 datasets/*

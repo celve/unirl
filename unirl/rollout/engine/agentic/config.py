@@ -76,6 +76,21 @@ class AgenticRolloutEngineConfig(BaseEngineConfig):
     #: Maximum sampled suffix length for the one-shot repair continuation.
     neither_answer_max_new_tokens: int = 1024
 
+    #: Intervention-aware answer rescue for a true NEITHER generation. Unlike
+    #: ``inject_answer_after_neither``, this appends a user-side format nudge and
+    #: performs an ordinary generation, so the policy itself samples the complete
+    #: ``<answer>...</answer>`` response (including the opener). The triggering
+    #: NEITHER and rescued answer are marked separately for trainer-side credit.
+    nudge_answer_after_neither: bool = False
+    #: User observation used by the one-shot NEITHER rescue. Kept configurable so
+    #: experiments can match an external controller without changing engine code.
+    neither_answer_nudge: str = (
+        "Your previous response did not use the required final-answer tags. Stop "
+        "making tool calls and, based on all the information above, provide your "
+        "most likely answer in the following format:"
+        "<think>your final thinking</think>\n<answer>your answer</answer>"
+    )
+
     def make_engine(self, **deps: Any):
         """Construct the runtime :class:`AgenticRolloutEngine` (lazy import)."""
         from unirl.rollout.engine.agentic.engine import AgenticRolloutEngine

@@ -1,7 +1,7 @@
 """VisitTool — read webpage(s) and summarize toward a goal (LIN-519, hardened).
 
 A concrete :class:`~unirl.rollout.loop.tools.tool.Tool` for the deep-research
-agent: fetch a URL's content with the Jina reader (needs ``$JINA_API_KEYS``) and
+agent: fetch a URL's content with direct Jina or the Polaris Jina provider and
 summarize the parts relevant to a stated goal with an OpenAI-compatible LLM
 (hosted out-of-band; ``$SUMMARY_URL`` / ``$SUMMARY_MODEL`` or the constructor
 args — the same endpoint the judge uses). ``execute`` is synchronous and
@@ -24,6 +24,11 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
+from unirl.rollout.loop.tools.polaris import (
+    POLARIS_JINA_URL,
+    is_transient_request_error,
+    polaris_headers,
+)
 from unirl.rollout.loop.tools.tool import Tool
 
 _JINA_READ = "https://r.jina.ai/"
@@ -69,7 +74,9 @@ class VisitTool(Tool):
         *,
         endpoint: str = "",
         model: str = "",
-        timeout: float = 60.0,
+        timeout: float = 65.0,
+        reader_provider: str = "direct",
+        reader_url: str = "",
         # Page content sent to the summarizer per URL. Must fit the summarizer's own
         # context: our judge/summarizer serves at ctx 8192, so ~14000 chars (~4000
         # tokens) + the extractor prompt leaves room for the evidence/summary output.
@@ -83,6 +90,8 @@ class VisitTool(Tool):
         self._endpoint = endpoint
         self._model = model
         self._timeout = float(timeout)
+        self._reader_provider = os.environ.get("JINA_PROVIDER", reader_provider).lower()
+        self._reader_url = reader_url
         self._max_content_chars = int(max_content_chars)
         self._max_read_retries = max(1, int(max_read_retries))
         self._max_summary_retries = max(1, int(max_summary_retries))
@@ -136,20 +145,55 @@ class VisitTool(Tool):
     def _read(self, url: str) -> str:
         """Fetch page text via Jina, retrying on transient failures. Errors are
         returned as ``[visit] ...`` text (surfaced to the model), never raised."""
-        key = os.environ.get("JINA_API_KEYS", "")
-        headers = {"Authorization": f"Bearer {key}"} if key else {}
         last = f"[visit] failed to read {url}"
-        for _ in range(self._max_read_retries):
+        for attempt in range(self._max_read_retries):
             try:
-                resp = requests.get(_JINA_READ + url, headers=headers, timeout=self._timeout)
+                if self._reader_provider == "jina_ai":
+                    headers = polaris_headers("jina_ai")
+                    if headers is None:
+                        raise RuntimeError("Jina Polaris authentication is not configured")
+                    resp = requests.post(
+                        # Never send Polaris app credentials to an environment-
+                        # overridden endpoint.
+                        POLARIS_JINA_URL,
+                        json={"url": url},
+                        headers=headers,
+                        timeout=self._timeout,
+                    )
+                elif self._reader_provider == "direct":
+                    key = os.environ.get("JINA_API_KEYS", "")
+                    headers = {"Authorization": f"Bearer {key}"} if key else {}
+                    resp = requests.get(_JINA_READ + url, headers=headers, timeout=self._timeout)
+                else:
+                    raise RuntimeError(f"unsupported Jina reader provider: {self._reader_provider!r}")
                 resp.raise_for_status()
                 text = resp.text
+                if self._reader_provider == "jina_ai":
+                    # Polaris wraps Jina's reader result as
+                    # {"code": 200, "data": {"content": "..."}}.
+                    try:
+                        payload = resp.json()
+                    except ValueError:
+                        pass  # tolerate a future raw-text gateway response
+                    else:
+                        data = payload.get("data") if isinstance(payload, dict) else None
+                        content = data.get("content") if isinstance(data, dict) else None
+                        if not isinstance(payload, dict) or payload.get("code") != 200:
+                            raise RuntimeError("Jina Polaris returned an application error")
+                        if not isinstance(content, str) or not content.strip():
+                            raise RuntimeError("Jina Polaris response is missing page content")
+                        text = content
                 if text and text.strip():
                     return text
                 last = f"[visit] empty content for {url}"
-            except Exception as exc:  # noqa: BLE001 — surfaced to the model as text, not raised
-                last = f"[visit] failed to read {url}: {exc}"
-            time.sleep(0.5)
+            except Exception as exc:  # noqa: BLE001 — convert to credential-safe tool text
+                # Raw exception strings can contain request headers under custom
+                # adapters/proxies, so keep the sentinel deliberately generic.
+                last = f"[visit] failed to read {url}: request failed"
+                if not is_transient_request_error(exc):
+                    return last
+            if attempt + 1 < self._max_read_retries:
+                time.sleep(0.5)
         return last
 
     def _summarize(self, content: str, goal: str) -> str:

@@ -8,8 +8,9 @@ as text. Two providers, selected by ``$SEARCH_PROVIDER`` (or the constructor):
 - ``serpapi``          : SerpApi — ``GET serpapi.com`` with an ``api_key`` param.
 
 The serper endpoint is overridable for gateways/proxies that speak the same
-response shape: ``$SERPER_URL`` swaps the base URL, and ``$SERPER_AUTH=bearer``
-sends the key as ``Authorization: Bearer <key>`` instead of ``X-API-KEY``.
+response shape. ``$SERPER_AUTH=polaris`` selects the fixed internal gateway and
+uses ``$POLARIS_APP_ID`` + ``$POLARIS_APP_KEY`` to synthesize the provider-scoped
+bearer token at request time. Legacy bearer and public Serper remain supported.
 
 Both read the API key from ``$SERPER_KEY_ID``. ``execute`` is synchronous and
 thread-safe (it holds no state) so it runs cleanly under
@@ -24,6 +25,11 @@ from typing import Any, Dict, List
 
 import requests
 
+from unirl.rollout.loop.tools.polaris import (
+    POLARIS_SERPER_URL,
+    is_transient_request_error,
+    polaris_headers,
+)
 from unirl.rollout.loop.tools.tool import Tool
 
 _SERPER_URL = "https://google.serper.dev/search"
@@ -41,7 +47,7 @@ class SearchTool(Tool):
         self,
         *,
         top_k: int = 10,
-        timeout: float = 30.0,
+        timeout: float = 65.0,
         provider: str = "serper",
         max_retries: int = 3,
     ) -> None:
@@ -99,25 +105,45 @@ class SearchTool(Tool):
             )
             resp.raise_for_status()
             return resp.json().get("organic_results") or []
-        url = os.environ.get("SERPER_URL", _SERPER_URL)
+        auth_mode = os.environ.get("SERPER_AUTH", "").lower()
         headers = {"Content-Type": "application/json"}
-        if os.environ.get("SERPER_AUTH", "").lower() == "bearer":
-            headers["Authorization"] = f"Bearer {key}"
+        if auth_mode == "polaris":
+            # Never send Polaris app credentials to an environment-overridden URL.
+            url = POLARIS_SERPER_URL
+            headers = polaris_headers("serper")
+            if headers is None:
+                raise RuntimeError("Serper Polaris authentication is not configured")
         else:
-            headers["X-API-KEY"] = key
-        resp = requests.post(url, json={"q": query}, headers=headers, timeout=self._timeout)
+            url = os.environ.get("SERPER_URL", _SERPER_URL)
+            if auth_mode == "bearer":
+                if not key:
+                    raise RuntimeError("SERPER_AUTH=bearer requires SERPER_KEY_ID")
+                headers["Authorization"] = f"Bearer {key}"
+            else:
+                headers["X-API-KEY"] = key
+        resp = requests.post(
+            url,
+            json={"q": query, "num": self._top_k},
+            headers=headers,
+            timeout=self._timeout,
+        )
         resp.raise_for_status()
         return resp.json().get("organic") or []
 
     def _search_one(self, query: str) -> str:
         last = f"[search] error for {query!r}"
-        for _ in range(self._max_retries):
+        for attempt in range(self._max_retries):
             try:
                 organic = self._fetch_organic(query)
                 break
-            except Exception as exc:  # noqa: BLE001 — surfaced to the model as text, not raised
-                last = f"[search] error for {query!r}: {exc}"
-                time.sleep(0.5)
+            except Exception as exc:  # noqa: BLE001 — convert to credential-safe tool text
+                # Do not surface raw exception strings: HTTP adapters and gateway
+                # proxies may include Authorization headers in them.
+                last = f"[search] error for {query!r}: request failed"
+                if not is_transient_request_error(exc):
+                    return last
+                if attempt + 1 < self._max_retries:
+                    time.sleep(0.5)
         else:
             return last
         if not organic:

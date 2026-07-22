@@ -37,8 +37,6 @@ RUN_DIR=${LIN564_RUN_DIR:-/mnt/gz/logs/$RUN_NAME}
 readonly ROOT MODEL DATA PYTHON RUN_NAME RUN_DIR
 
 : "${JUDGE_HOST:?set JUDGE_HOST to the live Qwen2.5-72B service IP}"
-: "${SERPER_KEY_ID:?missing SERPER_KEY_ID in $ENV_FILE}"
-: "${JINA_API_KEYS:?missing JINA_API_KEYS in $ENV_FILE}"
 : "${WANDB_API_KEY:?missing WANDB_API_KEY in $ENV_FILE}"
 
 export http_proxy=http://star-proxy.oa.com:3128
@@ -53,8 +51,24 @@ export PRETRAINED_MODEL=$MODEL
 export QWEN3_INSTRUCT_PATH=$MODEL
 export DATA_PATH=$DATA
 export EVAL_DATA_PATH=$DATA
-export SERPER_URL=${SERPER_URL:-http://trpc-gpt-eval.production.polaris:8080/search}
-export SERPER_AUTH=${SERPER_AUTH:-bearer}
+readonly POLARIS_GATEWAY_URL=http://trpc-gpt-eval.production.polaris:8080
+if [[ -n ${POLARIS_APP_ID:-} || -n ${POLARIS_APP_KEY:-} ]]; then
+  : "${POLARIS_APP_ID:?missing POLARIS_APP_ID in $ENV_FILE}"
+  : "${POLARIS_APP_KEY:?missing POLARIS_APP_KEY in $ENV_FILE}"
+  export POLARIS_PROVIDER_TIMEOUT=${POLARIS_PROVIDER_TIMEOUT:-60}
+  export SEARCH_PROVIDER=serper
+  export SERPER_URL=$POLARIS_GATEWAY_URL/search
+  export SERPER_AUTH=polaris
+  export JINA_PROVIDER=jina_ai
+  export JINA_READER_URL=$POLARIS_GATEWAY_URL/
+  unset SERPER_APP_ID SERPER_APP_KEY JINA_APP_ID JINA_APP_KEY
+else
+  : "${SERPER_KEY_ID:?missing SERPER_KEY_ID or Polaris app pair in $ENV_FILE}"
+  : "${JINA_API_KEYS:?missing JINA_API_KEYS or Polaris app pair in $ENV_FILE}"
+  export SERPER_URL=${SERPER_URL:-$POLARIS_GATEWAY_URL/search}
+  export SERPER_AUTH=${SERPER_AUTH:-bearer}
+  export JINA_PROVIDER=${JINA_PROVIDER:-direct}
+fi
 export JUDGE_URL=http://$JUDGE_HOST:30000/v1/chat/completions
 export JUDGE_MODEL=Qwen2.5-72B-Instruct
 export SUMMARY_URL=$JUDGE_URL

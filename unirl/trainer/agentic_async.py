@@ -51,7 +51,14 @@ from omegaconf import DictConfig
 
 from unirl.distributed.group.placement import placement, remote
 from unirl.train.stack import TrainStepResult
-from unirl.trainer.agentic import AgenticTrainer, _is_answer_repair, _prepare_agentic_train_part
+from unirl.trainer.agentic import (
+    AgenticTrainer,
+    _intervention_aware_advantage,
+    _is_answer_repair,
+    _is_answer_rescue,
+    _prepare_agentic_train_part,
+    _trajectory_token_counts,
+)
 from unirl.trainer.base import BaseTrainer, build_sampling_dict
 from unirl.types.sample import Part, Sample
 from unirl.types.sampling import BaseSamplingParams
@@ -179,6 +186,8 @@ class AsyncAgenticTrainer(AgenticTrainer):
         adv_normalization_scope: str = "group",
         normalize_adv_by_std: bool = True,
         stop: Optional[List[str]] = None,
+        mask_answer_rescue_trigger_task_credit: bool = False,
+        answer_rescue_trigger_penalty: float = 0.0,
         # ---- async knobs ----
         train_fraction: float = 0.5,
         oversample_batch_size: Optional[int] = None,
@@ -199,6 +208,16 @@ class AsyncAgenticTrainer(AgenticTrainer):
         self.weight_sync = None
         # Per-turn stop (AgenticTrainer.__init__): a tool-call turn ends at ``</tool_call>``.
         self._stop = list(stop) if stop else ["</tool_call>"]
+        self._mask_answer_rescue_trigger_task_credit = bool(
+            mask_answer_rescue_trigger_task_credit
+        )
+        self._answer_rescue_trigger_penalty = float(answer_rescue_trigger_penalty)
+        if self._answer_rescue_trigger_penalty < 0:
+            raise ValueError("answer_rescue_trigger_penalty must be non-negative")
+        if self._answer_rescue_trigger_penalty and not self._mask_answer_rescue_trigger_task_credit:
+            raise ValueError(
+                "answer_rescue_trigger_penalty requires mask_answer_rescue_trigger_task_credit=true"
+            )
 
         # ---- async state ----
         self._train_fraction = float(train_fraction)
@@ -356,6 +375,7 @@ class AsyncAgenticTrainer(AgenticTrainer):
         finite = torch.isfinite(rewards)
         mean_reward = float(rewards[finite].mean().item()) if bool(finite.any()) else 0.0
         advantages, token_counts = self._compute_agentic_advantages(trajs, rewards, group_ids)
+        generated_token_counts = _trajectory_token_counts(trajs)
 
         train_parts: List[Part] = []
         for i, tr in enumerate(trajs):
@@ -363,11 +383,19 @@ class AsyncAgenticTrainer(AgenticTrainer):
             for gp in tr.gen_parts():
                 if gp.segment is None or gp.segment.lengths is None or int(gp.segment.lengths.sum().item()) == 0:
                     continue
-                train_parts.append(_prepare_agentic_train_part(gp, adv_i))
+                part_advantage = _intervention_aware_advantage(
+                    gp,
+                    adv_i,
+                    mask_trigger_task_credit=self._mask_answer_rescue_trigger_task_credit,
+                    trigger_penalty=self._answer_rescue_trigger_penalty,
+                )
+                train_parts.append(_prepare_agentic_train_part(gp, part_advantage))
 
         depths = [len(tr.gen_parts()) for tr in trajs]
         repair_counts = [sum(1 for gp in tr.gen_parts() if _is_answer_repair(gp)) for tr in trajs]
+        rescue_counts = [sum(1 for gp in tr.gen_parts() if _is_answer_rescue(gp)) for tr in trajs]
         logical_depths = [depth - repairs for depth, repairs in zip(depths, repair_counts)]
+        autonomous_depths = [depth - rescue for depth, rescue in zip(logical_depths, rescue_counts)]
         if not train_parts:
             logger.warning("AsyncAgenticTrainer rollout %d produced no trainable turns.", rollout_id)
             return TrainStepResult(0.0, 0.0, 0.0, False, [], {}), mean_reward
@@ -387,6 +415,9 @@ class AsyncAgenticTrainer(AgenticTrainer):
                 "agent/mean_logical_turns": (
                     (sum(logical_depths) / len(logical_depths)) if logical_depths else 0.0
                 ),
+                "agent/mean_autonomous_turns": (
+                    (sum(autonomous_depths) / len(autonomous_depths)) if autonomous_depths else 0.0
+                ),
                 "agent/max_turns": max(depths) if depths else 0,
                 "agent/answer_injected_count": sum(repair_counts),
                 "agent/answer_injected_rate": (
@@ -394,8 +425,23 @@ class AsyncAgenticTrainer(AgenticTrainer):
                     if repair_counts
                     else 0.0
                 ),
-                "agent/mean_gen_tokens": float(token_counts.float().mean().item()) if token_counts.numel() else 0.0,
-                "agent/max_gen_tokens": int(token_counts.max().item()) if token_counts.numel() else 0,
+                "agent/answer_rescued_count": sum(rescue_counts),
+                "agent/answer_rescued_rate": (
+                    sum(1 for count in rescue_counts if count > 0) / len(rescue_counts)
+                    if rescue_counts
+                    else 0.0
+                ),
+                "agent/mean_gen_tokens": (
+                    float(generated_token_counts.float().mean().item())
+                    if generated_token_counts.numel()
+                    else 0.0
+                ),
+                "agent/max_gen_tokens": (
+                    int(generated_token_counts.max().item()) if generated_token_counts.numel() else 0
+                ),
+                "agent/mean_task_credit_tokens": (
+                    float(token_counts.float().mean().item()) if token_counts.numel() else 0.0
+                ),
                 "async/buffer_groups": self._buffer.size(),
                 "async/weight_version": self._weight_version,
                 "async/version_span": (max(versions) - min(versions)) if versions else 0,

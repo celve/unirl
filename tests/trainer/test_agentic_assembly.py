@@ -20,7 +20,10 @@ from unirl.distributed.tensor import TensorRef, TensorSpan  # noqa: E402
 from unirl.trainer.agentic import (  # noqa: E402
     AgenticTrainer,
     _extract_answer,
+    _intervention_aware_advantage,
     _is_answer_repair,
+    _is_answer_rescue,
+    _is_answer_rescue_trigger,
     _prepare_agentic_train_part,
     _trajectory_token_counts,
 )
@@ -144,6 +147,57 @@ def test_train_assembly_strips_heterogeneous_repair_metadata_without_losing_sour
     assert _is_answer_repair(repair) is True
     assert repair.metadata[0]["answer_injected"] is True
     assert repair.primitive.texts == ["<answer>42</answer>"]
+
+
+def test_user_rescue_credit_boundary_and_task_token_counts():
+    research = Part(
+        sample_ids=["r"],
+        segment=TextSegment.pack(tokens=[torch.tensor([1, 2])], log_probs=[torch.zeros(2)]),
+        metadata=[],
+    )
+    trigger = Part(
+        sample_ids=["t"],
+        segment=TextSegment.pack(tokens=[torch.tensor([3, 4, 5])], log_probs=[torch.zeros(3)]),
+        metadata=[{"answer_rescue_trigger": True}],
+    )
+    rescued = Part(
+        sample_ids=["a"],
+        segment=TextSegment.pack(tokens=[torch.tensor([6, 7])], log_probs=[torch.zeros(2)]),
+        metadata=[{"answer_rescued": True}],
+    )
+    traj = SimpleNamespace(gen_parts=lambda: [research, trigger, rescued])
+
+    assert _is_answer_rescue_trigger(trigger) is True
+    assert _is_answer_rescue(rescued) is True
+    assert _trajectory_token_counts([traj]).item() == 7
+    assert _trajectory_token_counts([traj], exclude_answer_rescue_triggers=True).item() == 4
+
+    for trajectory_advantage in (2.0, -2.0):
+        assert _intervention_aware_advantage(
+            research,
+            trajectory_advantage,
+            mask_trigger_task_credit=True,
+            trigger_penalty=0.05,
+        ) == trajectory_advantage
+        assert _intervention_aware_advantage(
+            rescued,
+            trajectory_advantage,
+            mask_trigger_task_credit=True,
+            trigger_penalty=0.05,
+        ) == trajectory_advantage
+        assert _intervention_aware_advantage(
+            trigger,
+            trajectory_advantage,
+            mask_trigger_task_credit=True,
+            trigger_penalty=0.05,
+        ) == pytest.approx(-0.05)
+
+    assert _intervention_aware_advantage(
+        trigger,
+        2.0,
+        mask_trigger_task_credit=False,
+        trigger_penalty=0.0,
+    ) == 2.0
 
 
 # --------------------------------------------------------------------------- #

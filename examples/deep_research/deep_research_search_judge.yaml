@@ -7,8 +7,9 @@
 # Prerequisites (operational — set on the pod):
 #   - QWEN3_INSTRUCT_PATH : local Qwen3-Instruct checkpoint dir
 #   - DATA_PATH           : ASearcher jsonl (python -m unirl.utils.prepare_asearcher --out-dir data/asearcher)
-#   - SERPER_KEY_ID       : Serper web-search API key (search tool)
-#   - JINA_API_KEYS       : Jina reader key (visit tool)
+#   - POLARIS_APP_ID / POLARIS_APP_KEY: shared gateway credentials for the
+#                            Serper search and Jina reader providers (preferred)
+#   - SERPER_KEY_ID / JINA_API_KEYS: legacy direct-provider credentials
 #   - JUDGE_URL/JUDGE_MODEL: an OpenAI-compatible judge endpoint (e.g. a separate
 #                            SGLang/vLLM server hosting Qwen2.5-72B-Instruct)
 #   - SUMMARY_URL/SUMMARY_MODEL (optional): summarizer for the visit tool (the judge
@@ -19,8 +20,10 @@
 #   SERPER_KEY_ID=... JINA_API_KEYS=... JUDGE_URL=... JUDGE_MODEL=... \
 #   python -m unirl.train_deep_research --config-name=deep_research/deep_research_search_judge num_devices=2
 #
-# Serper via a gateway/proxy (non-serper.dev endpoint): set SERPER_URL to the proxy
-#   and SERPER_AUTH=bearer to send the key as ``Authorization: Bearer <SERPER_KEY_ID>``.
+# Polaris gateway: set SERPER_AUTH=polaris, JINA_PROVIDER=jina_ai, and
+#   POLARIS_APP_ID/POLARIS_APP_KEY. The tools use the fixed internal URLs and
+#   synthesize provider-scoped bearer tokens at request time; secrets must remain
+#   in a pod-local environment file.
 # Debug: set TRAJ_DUMP_DIR=/abs/path to dump every trajectory of every rollout to
 #   <dir>/rollout_<id>.jsonl — one line per sample (decoded turns + reward + advantage).
 #   TRAJ_DUMP_MAX_CHARS>0 caps per-turn text (default 0 = full).
@@ -46,6 +49,10 @@ no_stop_trim: false
 
 adv_normalization_scope: token-global # exact AReaL loss-mask/token-weighted batch normalization
 normalize_adv_by_std: true
+# Intervention-aware credit for the optional user-nudge NEITHER rescue. Existing
+# recipes remain byte-identical unless explicitly enabled by a launcher.
+mask_answer_rescue_trigger_task_credit: false
+answer_rescue_trigger_penalty: 0.0
 
 logging:
   report_to_wandb: true
@@ -107,6 +114,9 @@ rollout:
     # continued from exact assistant token ids after injecting <answer>, without
     # adding a synthetic user/chat turn. Keep false for baseline recipes.
     inject_answer_after_neither: false
+    # Safer alternative: add a user observation and sample a complete answer turn,
+    # including the <answer> opener. Mutually exclusive with decoder-prefix repair.
+    nudge_answer_after_neither: false
     neither_answer_prefix: "\n<answer>"
     neither_answer_stop: "</answer>"
     neither_answer_max_new_tokens: 1024
@@ -165,9 +175,14 @@ rollout:
       tools:
         - _target_: unirl.rollout.loop.tools.search.SearchTool
           top_k: 10
+          timeout: 65
+          provider: serper
         - _target_: unirl.rollout.loop.tools.visit.VisitTool
           endpoint: ${oc.env:SUMMARY_URL,""}
           model: ${oc.env:SUMMARY_MODEL,""}
+          timeout: 65
+          reader_provider: ${oc.env:JINA_PROVIDER,direct}
+          reader_url: ${oc.env:JINA_READER_URL,""}
     episode_sampling:
       _target_: unirl.types.sampling.ARSamplingParams
       samples_per_prompt: 8
