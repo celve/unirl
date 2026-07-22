@@ -10,9 +10,14 @@
 # WHAT THIS VALIDATES / WHAT IT DOES NOT
 #   validates: the ti2i rollout path end-to-end under a real RL loop —
 #     condition-image ingestion, the image_latent/image_latent_ids capture, and
-#     (because algorithm.old_logp_source=replay) that those captured conditions
-#     actually feed Flux2KleinDiffusionStage.replay to produce the pi_old anchor.
-#     A broken conditions round-trip shows up here as a broken GRPO ratio.
+#     that those captured conditions feed Flux2KleinDiffusionStage.replay
+#     coherently enough to produce a usable pi_old anchor and a learning signal.
+#   does NOT validate: numerical rollout<->replay log-prob parity. With
+#     old_logp_source=replay BOTH pi_old and the current-policy log-prob come
+#     from the same replay path, so the GRPO ratio would sit at ~1 even if the
+#     captured conditions were wrong — it shows replay is self-consistent, not
+#     that it matches what the engine actually sampled under. The real parity
+#     gate compares replay against the engine's emitted trajectory_log_probs.
 #   does NOT validate: edit QUALITY. PickScore scores text<->image alignment and
 #     never sees the source image, so the policy can raise reward by drifting
 #     away from the source toward a generic match for the instruction text.
@@ -103,7 +108,12 @@ backend:
     use_torch_compile: false
   optimizer_cfg:
     _target_: unirl.train.backend.base.OptimizerConfig
-    learning_rate: 5.0e-5
+    # 5e-5 is flux2_klein_sglang.yaml's value, tuned for a 10k-rollout run. With
+    # LoRA's B zero-initialised and Adam stepping ~lr per update, 120 updates at
+    # 5e-5 move the weights ~6e-3 — never out of the zero neighbourhood, which is
+    # exactly what the first attempt showed (grad_norm flat at 5e-4, policy
+    # log-probs moving 2e-5 per step, reward flat). Scaled for a 60-rollout run.
+    learning_rate: 1.0e-3
     adam_beta1: 0.9
     adam_beta2: 0.999
     adam_epsilon: 1.0e-8
@@ -186,7 +196,8 @@ reward:
 algorithm:
   _target_: unirl.algorithms.flowgrpo.FlowGRPO
   stage_attr: diffusion
-  clip_range: 5.0e-3
+  # Loosened with the LR: at 5e-3 a larger policy move would be clipped away.
+  clip_range: 5.0e-2
   clip_schedule: constant
   # replay: the trainer recomputes the pi_old anchor via
   # Flux2KleinDiffusionStage.replay, conditioned on the engine-captured
@@ -231,8 +242,11 @@ sampling:
   scheduler:
     _target_: unirl.utils.scheduler_utils.AllSDEScheduler
     num_timesteps: ${..num_inference_steps}
-    num_sde_steps: 3
-    timestep_fraction: [0, 0.5]
+    # Every step SDE across the whole schedule: each SDE step contributes a
+    # log-prob term to the objective, so 8/8 gives ~2.7x the gradient signal per
+    # rollout of the 3-step early window. Costs a denser stored trajectory.
+    num_sde_steps: 8
+    timestep_fraction: [0, 1]
 
 weight_sync_interval: 1
 
