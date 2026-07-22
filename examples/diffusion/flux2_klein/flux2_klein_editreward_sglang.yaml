@@ -18,12 +18,19 @@
 # adapter branches on the presence of primitives["image"]. So model_family stays
 # `flux2_klein` — same as the t2i recipe.
 #
-# Source images must share ONE resolution across a batch. Mixed shapes now raise
-# at collate (MultimodalRLDataSource._validate_uniform_image_shapes) rather than
-# being zero-padded into black-barred sources; upstream also sizes each source to
-# ~1024² preserving its own aspect ratio, so mixed ratios would yield ragged
-# condition-token counts the batched conditions cannot hold. Normalize the
-# dataset, or bucket the dataloader by aspect ratio.
+# Source images must share ONE resolution across a batch — normalize the dataset,
+# or bucket the dataloader by aspect ratio. Two reasons, and today only the second
+# one is enforced:
+#   1. `Images.from_list` zero-pads mismatched shapes to the batch max with no
+#      crop-back, so a smaller source silently acquires black bars that upstream
+#      then crops/resizes as if they were content. Nothing raises. Upstream PR
+#      #198 removes this failure mode by keeping condition images at native
+#      per-sample resolution instead of packing them into one padded tensor.
+#   2. Upstream sizes each source to ~1024² preserving ITS OWN aspect ratio, so
+#      mixed ratios yield ragged condition-token counts the batched conditions
+#      cannot hold. This one DOES raise, in the adapter's `_stack_condition_field`.
+# Note (1) hides (2): once padding has equalized the shapes, the token counts
+# agree and the adapter guard has nothing to catch.
 #
 # Upstream SGLang prerequisites (engine fails fast otherwise) — same as the t2i
 # recipe: the FLUX.2-klein pipeline registered, and the Dance SDE kernel
@@ -141,7 +148,12 @@ backend:
     mixed_precision: true
     fsdp_mode: full
     reshard_after_forward: true
-    activation_checkpointing: false
+    # Deviates from the proven recipe's `false`, for memory not math:
+    # activation checkpointing changes no numerics, and this layout is tighter
+    # than trainside -- each of the 8 actors colocates its own SGLang engine
+    # holding a full model copy, and ti2i concatenates the source-image tokens
+    # onto the noise sequence (~2x sequence length) during replay.
+    activation_checkpointing: true
     use_torch_compile: false
   optimizer_cfg:
     _target_: unirl.train.backend.base.OptimizerConfig
@@ -309,7 +321,6 @@ sampling:
   # correctness is unaffected — per-prompt-group advantages don't require shared
   # init noise; it's only a variance-reduction nicety.
   init_same_noise: false
-  autocast_precision: bf16
   scheduler:
     _target_: unirl.utils.scheduler_utils.AllSDEScheduler
     num_timesteps: ${..num_inference_steps}

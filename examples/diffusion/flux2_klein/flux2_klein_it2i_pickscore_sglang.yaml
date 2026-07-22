@@ -26,8 +26,9 @@
 #
 # Data: built by scripts/gpu-verify/build_dataset.py from the LIN-560 extraction
 # onto POD-LOCAL disk, every source center-cropped to a single 512x512 so each
-# batch is shape-homogeneous (MultimodalRLDataSource._validate_uniform_image_shapes
-# rejects mixed shapes, since Images.from_list would otherwise zero-pad them).
+# batch is shape-homogeneous. Nothing enforces that: `Images.from_list` zero-pads
+# mismatched shapes to the batch max, silently baking black bars into the edit
+# source. See the editreward_sglang recipe header for the full note.
 #
 # Launch:
 #   export IT2I_DATA=/root/it2i_data
@@ -110,8 +111,12 @@ backend:
     mixed_precision: true
     fsdp_mode: full
     reshard_after_forward: true
-    activation_checkpointing: true   # ti2i replay concatenates condition tokens onto
-                                     # the noise sequence, so activations are larger
+    # Deviates from the proven recipe's `false`, for memory not math:
+    # activation checkpointing changes no numerics, and this layout is tighter
+    # than trainside -- each of the 8 actors colocates its own SGLang engine
+    # holding a full model copy, and ti2i concatenates the source-image tokens
+    # onto the noise sequence (~2x sequence length) during replay.
+    activation_checkpointing: true
     use_torch_compile: false
   optimizer_cfg:
     _target_: unirl.train.backend.base.OptimizerConfig
@@ -244,7 +249,6 @@ sampling:
   # mis-sizes FLUX.2 latent channels (see flux2_klein_sglang.yaml). GRPO does
   # not require shared init noise — it is only variance reduction.
   init_same_noise: false
-  autocast_precision: bf16
   scheduler:
     _target_: unirl.utils.scheduler_utils.AllSDEScheduler
     num_timesteps: ${..num_inference_steps}

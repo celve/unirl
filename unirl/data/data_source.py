@@ -138,34 +138,6 @@ def _validate_homogeneous_images(images: List[Any]) -> None:
         )
 
 
-def _validate_uniform_image_shapes(images: List[Any]) -> None:
-    """Reject batches whose condition images have differing pixel shapes.
-
-    ``Images.from_list`` zero-pads mismatched images to the batch max (bottom /
-    right) and ``Image.to_pil`` has no crop-back, so a smaller source silently
-    reaches the model letterboxed with black bars — which image-edit rollouts
-    then VAE-encode as if the bars were content. Downstream engines also assume
-    one grid per batch: SGLang sizes each source to ~1024² preserving ITS OWN
-    aspect ratio, so mixed ratios yield different condition-token counts.
-
-    Raising here converts that silent corruption into a loud failure at collate
-    time. Sibling of :func:`_validate_homogeneous_images`, which covers the
-    other half (some prompts carrying an image and others not).
-
-    ``Videos`` needs no equivalent: it packs ragged along T with ``cu_seqlens``
-    (``FieldKind.PACKED``) rather than padding.
-    """
-    shapes = sorted({tuple(img.pixels.shape) for img in images if img is not None})
-    if len(shapes) > 1:
-        raise ValueError(
-            f"Condition images have {len(shapes)} distinct shapes {shapes} in one batch. "
-            f"Images.from_list would zero-pad them to the batch max, baking black bars "
-            f"into every smaller source — for image-edit tasks that silently corrupts the "
-            f"conditioning. Normalize the dataset to a single resolution, or bucket the "
-            f"dataloader so each batch is homogeneous."
-        )
-
-
 def _validate_homogeneous_videos(videos: List[Any]) -> None:
     """Reject batches where some prompts have condition videos and others don't."""
     populated = [vid for vid in videos if vid is not None]
@@ -359,7 +331,6 @@ class MultimodalRLDataSource:
         images = _load_condition_images(media_refs)
         if images is not None:
             _validate_homogeneous_images(images)
-            _validate_uniform_image_shapes(images)
             primitives["image"] = Images.from_list([img for img in images if img is not None])
         videos = _load_condition_videos(media_refs)
         if videos is not None:
@@ -398,7 +369,6 @@ class MultimodalRLDataSource:
         images = _load_condition_images(media_refs)
         if images is not None:
             _validate_homogeneous_images(images)
-            _validate_uniform_image_shapes(images)
             primitives["image"] = Images.from_list([img for img in images if img is not None])
         videos = _load_condition_videos(media_refs)
         if videos is not None:
