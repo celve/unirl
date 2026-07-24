@@ -315,8 +315,15 @@ class BaseTrainer:
         """Flush pending work, clean transport artifacts, and close wandb."""
         active_exception = sys.exc_info()[0] is not None
         try:
-            self._wait_for_checkpoints()
-            self._cleanup_weight_sync()
+            if active_exception:
+                # Already unwinding a real exception (e.g. a worker CUDA OOM). The
+                # pending checkpoint / weight-sync flush does a blocking ray.get on the
+                # very workers that failure just wedged, so it would hang forever and
+                # mask the original traceback. Skip it and let that exception propagate.
+                logger.warning("Skipping checkpoint/weight-sync flush during exception teardown")
+            else:
+                self._wait_for_checkpoints()
+                self._cleanup_weight_sync()
         except Exception:
             if not active_exception:
                 raise
