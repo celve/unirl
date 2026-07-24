@@ -69,20 +69,21 @@ class QwenImageEditPlusAdapter(QwenImageAdapter):
     pad_mask_to_embeds = True
 
     def build_prompts(self, req: RolloutReq) -> Dict[str, Any]:
-        """Inject source-image PIL via ``condition_image`` sampling kwarg.
+        """Emit every sample's prompt + its source image as one request.
 
         Edit-Plus **requires** a source image per prompt (fail-fast if absent).
-        The PIL is handed to SGLang verbatim — ``InputValidationStage``
+        Each GRPO sample is routed as a standalone B=1 forward — no group
+        collapse, never ``num_outputs_per_prompt`` — symmetric with
+        :meth:`ImageAdapter.build_prompts`. The B prompts and their B source
+        images are emitted 1:1; SGLang fans them into ``len(prompts)``
+        single-output forwards, ``patch_sampling_io`` indexes ``condition_image``
+        per prompt, and ``patch_request_noise_slice`` slices per-sample x_T / SDE
+        seeds. Each PIL is handed to SGLang verbatim — ``InputValidationStage``
         resizes it to condition_size + vae_size, ``ImageVAEEncodingStage``
         VAE-encodes it and sets ``batch.image_latent``. The driver never
         replicates VAE preprocessing.
-
-        The K-expanded prompt collapse (``deexpand_prompts_from_groups``) is
-        inherited from :meth:`ImageAdapter.build_prompts`; we only add the
-        ``condition_image`` key alongside ``prompt``.
         """
         prompts = list(req.primitives["text"].texts)
-        unique_prompts, k = self._deexpand_prompts(prompts, req)
         images_prim = req.primitives.get("image")
         if images_prim is None:
             raise ValueError(
@@ -91,29 +92,10 @@ class QwenImageEditPlusAdapter(QwenImageAdapter):
         pil_images = images_prim.to_pils()
         if len(pil_images) != len(prompts):
             raise ValueError(f"build_prompts: image batch {len(pil_images)} != prompt count {len(prompts)}")
-        # Collapse PILs in parallel with prompts: one source image per group.
-        # Mirror ``deexpand_prompts_from_groups``'s group logic (first image per
-        # group, in first-seen group order) rather than assuming a contiguous
-        # group-major layout — ``pil_images[::k]`` would misalign images vs
-        # prompts if ``group_ids`` are interleaved ([A,B,A,B,...]). ``k == 1``
-        # means no collapse happened (heterogeneous K or no grouping), so the
-        # PILs stay 1:1 with the prompts.
-        if k > 1:
-            unique_pils = self._first_per_group(pil_images, list(req.group_ids))
-            if len(unique_pils) != len(unique_prompts):
-                raise ValueError(
-                    f"build_prompts: collapsed image count {len(unique_pils)} != unique prompt "
-                    f"count {len(unique_prompts)} (group_ids/image misalignment)."
-                )
-        else:
-            unique_pils = pil_images
-        out: Dict[str, Any] = {
-            "prompt": unique_prompts if len(unique_prompts) > 1 else unique_prompts[0],
-            "condition_image": unique_pils if len(unique_pils) > 1 else unique_pils[0],
+        return {
+            "prompt": prompts if len(prompts) > 1 else prompts[0],
+            "condition_image": pil_images if len(pil_images) > 1 else pil_images[0],
         }
-        if k > 1:
-            out["num_outputs_per_prompt"] = k
-        return out
 
     def build_condition(self, results: List[RawResult]) -> Dict[str, Any]:
         """T2I text-capture conditions + Edit-Plus ``image_latent``.
@@ -178,34 +160,6 @@ class QwenImageEditPlusAdapter(QwenImageAdapter):
                 f"to ragged-pad."
             )
         return torch.cat(tensors, dim=0)
-
-    @staticmethod
-    def _first_per_group(items: List[Any], group_ids: List[str]) -> List[Any]:
-        """First item of each group, in first-seen group order.
-
-        Mirrors how :func:`utils.deexpand_prompts_from_groups` collapses prompts,
-        so the source-image collapse aligns with the prompt collapse regardless
-        of the sample layout (contiguous or interleaved ``group_ids``).
-        """
-        seen: set[str] = set()
-        out: List[Any] = []
-        for item, gid in zip(items, group_ids):
-            if gid not in seen:
-                seen.add(gid)
-                out.append(item)
-        return out
-
-    def _deexpand_prompts(self, prompts: List[str], req: RolloutReq):
-        """Collapse K-expanded prompts back to unique + repeat count.
-
-        Thin wrapper around :func:`utils.deexpand_prompts_from_groups` so the
-        import stays local (the base class imports utils at module level, but
-        keeping the call explicit aids readability of the image-collapse
-        parallel).
-        """
-        from unirl.rollout.engine.sglang_diffusion import utils
-
-        return utils.deexpand_prompts_from_groups(prompts, list(req.group_ids))
 
 
 __all__ = ["QwenImageEditPlusAdapter"]

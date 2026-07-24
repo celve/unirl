@@ -207,20 +207,17 @@ class ImageAdapter(ModelAdapter):
     # ------------------------------------------------------------------ #
 
     def build_prompts(self, req: RolloutReq) -> Dict[str, Any]:
-        """Prompt payload: collapse K-expanded prompts back to unique + repeat count.
+        """Prompt payload: emit every sample's prompt as its own request.
 
-        One text-encode pass per group instead of K when the structure admits a
-        clean collapse; ``num_outputs_per_prompt`` is emitted only then (k > 1).
-        The template has already validated ``req.primitives['text']``.
+        Each GRPO sample is routed as a standalone B=1 forward — no group
+        collapse, never ``num_outputs_per_prompt`` — so SGLang issues
+        ``len(prompts)`` single-output forwards instead of a grouped forward.
+        Per-sample x_T and SDE seeds are sliced at SGLang's per-prompt seam by
+        ``patch_request_noise_slice``. The template has already validated
+        ``req.primitives['text']``.
         """
         prompts = list(req.primitives["text"].texts)
-        unique_prompts, k = utils.deexpand_prompts_from_groups(prompts, list(req.group_ids))
-        out: Dict[str, Any] = {
-            "prompt": unique_prompts if len(unique_prompts) > 1 else unique_prompts[0],
-        }
-        if k > 1:
-            out["num_outputs_per_prompt"] = k
-        return out
+        return {"prompt": prompts if len(prompts) > 1 else prompts[0]}
 
     def build_sampling(self, req: RolloutReq, *, diffusion: Any) -> Dict[str, Any]:
         """Sampling scalars + the σ schedule slice.

@@ -10,8 +10,9 @@ per-sample-unique (``sample_ids``) so each sample explores its own per-step SDE
 noise; keying it on group ids (the fork's choice) would make same-group samples
 share per-step noise. (Per-sample x_T already supplies within-group diversity, so
 this is a secondary correctness/exploration knob, not the flat-reward root cause
--- that was the grouped-forward trajectory collapse fixed in
-``patch_rollout_trajectory``.) Upstream has no consumer for ``denoise_seeds``
+-- that was the grouped-forward trajectory collapse, eliminated by removing
+de-expand so no grouped forward is ever issued (LIN-513).) Upstream has no
+consumer for ``denoise_seeds``
 (``patch_sampling_io`` only copies the field onto the Req), so without this patch
 every sample draws independent noise.
 

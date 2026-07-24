@@ -180,3 +180,9 @@ known-first-party = ["unirl"]
 
 [tool.ruff.format]
 quote-style = "double"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "gpu: requires a GPU / live sglang server (deselect with -m 'not gpu')",
+]

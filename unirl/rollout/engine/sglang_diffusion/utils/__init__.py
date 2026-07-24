@@ -5,9 +5,6 @@ No SGLang import, no engine state — fully unit-testable with canned data. The
 package is the generic mechanics those methods lean on.
 """
 
-from unirl.rollout.engine.sglang_diffusion.utils.prompts import (
-    deexpand_prompts_from_groups,
-)
 from unirl.rollout.engine.sglang_diffusion.utils.tensors import (
     decode_sample,
     fuse_encoder_outputs,
@@ -25,7 +22,6 @@ from unirl.rollout.engine.sglang_diffusion.utils.tracks import (
 )
 
 __all__ = [
-    "deexpand_prompts_from_groups",
     "decode_sample",
     "fuse_encoder_outputs",
     "normalize_media",

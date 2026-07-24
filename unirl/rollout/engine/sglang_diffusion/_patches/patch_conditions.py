@@ -51,12 +51,7 @@ WHAT THIS PATCH DOES (all setattr / dataclass-field-injection / AROUND-wrap):
    That is why no text-encoding AROUND-wrap is needed here (see RISKS for why the
    fork's zeros-fallback / ``_expand`` re-capture is intentionally dropped).
 
-3. **AROUND-wrap ``GPUWorker._merge_expanded_output_batches``** (the grouped
-   nopp>1 path) to concat the per-output embed fields dim-0 onto the merged
-   OutputBatch -- upstream's merge helpers do not carry them. No-op in the single
-   path (that path never calls merge).
-
-4. **AROUND-wrap ``DiffGenerator._result_common``** to copy the idx-th output's
+3. **AROUND-wrap ``DiffGenerator._result_common``** to copy the idx-th output's
    embed slice from the (single or merged) OutputBatch into the per-result
    GenerationResult kwargs. Slicing mirrors the fork's ``_slice_embed_list`` /
    upstream's ``samples_out[idx]`` per-output convention: each field is a
@@ -70,10 +65,7 @@ Idempotent; setattr / field-injection / AROUND-wrap only -- no sglang source edi
 from __future__ import annotations
 
 import dataclasses
-import logging
 from dataclasses import field
-
-logger = logging.getLogger(__name__)
 
 # The 6 conditions fields, in the fork's order. All default to None and are
 # typed ``list[torch.Tensor] | None`` (one entry per text encoder) on
@@ -143,7 +135,6 @@ _OUTPUT_BATCH_FIELDS_SENTINEL = "_unirl_conditions_output_batch_fields"
 _GEN_RESULT_FIELDS_SENTINEL = "_unirl_conditions_gen_result_fields"
 _REQ_TO_OB_SENTINEL = "_unirl_conditions_req_to_ob"
 _DECODING_SENTINEL = "_unirl_conditions_decoding"
-_MERGE_SENTINEL = "_unirl_conditions_merge"
 _RESULT_COMMON_SENTINEL = "_unirl_conditions_result_common"
 
 
@@ -190,10 +181,7 @@ def patch_conditions() -> None:
     #      conversion (this seam never fires on the monolithic decoding path).
     _wrap_req_to_output_batch(gw_mod.GPUWorker)
 
-    # (3) Carry embeds through the grouped (nopp>1) merge.
-    _wrap_merge_expanded_output_batches(gw_mod.GPUWorker)
-
-    # (4) Copy/slice embeds OutputBatch -> GenerationResult per output index.
+    # (3) Copy/slice embeds OutputBatch -> GenerationResult per output index.
     _wrap_result_common(dg_mod.DiffGenerator)
 
 
@@ -439,76 +427,7 @@ def _to_cpu_embed_list(value):
 
 
 # ------------------------------------------------------------------ #
-# (3) Grouped-merge carry (nopp>1 path)
-# ------------------------------------------------------------------ #
-
-
-def _wrap_merge_expanded_output_batches(GPUWorker) -> None:
-    """AROUND-wrap the grouped-output merge to carry conditions dim-0 concatenated.
-
-    Upstream ``_merge_expanded_output_batches`` (and its collect/finalize helpers)
-    does not carry the embed fields, so for an expanded ``num_outputs_per_prompt>1``
-    request they would be dropped. We re-attach them by concatenating each
-    field's per-encoder tensors across the per-output batches along dim-0, so the
-    merged OutputBatch carries batch-dim-``N`` embeds that ``_result_common`` can
-    then slice per output index.
-
-    No-op in the single forward path -- that path returns the per-Req OutputBatch
-    directly and never calls this method.
-    """
-    orig = GPUWorker.__dict__.get("_merge_expanded_output_batches")
-    if orig is None:
-        raise AttributeError("GPUWorker._merge_expanded_output_batches missing upstream")
-    raw = orig.__func__ if isinstance(orig, staticmethod) else orig
-    if getattr(raw, _MERGE_SENTINEL, False):
-        return
-
-    def _merge_expanded_output_batches(output_batches):
-        merged = raw(output_batches)
-        _merge_conditions(merged, output_batches)
-        return merged
-
-    setattr(_merge_expanded_output_batches, _MERGE_SENTINEL, True)
-    GPUWorker._merge_expanded_output_batches = staticmethod(_merge_expanded_output_batches)
-
-
-def _merge_conditions(merged, output_batches) -> None:
-    """Concat each conditions field dim-0 across per-output batches onto ``merged``.
-
-    Each field is ``list[Tensor]`` (per encoder); we concat the i-th encoder's
-    tensor across all batches that carry it. If any batch is missing the field
-    (None), the field is left None on ``merged`` -- positives are always present
-    when ``return_prompt_embeds`` is set, negatives only under CFG.
-    """
-    import torch
-
-    for name in _COND_FIELDS:
-        per_batch = [getattr(ob, name, None) for ob in output_batches]
-        if any(v is None for v in per_batch):
-            continue
-        if not per_batch:
-            continue
-        num_encoders = len(per_batch[0])
-        # All batches must agree on encoder count to concat positionally.
-        if any(len(v) != num_encoders for v in per_batch):
-            logger.warning("conditions merge: inconsistent encoder count for %s; skipping", name)
-            continue
-        merged_list = []
-        for enc_idx in range(num_encoders):
-            tensors = [v[enc_idx] for v in per_batch]
-            if any(t is None for t in tensors):
-                merged_list.append(None)
-            elif name == "image_latent_sizes":
-                # Non-tensor (list[tuple[int,int]]); all outputs in a group
-                # share the same source image, so take the first.
-                merged_list.append(tensors[0])
-            else:
-                merged_list.append(torch.cat(tensors, dim=0))
-        setattr(merged, name, merged_list)
-
-
-# ------------------------------------------------------------------ #
-# (4) OutputBatch -> GenerationResult copy/slice in _result_common
+# (3) OutputBatch -> GenerationResult copy/slice in _result_common
 # ------------------------------------------------------------------ #
 
 
@@ -538,13 +457,12 @@ def _wrap_result_common(DiffGenerator) -> None:
         for name in _COND_FIELDS:
             val = getattr(output_batch, name, None)
             if name == "image_latent_sizes":
-                # image_latent_sizes is list[tuple[int,int]] per encoder (NOT
-                # per-output — all outputs in a group share one source image).
-                # _merge_conditions already took tensors[0] across batches, so
-                # the merged value has exactly one entry per encoder. Slicing
-                # by output_index would index past it (e.g. [(1024,1024)][3:4]
-                # = []) → "got 0 source images" in _collect_image_latents.
-                # Pass through unchanged.
+                # image_latent_sizes carries the per-request vae_image_sizes
+                # (list[tuple[int,int]] of pixel (W,H) pairs), NOT a per-output
+                # embed list — _copy_conditions wrapped it as [vae_image_sizes].
+                # Slicing it by output_index would corrupt it (e.g.
+                # [(1024,1024)][3:4] = []) → "got 0 source images" in
+                # _collect_image_latents. Pass through unchanged.
                 common[name] = val
             else:
                 common[name] = _slice_embed_list(val, idx)

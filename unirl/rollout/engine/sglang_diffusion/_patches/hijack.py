@@ -170,9 +170,6 @@ class SglangDiffusionHijack:
         from unirl.rollout.engine.sglang_diffusion._patches.patch_gpu_worker import (
             patch_gpu_worker,
         )
-        from unirl.rollout.engine.sglang_diffusion._patches.patch_grouped_dispatch import (
-            patch_grouped_dispatch,
-        )
         from unirl.rollout.engine.sglang_diffusion._patches.patch_latent_prep import (
             patch_latent_prep,
         )
@@ -182,14 +179,11 @@ class SglangDiffusionHijack:
         from unirl.rollout.engine.sglang_diffusion._patches.patch_lora_tensors import (
             patch_lora_tensors,
         )
-        from unirl.rollout.engine.sglang_diffusion._patches.patch_pipeline import (
-            patch_pipeline,
-        )
         from unirl.rollout.engine.sglang_diffusion._patches.patch_platform_device import (
             patch_platform_device,
         )
-        from unirl.rollout.engine.sglang_diffusion._patches.patch_rollout_trajectory import (
-            patch_rollout_trajectory,
+        from unirl.rollout.engine.sglang_diffusion._patches.patch_request_noise_slice import (
+            patch_request_noise_slice,
         )
         from unirl.rollout.engine.sglang_diffusion._patches.patch_safe_unpickler import (
             patch_safe_unpickler,
@@ -218,20 +212,17 @@ class SglangDiffusionHijack:
         )
 
         # (A) Additive infra: srt is_available shim; SamplingParams/Req IO
-        #     fields; GPUWorker RL methods + sleep/wake; weight-sync;
-        #     in-memory LoRA; RL Scheduler handlers.
-        # (B) post1 bridge: grouped-stage dispatch (v0.5.12.post1 predates the
-        #     3142278c5 grouped-path fix; no-op on any sglang that has it).
-        # (C) The one REPLACE: the DanceGRPO objective upstream lacks.
+        #     fields; per-prompt request noise/seed slice (de-expanded rollout);
+        #     GPUWorker RL methods + sleep/wake; weight-sync; in-memory LoRA;
+        #     RL Scheduler handlers.
+        # (B) The one REPLACE: the DanceGRPO objective upstream lacks.
         for patch in (
             patch_srt,
             patch_platform_device,
             patch_sampling_io,
             patch_conditions,
             patch_latent_prep,
-            patch_rollout_trajectory,
-            patch_pipeline,
-            patch_grouped_dispatch,
+            patch_request_noise_slice,
             patch_gpu_worker,
             patch_weights_updater,
             patch_sd3_lora_pipeline,
