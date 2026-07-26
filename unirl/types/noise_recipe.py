@@ -34,6 +34,36 @@ from typing import List, Optional, Tuple
 import torch
 
 
+def _prompt_seed_keys(sample) -> List[str]:
+    """Prompt-content x_T keys for the gen frontier, derived from THIS shard.
+
+    Computed here rather than shipped on the sampling params: params are a SHARED
+    field, so a precomputed list would not slice under DP scatter and every worker
+    would see the whole batch's ids. ``Sample.split`` is tree-complete (each shard
+    holds whole prompt subtrees), so the root's texts and the frontier's rows line
+    up on every worker. ``Part.fork`` keeps siblings contiguous, so frontier row
+    ``i`` belongs to prompt ``i // branch`` with sibling ordinal ``i % branch``.
+    """
+    # Local import avoids a module-level types→sde cycle (same as :meth:`resolve`).
+    from unirl.sde.noise import make_prompt_seed_group_id
+
+    root, gen = sample.parts[0], sample.parts[-1]
+    texts = getattr(root.primitives.get("text"), "texts", None)
+    n_roots = len(root.sample_ids)
+    if texts is None or len(texts) != n_roots:
+        raise ValueError(
+            "NoiseRecipe: prompt_seed_noise needs root primitives['text'] aligned to the root rows; got "
+            f"{0 if texts is None else len(texts)} texts for {n_roots} roots."
+        )
+    if n_roots == 0 or len(gen.sample_ids) % n_roots:
+        raise ValueError(
+            f"NoiseRecipe: prompt_seed_noise needs a uniform fan-out; "
+            f"{len(gen.sample_ids)} gen rows over {n_roots} roots."
+        )
+    branch = len(gen.sample_ids) // n_roots
+    return [make_prompt_seed_group_id(text, sample_ordinal=j) for text in texts for j in range(branch)]
+
+
 @dataclass
 class NoiseRecipe:
     """Normalized x_T recipe consumed by every engine (see module docstring)."""
@@ -118,11 +148,11 @@ class NoiseRecipe:
         shape on ``DiffusionSamplingParams.init_noise_latent_shape``. Duck-typed on
         the part's attributes so it doesn't import Sample/Part.
 
-        ``DiffusionSamplingParams.noise_group_ids``, when set, OVERRIDES the
-        lineage-derived key. Eval uses this to key x_T on prompt CONTENT
-        (:func:`unirl.sde.noise.make_prompt_seed_group_id`) so the same prompt
-        starts from the same noise across steps and checkpoints, while lineage
-        ids keep training noise per-rollout varying.
+        ``DiffusionSamplingParams.prompt_seed_noise`` replaces the lineage key with
+        a prompt-CONTENT key (:func:`_prompt_seed_keys`), so the same prompt starts
+        from the same noise across steps and checkpoints. Eval sets it; training
+        leaves it off and keeps the per-rollout varying lineage key. It wins over
+        ``init_same_noise``.
         """
         gen = sample.parts[-1]
         diffusion = gen.sampling_params
@@ -133,14 +163,8 @@ class NoiseRecipe:
             return cls()
         seg = gen.segment
         share = bool(getattr(diffusion, "init_same_noise", False)) if diffusion is not None else False
-        explicit = getattr(diffusion, "noise_group_ids", None) if diffusion is not None else None
-        if explicit:
-            if len(explicit) != len(gen.sample_ids):
-                raise ValueError(
-                    f"NoiseRecipe.from_sample: noise_group_ids count {len(explicit)} != gen sample count "
-                    f"{len(gen.sample_ids)}; the override must be frontier-aligned."
-                )
-            keys = list(explicit)
+        if bool(getattr(diffusion, "prompt_seed_noise", False)) if diffusion is not None else False:
+            keys = _prompt_seed_keys(sample)
         else:
             keys = gen.group_ids if share else list(gen.sample_ids)
         shape = getattr(diffusion, "init_noise_latent_shape", None) if diffusion is not None else None

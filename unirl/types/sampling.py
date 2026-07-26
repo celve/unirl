@@ -113,6 +113,13 @@ class DiffusionSamplingParams(BaseSamplingParams):
     seed: Optional[int] = 42
     init_same_noise: bool = False
     noise_group_ids: Optional[List[str]] = None
+    # Eval: key x_T on prompt CONTENT + sibling ordinal instead of the lineage id,
+    # so the same prompt starts from the same noise across steps and checkpoints.
+    # A flag, NOT a precomputed id list: sampling params are a SHARED field, so a
+    # list would not slice under DP scatter and every worker would see the whole
+    # batch's ids. ``NoiseRecipe.from_sample`` derives the keys from the (already
+    # sliced) Sample instead. Wins over ``init_same_noise``.
+    prompt_seed_noise: bool = False
     # x_T noise recipe: the per-sample latent shape each engine regenerates a
     # byte-identical initial noise into (pairs with init_same_noise + seed).
     init_noise_latent_shape: Optional[List[int]] = None

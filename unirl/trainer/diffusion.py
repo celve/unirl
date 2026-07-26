@@ -11,7 +11,6 @@ from omegaconf import DictConfig
 
 from unirl.distributed.group.placement import placement, remote
 from unirl.distributed.tensor import hydrate
-from unirl.sde.noise import make_prompt_seed_group_id
 from unirl.train.stack import TrainStepResult
 from unirl.trainer.base import BaseTrainer, build_sampling_dict, prepare_input_sample
 from unirl.trainer.eval_suites import EvalRewardSuite, build_eval_suites
@@ -20,23 +19,6 @@ from unirl.types.sampling import BaseSamplingParams, total_samples_per_prompt
 from unirl.utils.hydra import parse_hydra_cfg, remote_hydra
 
 logger = logging.getLogger(__name__)
-
-
-def _prompt_seed_noise_ids(inputs: Sample, branch: int) -> List[str]:
-    """Frontier-aligned prompt-content x_T keys for one eval request.
-
-    ``Part.fork`` lays children out group-by-parent contiguous (each prompt's
-    ``branch`` siblings adjacent), so emitting ``branch`` ids per prompt in prompt
-    order matches the gen Part's ``sample_ids`` row for row.
-    """
-    root = inputs.parts[0]
-    texts = getattr(root.primitives.get("text"), "texts", None)
-    if texts is None or len(texts) != len(root.sample_ids):
-        raise ValueError(
-            f"DiffusionTrainer eval: prompt-text count {0 if texts is None else len(texts)} != "
-            f"root sample count {len(root.sample_ids)}; cannot key x_T on prompt content."
-        )
-    return [make_prompt_seed_group_id(text, sample_ordinal=j) for text in texts for j in range(branch)]
 
 
 class DiffusionTrainer(BaseTrainer):
@@ -424,16 +406,15 @@ class DiffusionTrainer(BaseTrainer):
         # draw its OWN x_T from independent RNG → divergent reward curves; a single
         # driver-authored x_T removes that. Opt out with DISABLE_DRIVER_XT=1
         # (resolved in __init__ → shape None here).
-        branch = total_samples_per_prompt(sp)
         # Eval (``sampling`` overridden) swaps the lineage key for a prompt-CONTENT
         # key: the same prompt starts from the same x_T across steps and
         # checkpoints, so an eval delta is the model moving and not the noise draw.
         # The sibling ordinal keeps K>1 eval samples per prompt distinct. Training
-        # keeps the per-rollout varying lineage key above.
+        # keeps the per-rollout varying lineage key above. Ship a FLAG, not the id
+        # list -- sampling params are shared, so a list would not slice under DP
+        # scatter; NoiseRecipe.from_sample derives the keys per shard.
         if sampling is not None and self._noise_latent_shape is not None:
-            diffusion = dataclasses.replace(
-                diffusion, noise_group_ids=_prompt_seed_noise_ids(inputs, branch)
-            )
+            diffusion = dataclasses.replace(diffusion, prompt_seed_noise=True)
         request = prepare_input_sample(
             inputs,
             rollout_id,
@@ -441,7 +422,7 @@ class DiffusionTrainer(BaseTrainer):
             caller="DiffusionTrainer._build_request_sample",
             root_control=dict(self._task_config),
         )
-        return request.fork(branch, sampling_params=diffusion)
+        return request.fork(total_samples_per_prompt(sp), sampling_params=diffusion)
 
     def train_step(
         self,
