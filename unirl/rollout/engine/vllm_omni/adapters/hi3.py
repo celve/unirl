@@ -271,7 +271,7 @@ class Hi3InputAdapter:
     - ``carries_target_size`` — the entry gets the request's generation
       ``height``/``width`` (t2i's target canvas; ar_recaption's recaption
       prompt needs them although THIS engine never renders).
-    - ``bot_task_base`` — when set, ``stage_config["bot_task"]``
+    - ``bot_task_base`` — when set, ``control["bot_task"]``
       think/recaption swaps the trigger tag (``f"{base}_{bot}"``). Kept
       separate from ``modality`` (registry keys are family-namespaced; the
       upstream task vocabulary is not). AR-only modalities leave it ``None``
