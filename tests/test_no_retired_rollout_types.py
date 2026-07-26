@@ -7,6 +7,9 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SOURCE_ROOT = REPO_ROOT / "unirl"
+# Tests are scanned too: an upstream merge can land test files written against
+# the retired carriers, and those import at collection time.
+SCAN_ROOTS = (SOURCE_ROOT, REPO_ROOT / "tests")
 RETIRED_MODULES = {
     "unirl.types.prompts",
     "unirl.types.rollout_req",
@@ -17,7 +20,9 @@ RETIRED_NAMES = {"RolloutInputs", "RolloutReq", "RolloutResp", "RolloutTrack"}
 
 def test_python_sources_do_not_use_retired_rollout_carriers() -> None:
     violations: list[str] = []
-    for path in sorted(SOURCE_ROOT.rglob("*.py")):
+    for path in sorted(p for root in SCAN_ROOTS for p in root.rglob("*.py")):
+        if path == Path(__file__).resolve():
+            continue
         tree = ast.parse(path.read_text(), filename=str(path))
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom) and node.module in RETIRED_MODULES:
