@@ -117,6 +117,12 @@ class NoiseRecipe:
         (img2img / i2v first-frame) rides on the gen part's ``segment``; the regen
         shape on ``DiffusionSamplingParams.init_noise_latent_shape``. Duck-typed on
         the part's attributes so it doesn't import Sample/Part.
+
+        ``DiffusionSamplingParams.noise_group_ids``, when set, OVERRIDES the
+        lineage-derived key. Eval uses this to key x_T on prompt CONTENT
+        (:func:`unirl.sde.noise.make_prompt_seed_group_id`) so the same prompt
+        starts from the same noise across steps and checkpoints, while lineage
+        ids keep training noise per-rollout varying.
         """
         gen = sample.parts[-1]
         diffusion = gen.sampling_params
@@ -127,7 +133,16 @@ class NoiseRecipe:
             return cls()
         seg = gen.segment
         share = bool(getattr(diffusion, "init_same_noise", False)) if diffusion is not None else False
-        keys = gen.group_ids if share else list(gen.sample_ids)
+        explicit = getattr(diffusion, "noise_group_ids", None) if diffusion is not None else None
+        if explicit:
+            if len(explicit) != len(gen.sample_ids):
+                raise ValueError(
+                    f"NoiseRecipe.from_sample: noise_group_ids count {len(explicit)} != gen sample count "
+                    f"{len(gen.sample_ids)}; the override must be frontier-aligned."
+                )
+            keys = list(explicit)
+        else:
+            keys = gen.group_ids if share else list(gen.sample_ids)
         shape = getattr(diffusion, "init_noise_latent_shape", None) if diffusion is not None else None
         seed = int(diffusion.seed) if diffusion is not None and getattr(diffusion, "seed", None) is not None else 0
         return cls(
