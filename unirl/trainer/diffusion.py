@@ -57,7 +57,7 @@ class DiffusionTrainer(BaseTrainer):
         eval_cfg_text_scale: float = 4.0,
         eval_eta: float = 0.0,
         eval_rewards_cfg: Optional[Any] = None,
-        stage_config: Optional[Dict[str, Any]] = None,
+        task_config: Optional[Dict[str, Any]] = None,
     ) -> None:
         super().__init__(cfg=cfg, logging_cfg=logging_cfg)
         self.batch_size = batch_size
@@ -95,7 +95,7 @@ class DiffusionTrainer(BaseTrainer):
         # dataset that is MISSING source images fail loudly in the pipeline (it2i
         # requires an input image) instead of silently degrading to t2i. Empty ⇒ the
         # pipeline infers the task as before (unchanged for every other recipe).
-        self._stage_config: Dict[str, Any] = dict(stage_config) if stage_config else {}
+        self._task_config: Dict[str, Any] = dict(task_config) if task_config else {}
         # Set in _build_rollout: True when the rollout is the trainside
         # direct-sampling engine (it reuses the train model → must NOT offload).
         self._rollout_is_trainside = False
@@ -411,7 +411,7 @@ class DiffusionTrainer(BaseTrainer):
             rollout_id,
             allowed_primitives={"text", "image", "video"},
             caller="DiffusionTrainer._build_request_sample",
-            root_control=dict(self._stage_config),
+            root_control=dict(self._task_config),
         )
         return request.fork(total_samples_per_prompt(sp), sampling_params=diffusion)
 
