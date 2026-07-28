@@ -211,10 +211,16 @@ class ImageAdapter(ModelAdapter):
         sample's parent id → its prompt) and collapses it to unique +
         ``num_outputs_per_prompt`` via the group structure — robust to partial
         forward-batch chunks (a chunk may hold a partial group).
+
+        The prompt is the NEAREST text ancestor, matching the rule the reward
+        service already applies to the same conditioning walk
+        (``unirl.reward.service._build_reward_request``): a plain T2I request has
+        one text turn, so this is that turn; a rewrite chain (PE: prompt → rewrite
+        → image) renders the rewrite, which is also what the reward then scores.
         """
         gen_part = sample.frontier_gen_part(DiffusionSamplingParams)
-        # text-only consumer: the frontier-aligned prompt is the (single) text turn.
-        prompts = list(sample.text_conditioning()[0].content.texts)
+        # text-only consumer: text_conditioning() fails loud on any non-text turn.
+        prompts = list(sample.text_conditioning()[-1].content.texts)
         unique_prompts, k = utils.deexpand_prompts_from_groups(prompts, list(gen_part.group_ids))
         out: Dict[str, Any] = {
             "prompt": unique_prompts if len(unique_prompts) > 1 else unique_prompts[0],

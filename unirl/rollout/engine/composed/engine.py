@@ -15,6 +15,16 @@ single Part's one ``sampling_params`` slot cannot). Each child config carries
 its own ``_target_``; ``__init__`` builds the child engine via
 ``config.<child>.make_engine(...)``.
 
+Both children are driven on VIEWS of that one request Sample — never on rebuilt
+child requests. The AR child is handed the Sample minus the diffusion shell; the
+caller's diffusion shell is then re-attached to the filled AR Part (its ids
+already descend from the AR ids) and handed to the diffusion child, whose return
+value IS the finished 3-part Sample. So the ids, sampling params, control and
+metadata the caller authored are the ones the children fill, and the diffusion
+child conditions on the rewrite through the ordinary ancestor walk
+(:meth:`Sample.conditioning`, nearest text ancestor wins) rather than through a
+re-rooted stand-in prompt Part.
+
 Weight sync uses prefix-based tensor routing: the training side prepends
 the child component name to tensor keys; this engine demuxes by prefix and
 forwards each subset to the matching child with the prefix stripped.
@@ -24,6 +34,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from dataclasses import replace
 from typing import Any, Dict, List, Optional
 
 import torch
@@ -34,7 +45,7 @@ from unirl.models.pe.instruction import postprocess_pe_texts
 from unirl.rollout.engine.base import BaseSingleTurnRolloutEngine
 from unirl.rollout.engine.composed.config import ComposedRolloutEngineConfig
 from unirl.types.primitives import Texts
-from unirl.types.sample import Part, Sample
+from unirl.types.sample import Sample
 from unirl.types.sampling import ARSamplingParams, DiffusionSamplingParams
 
 logger = logging.getLogger(__name__)
@@ -197,103 +208,38 @@ class ComposedRolloutEngine(BaseSingleTurnRolloutEngine):
     def _generate_core(self, sample: Sample) -> Sample:
         """Run the PE serial flow for a whole ``Sample`` → filled 3-part output.
 
-        Composed's children share wake/sleep state, so the shard is processed as ONE
-        atomic unit, giving a single AR→diffusion wake/sleep transition.
-        ``sample`` is the pre-forked request ``[input, ar_shell, diffusion_shell]`` for
-        P prompts: the AR shell carries ``ARSamplingParams`` (branch N), the diffusion
-        shell ``DiffusionSamplingParams`` (branch M, σ / x_T recipe).
-        """
-        input_part, ar_shell, diffusion_shell = self._unpack_request(sample)
+        Three Sample operations over the caller's pre-forked request
+        ``[input, ar_shell, diffusion_shell]``, no child request rebuilt:
 
-        P = len(input_part.sample_ids)
-        require(P > 0, "ComposedRolloutEngine.generate: empty Sample")
-        text_primitive = input_part.primitives.get("text")
-        require(
-            isinstance(text_primitive, Texts),
-            "ComposedRolloutEngine.generate: input Part.primitives['text'] must be Texts",
-        )
-        require(
-            len(ar_shell.sample_ids) % P == 0,
-            f"ComposedRolloutEngine: ar shell {len(ar_shell.sample_ids)} not a multiple of P={P}",
-        )
-        N = len(ar_shell.sample_ids) // P
-        require(
-            N >= 1 and len(diffusion_shell.sample_ids) % len(ar_shell.sample_ids) == 0,
-            f"ComposedRolloutEngine: diffusion shell {len(diffusion_shell.sample_ids)} not a multiple of P*N={P * N}",
-        )
-        M = len(diffusion_shell.sample_ids) // len(ar_shell.sample_ids)
-        require(M >= 1, f"ComposedRolloutEngine.generate: diffusion branch M={M} must be >= 1")
+        1. **view** — the AR child runs on this Sample minus the diffusion shell,
+           so the AR Part it fills IS ours (ids, sampling params, control).
+        2. **bridge** — the marker-extracted PE text is written onto that Part, so
+           every later reader (diffusion conditioning, reward, logging) sees the
+           cleaned rewrite.
+        3. **re-attach** — the caller's diffusion shell goes back onto the filled
+           AR Part; its ids already descend from the AR ids, so the diffusion
+           child fills OUR shell in OUR lineage and its return value is the
+           finished 3-part Sample (frontier already weight-version stamped).
+
+        The P/N/M fan-out arithmetic the old shape hand-checked is structural
+        here: ``fork`` authored the ids, so a mis-sized child Part cannot form a
+        valid ``Sample``. Composed's children share wake/sleep state, so the shard
+        is processed as ONE atomic unit — a single AR→diffusion transition.
+        """
+        self._require_pe_request(sample)
 
         # ── Stage 1: AR child ────────────────────────────────────────
         self._ar.wake_up()
         self._diffusion.sleep()
-
-        # AR child request: the prompts + the AR shell. The input Part's
-        # ``control`` carries the AR routing (forward parent's "chat" + "ar"
-        # subsets, inject pe_instruction on both — ``sglang`` reads "ar" while
-        # ``Qwen3Pipeline`` reads "chat").
-        ar_input = Part.input(
-            sample_ids=list(input_part.sample_ids),
-            primitives={"text": text_primitive},
-            control=self._ar_control(input_part.control or {}),
-        )
-        ar_out = self._ar.generate(Sample(parts=[ar_input, ar_shell]))
-        ar_part = ar_out.parts[-1]
-        require(
-            len(ar_part.sample_ids) == P * N,
-            f"ComposedRolloutEngine: AR child returned {len(ar_part.sample_ids)} samples; expected {P}*{N}={P * N}",
-        )
-
-        # PE extraction: clean the AR text the diffusion child conditions on
-        # (rewritten onto the AR Part's text primitive so logging sees it too).
-        pe_texts = ar_part.primitives.get("text")
-        require(
-            isinstance(pe_texts, Texts) and len(pe_texts.texts) == P * N,
-            f"ComposedRolloutEngine: AR Part decoded missing or wrong length "
-            f"(expected {P * N}, got {len(pe_texts.texts) if isinstance(pe_texts, Texts) else 'None'})",
-        )
-        pe_texts = self._extract_pe(pe_texts, text_primitive, N)
-        ar_part = ar_part.fill(primitives={"text": pe_texts})
+        ar_out = self._ar.generate(self._ar_view(sample))
+        ar_out = ar_out.with_filled_frontier(primitives={"text": self._extract_pe(ar_out)})
 
         # ── Stage 1 → Stage 2 transition ────────────────────────────
         self._ar.sleep()
         self._diffusion.wake_up()
 
         # ── Stage 2: diffusion child ─────────────────────────────────
-        # The PE ids ("p0/0") are non-root, so they cannot be a child Sample's
-        # root input. Re-root the PE prompts onto fresh ids, fork the diffusion
-        # shell off them (preserving the shell's sampling params + x_T segment),
-        # generate, then map the per-sample outputs back onto our
-        # lineage-correct diffusion_shell — row order matches (both
-        # group-by-parent, branch=M, same parent order).
-        pe_input = Part.input(
-            sample_ids=[f"pe{k}" for k in range(P * N)],
-            primitives={"text": pe_texts},
-        )
-        diff_child_shell = pe_input.fork(
-            M,
-            sampling_params=diffusion_shell.sampling_params,
-            new_segment=diffusion_shell.segment,
-        )
-        diff_out = self._diffusion.generate(Sample(parts=[pe_input, diff_child_shell]))
-        diff_child = diff_out.parts[-1]
-        require(
-            len(diff_child.sample_ids) == len(diffusion_shell.sample_ids),
-            f"ComposedRolloutEngine: diffusion child returned {len(diff_child.sample_ids)} "
-            f"samples; expected {P}*{N}*{M}={P * N * M}",
-        )
-        # Carry the diffusion child's weight version onto the frontier part — composed
-        # owns no weights, so it propagates the child's stamp rather than its own 0.
-        diffusion_part = diffusion_shell.fill(
-            segment=diff_child.segment,
-            primitives=dict(diff_child.primitives),
-            primitive_metadata=dict(diff_child.primitive_metadata),
-            conditions=dict(diff_child.conditions),
-            media_preview=diff_child.media_preview,
-            weight_version=diff_child.weight_version,
-        )
-
-        return Sample(parts=[input_part, ar_part, diffusion_part])
+        return self._diffusion.generate(ar_out.with_parts([*ar_out.parts, sample.parts[-1]]))
 
     # ------------------------------------------------------------------
     # Control plane — forwarded to both children (best-effort).
@@ -301,8 +247,8 @@ class ComposedRolloutEngine(BaseSingleTurnRolloutEngine):
 
     def abort(self, ids: Optional[List[str]] = None) -> List[Sample]:
         """Abort in-flight generation on both children. Partials surface via the
-        pending ``generate`` returns, so this returns ``[]``. Composed-level ids
-        don't map onto child id-spaces (PE prompts are re-rooted), so abort-all."""
+        pending ``generate`` returns, so this returns ``[]``. Which child holds a
+        given id depends on how far the serial flow has progressed, so abort-all."""
         del ids
         for child in self._child_by_name.values():
             child.abort()
@@ -320,8 +266,9 @@ class ComposedRolloutEngine(BaseSingleTurnRolloutEngine):
     # Generation helpers
     # ------------------------------------------------------------------
 
-    def _unpack_request(self, sample: Sample) -> tuple:
-        """Resolve the pre-forked ``[input, ar_shell, diffusion_shell]`` request.
+    @staticmethod
+    def _require_pe_request(sample: Sample) -> None:
+        """Validate the caller's pre-forked ``[input, ar_shell, diffusion_shell]``.
 
         The serial PE flow currently accepts exactly one input Part. Reject extra
         inputs explicitly instead of dropping them from the returned lineage."""
@@ -334,37 +281,65 @@ class ComposedRolloutEngine(BaseSingleTurnRolloutEngine):
             "ComposedRolloutEngine.generate: requires exactly "
             f"[input, ar_shell, diffusion_shell]; got {len(sample.parts)} Parts.",
         )
-        input_part, ar_shell, diffusion_shell = sample.parts
         require(
-            isinstance(ar_shell.sampling_params, ARSamplingParams),
+            isinstance(sample.parts[1].sampling_params, ARSamplingParams),
             "ComposedRolloutEngine.generate: requires an AR gen-shell Part (ARSamplingParams)",
         )
         require(
-            isinstance(diffusion_shell.sampling_params, DiffusionSamplingParams),
+            isinstance(sample.parts[2].sampling_params, DiffusionSamplingParams),
             "ComposedRolloutEngine.generate: requires a diffusion gen-shell Part (DiffusionSamplingParams)",
         )
-        return input_part, ar_shell, diffusion_shell
 
-    def _ar_control(self, control: Dict[str, Any]) -> Dict[str, Any]:
-        """The AR child input Part's ``control``: parent's "chat" + "ar" subsets
-        with pe_instruction injected on both."""
-        ar_control: Dict[str, Any] = {key: dict(control[key]) for key in ("chat", "ar") if key in control}
-        if self.cfg.pe_instruction:
-            for key in ("ar", "chat"):
-                ar_control.setdefault(key, {})["system_instruction"] = self.cfg.pe_instruction
-        return ar_control
+    def _ar_view(self, sample: Sample) -> Sample:
+        """The AR child's request: this ``Sample`` without the diffusion shell.
 
-    def _extract_pe(self, pe_texts: Texts, text_primitive: Texts, samples_per_prompt: int) -> Texts:
-        """Optional marker-based PE extraction: keep only the substring after the
-        marker so the diffusion child sees the rewritten prompt instead of the
-        LLM's reasoning preamble. Off-format outputs fall back to the original
-        user prompt to keep diffusion from collapsing to blank text."""
+        A view, not a rebuild — the child fills the caller's own AR shell, so ids,
+        sampling params and metadata ride along untouched. The only edit is
+        ``pe_instruction``, merged onto the head Part's ``control`` under BOTH the
+        ``"ar"`` key (read by an sglang child) and the ``"chat"`` key (read by a
+        trainside ``Qwen3Pipeline``), so generation and replay see the same system
+        prompt.
+        """
+        parts = list(sample.parts[:-1])
+        if not self.cfg.pe_instruction:
+            return sample.with_parts(parts)
+        head = parts[0]
+        control: Dict[str, Any] = {key: dict(value) for key, value in (head.control or {}).items()}
+        for key in ("ar", "chat"):
+            control.setdefault(key, {})["system_instruction"] = self.cfg.pe_instruction
+        return sample.with_parts([replace(head, control=control), *parts[1:]])
+
+    def _extract_pe(self, ar_out: Sample) -> Texts:
+        """The text the diffusion child conditions on: the AR Part's decoded text,
+        optionally marker-extracted.
+
+        Keeping only the substring after the marker strips the LLM's reasoning
+        preamble; off-format outputs fall back to the original user prompt so
+        diffusion never conditions on blank text. The fallback prompts come from
+        the AR Part's own conditioning walk — already one row per rewrite — so
+        this needs no fan-out arithmetic to align them.
+        """
+        ar_part = ar_out.parts[-1]
+        pe_texts = ar_part.primitives.get("text")
+        require(
+            isinstance(pe_texts, Texts) and len(pe_texts.texts) == len(ar_part.sample_ids),
+            "ComposedRolloutEngine: AR child must decode one text per AR sample; got "
+            f"{len(pe_texts.texts) if isinstance(pe_texts, Texts) else type(pe_texts).__name__} "
+            f"for {len(ar_part.sample_ids)} samples",
+        )
         if not self.cfg.pe_marker:
             return pe_texts
+        user_prompts = [c for c in ar_out.conditioning_at(-1) if isinstance(c, Texts)]
+        require(
+            len(user_prompts) == 1,
+            f"ComposedRolloutEngine: PE fallback requires exactly one text ancestor; got {len(user_prompts)}",
+        )
         cleaned_texts, stats = postprocess_pe_texts(
             pe_texts.texts,
-            user_prompts=text_primitive.texts,
-            samples_per_prompt=samples_per_prompt,
+            # The ancestor walk already expanded the prompts to one row per rewrite,
+            # so slot k maps to its own prompt (samples_per_prompt=1).
+            user_prompts=user_prompts[0].texts,
+            samples_per_prompt=1,
             marker=self.cfg.pe_marker,
             max_chars=self.cfg.pe_max_chars,
         )
