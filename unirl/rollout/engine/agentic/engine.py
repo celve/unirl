@@ -43,6 +43,7 @@ verbs below forward to the inner engine.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import threading
 from collections import deque
@@ -56,6 +57,7 @@ from unirl.config.require import require
 from unirl.distributed.group.dispatch import Dispatch, Execute, distributed
 from unirl.rollout.engine.agentic.config import AgenticRolloutEngineConfig
 from unirl.rollout.engine.base import BaseRolloutEngine, BaseSingleTurnRolloutEngine
+from unirl.types.primitives import Texts
 from unirl.types.sample import Sample, _part_with_field
 from unirl.types.sampling import total_samples_per_prompt
 
@@ -113,6 +115,40 @@ class AgenticRolloutEngine(BaseRolloutEngine):
         self._sp = config.episode_sampling  # per-turn sampling params; carries n via samples_per_prompt
         self._n = total_samples_per_prompt(self._sp)  # GRPO group size
         self._max_turns = int(config.max_turns)
+        # Per-trajectory token budget → force-answer guard (LIN-564, AReaL tongyi
+        # parity). When set, the loop forces a final answer at ``force_answer_fraction``
+        # of the budget so a deep trajectory emits an <answer> instead of overflowing
+        # the context to reward 0. ``None`` ⇒ disabled (other agentic recipes unchanged).
+        self._traj_token_budget = int(config.max_tokens_per_trajectory) if config.max_tokens_per_trajectory else None
+        self._force_threshold = (
+            int(config.force_answer_fraction * self._traj_token_budget) if self._traj_token_budget is not None else None
+        )
+        self._inject_answer_after_neither = bool(config.inject_answer_after_neither)
+        self._nudge_answer_after_neither = bool(config.nudge_answer_after_neither)
+        self._neither_answer_prefix = str(config.neither_answer_prefix)
+        self._neither_answer_stop = str(config.neither_answer_stop)
+        self._neither_answer_max_new_tokens = int(config.neither_answer_max_new_tokens)
+        self._neither_answer_nudge = str(config.neither_answer_nudge)
+        require(
+            not (self._inject_answer_after_neither and self._nudge_answer_after_neither),
+            "decoder-prefix and user-nudge NEITHER rescue are mutually exclusive",
+        )
+        require(
+            not self._inject_answer_after_neither or bool(self._neither_answer_prefix),
+            "neither_answer_prefix must be non-empty when decoder-side answer repair is enabled",
+        )
+        require(
+            not self._inject_answer_after_neither or bool(self._neither_answer_stop),
+            "neither_answer_stop must be non-empty when decoder-side answer repair is enabled",
+        )
+        require(
+            self._neither_answer_max_new_tokens > 0,
+            "neither_answer_max_new_tokens must be positive",
+        )
+        require(
+            not self._nudge_answer_after_neither or bool(self._neither_answer_nudge),
+            "neither_answer_nudge must be non-empty when user-nudge rescue is enabled",
+        )
         self._partial_rollout = bool(getattr(config, "partial_rollout", False))
         # Guard: the env's own turn bound (set independently in the recipe under
         # ``env.max_turns``) must agree with the engine's ``config.max_turns``, else
@@ -397,15 +433,54 @@ class AgenticRolloutEngine(BaseRolloutEngine):
                 # turn this into a cross-thread race.
                 sample = self._inner.generate(sample.fork(1, sampling_params=self._sp))  # +[gen(1)]
                 observation, done, info = self._env.step(sample)  # blocking tool boundary, own thread
+                # ToolEnvironment exposes one credential-safe aggregate diagnostic
+                # mapping per frontier row. Persist the current row on the generated
+                # Part before any terminal/rescue branch returns so the trainer can
+                # invalidate an infrastructure-affected GRPO group without parsing
+                # model-visible error prose. Environments that omit diagnostics are
+                # byte-identical to the historical path.
+                sample = self._attach_tool_diagnostics(sample, info)
                 # Env-sourced reward (LIN-519): interactive envs (ALFWorld, …) return a
                 # per-trajectory return in ``info["reward"]`` (last value = the episode
                 # return); tool-only envs (calculator/search) omit it — a no-op here.
                 if isinstance(info, dict) and info.get("reward") is not None:
                     env_reward = float(info["reward"])
+                # A true NEITHER completion can use one of two opt-in rescue modes:
+                # the historical decoder-prefix continuation, or an intervention-
+                # aware user nudge followed by an ordinary fully sampled answer.
+                if self._is_single_neither(info):
+                    if self._nudge_answer_after_neither:
+                        return self._nudge_neither_as_answer(sample, env_reward)
+                    if self._inject_answer_after_neither:
+                        return self._continue_neither_as_answer(sample, env_reward)
                 if done:
+                    # AReaL parity (LIN-564): the env signals ``done`` both for a real
+                    # ``<answer>`` AND for hitting ``max_turns`` (tool_environment.py). If it's
+                    # ONLY the turn cap (no answer this turn), force a final answer instead of
+                    # terminating on a non-answer turn — else the hardest ~7% loop to max_turns
+                    # and end NEITHER (ungradable). Mirrors react_agent's max-llm-calls nudge.
+                    _turn = info.get("turn") if isinstance(info, dict) else 0
+                    _capped = isinstance(_turn, int) and _turn >= self._max_turns
+                    if self._force_threshold is not None and _capped:
+                        return self._force_final_answer(sample, env_reward)
                     return self._attach_env_reward(sample, env_reward), True
+                # Force-answer guard (LIN-564): once the trajectory nears the token
+                # budget, stop looping — inject "answer now" and force a final turn
+                # instead of growing context until it overflows to reward 0. Count the
+                # observation step just produced: a single large search/visit result can
+                # push the NEXT prompt past the context in one turn (est. ~3 chars/token),
+                # so include it before deciding, else the guard undercounts and overflows.
+                if self._force_threshold is not None:
+                    obs_texts = getattr(observation, "texts", None)
+                    obs_tok = (max((len(x or "") for x in obs_texts), default=0) // 3) if obs_texts else 0
+                    if self._accumulated_tokens(sample) + obs_tok >= self._force_threshold:
+                        return self._force_final_answer(sample, env_reward)
                 if observation is not None:
                     sample = sample.observe(observation)  # +[obs(1)]
+            # max_turns reached: salvage an answer when a budget is configured
+            # (deep-research), else terminate with whatever the last turn produced.
+            if self._force_threshold is not None:
+                return self._force_final_answer(sample, env_reward)
             return self._attach_env_reward(sample, env_reward), True  # max_turns reached = terminal
         except Exception as exc:  # noqa: BLE001 — isolate: one bad trajectory must not sink the drain
             # Mark the trajectory FAILED (NaN) instead of letting an infrastructure
@@ -445,6 +520,184 @@ class AgenticRolloutEngine(BaseRolloutEngine):
             last, "rewards", torch.full((int(last.batch_size),), float(reward), dtype=torch.float32)
         )
         return sample.with_parts([rewarded if p is last else p for p in sample.parts])
+
+    @staticmethod
+    def _attach_tool_diagnostics(sample: Sample, info: Any) -> Sample:
+        """Attach row-aligned safe tool aggregates to the generated frontier.
+
+        ``ToolEnvironment.step`` owns the diagnostic schema and guarantees that
+        the mappings contain aggregate counters rather than credentials or raw
+        exception text. This adapter deliberately copies, rather than aliases,
+        each mapping because tool implementations may reuse a mutable accumulator
+        on their next call. A malformed/misaligned optional diagnostic must never
+        turn an otherwise valid policy trajectory into an engine crash.
+        """
+        if not isinstance(info, dict) or "tool_diagnostics" not in info:
+            return sample
+        diagnostics = info.get("tool_diagnostics")
+        if isinstance(diagnostics, dict) and sample.parts[-1].batch_size == 1:
+            diagnostics = [diagnostics]
+        if not isinstance(diagnostics, (list, tuple)):
+            return sample
+        frontier = sample.parts[-1]
+        if not frontier.is_gen or len(diagnostics) != int(frontier.batch_size):
+            logger.warning(
+                "AgenticRolloutEngine: ignoring misaligned tool diagnostics (%s rows for batch %s)",
+                len(diagnostics),
+                frontier.batch_size,
+            )
+            return sample
+        if all(diagnostic is None for diagnostic in diagnostics):
+            # A no-tool/answer row carries ``None`` in ToolEnvironment's aligned
+            # list. Keep the exact historical metadata representation in this
+            # overwhelmingly common terminal case.
+            return sample
+        source = frontier.metadata
+        if not source or len(source) != int(frontier.batch_size):
+            source = [{} for _ in range(int(frontier.batch_size))]
+        metadata: List[Dict[str, Any]] = []
+        for old, diagnostic in zip(source, diagnostics):
+            if diagnostic is None:
+                metadata.append(dict(old or {}))
+                continue
+            if not isinstance(diagnostic, dict):
+                return sample
+            metadata.append({**(old or {}), "tool_diagnostics": dict(diagnostic)})
+        marked = _part_with_field(frontier, "metadata", metadata)
+        return sample.with_parts([marked if part is frontier else part for part in sample.parts])
+
+    # ------------------------------------------------------------------
+    # Force-answer token-budget guard (LIN-564, AReaL tongyi_deepresearch parity)
+    # ------------------------------------------------------------------
+
+    #: The user nudge injected when a trajectory hits the token budget — from AReaL's
+    #: react_agent force-answer prompt (asks for <think>…</think> then <answer>…</answer>,
+    #: which the thinking-on policy produces).
+    _FORCE_ANSWER_NUDGE = (
+        "You have now reached the maximum context length you can handle. You should stop "
+        "making tool calls and, based on all the information above, think again and provide "
+        "what you consider the most likely answer in the following format:"
+        "<think>your final thinking</think>\n<answer>your answer</answer>"
+    )
+
+    def _accumulated_tokens(self, sample: Sample) -> int:
+        """Tokens consumed so far = the last generated turn's rendered prompt (system +
+        tools + every prior turn/observation) plus that turn's own output. Reads what
+        rollout already computed (``conditions['prompt']`` + ``segment.lengths``); no
+        re-tokenization. Returns 0 if unavailable, which safely disables the guard for
+        that trajectory (``_run_one`` must never raise over token accounting)."""
+        for part in reversed(sample.parts):
+            try:
+                prompt = part.conditions["prompt"]
+            except (AttributeError, KeyError, TypeError):
+                continue
+            try:
+                prompt_tok = int(prompt.attention_mask[0].sum())
+                seg = getattr(part, "segment", None)
+                gen_tok = int(seg.lengths[0]) if seg is not None and getattr(seg, "lengths", None) is not None else 0
+                return prompt_tok + gen_tok
+            except Exception:  # noqa: BLE001 — accounting must never sink the trajectory
+                return 0
+        return 0
+
+    def _force_final_answer(self, sample: Sample, env_reward: Optional[float]) -> Tuple[Sample, bool]:
+        """Append a "stop and answer now" user turn and force ONE final generation,
+        capped so it cannot overflow the context, then terminate. Mirrors AReaL's
+        force-answer-at-80%-context behaviour so a budget-exhausted trajectory produces
+        an ``<answer>`` (gradable) instead of overflowing to reward 0."""
+        sample = sample.observe(Texts(texts=[self._FORCE_ANSWER_NUDGE]), role="user")
+        cap = int(self._sp.max_new_tokens)
+        if self._traj_token_budget is not None:
+            headroom = self._traj_token_budget - self._accumulated_tokens(sample)
+            cap = max(256, min(cap, headroom))
+        final_sp = dataclasses.replace(self._sp, max_new_tokens=cap)
+        sample = self._inner.generate(sample.fork(1, sampling_params=final_sp))
+        return self._attach_env_reward(sample, env_reward), True
+
+    @staticmethod
+    def _is_single_neither(info: Any) -> bool:
+        """Whether ``ToolEnvironment`` classified this one-trajectory frontier as
+        true NEITHER. Other environments do not emit the key and remain unchanged."""
+        if not isinstance(info, dict):
+            return False
+        flags = info.get("per_sample_neither")
+        return isinstance(flags, (list, tuple)) and len(flags) == 1 and flags[0] is True
+
+    def _continue_neither_as_answer(self, sample: Sample, env_reward: Optional[float]) -> Tuple[Sample, bool]:
+        """Inject an assistant-side ``<answer>`` prefix and sample one continuation.
+
+        ``continue_generation`` is deliberately distinct from ``generate``: it
+        consumes exact token ids and must not render a new role/chat turn. The inner
+        engine stores only sampled suffix tokens/log-probs in the new generated Part,
+        while exposing prefix + suffix as its decoded primitive for terminal grading.
+        """
+        cap = min(int(self._sp.max_new_tokens), self._neither_answer_max_new_tokens)
+        if self._traj_token_budget is not None:
+            headroom = self._traj_token_budget - self._accumulated_tokens(sample)
+            cap = min(cap, max(1, headroom))
+        repair_sp = dataclasses.replace(self._sp, max_new_tokens=max(1, cap))
+        sample = self._inner.continue_generation(
+            sample,
+            prefix=self._neither_answer_prefix,
+            sampling_params=repair_sp,
+            # This branch is terminal and answer-only. If the policy tries to
+            # re-enter tool mode after the injected opener, stop at the FIRST tool
+            # opener rather than allowing another within-turn call sequence. The
+            # malformed answer then receives zero reward, but cannot spam tools.
+            stop=[self._neither_answer_stop, "<tool_call>"],
+        )
+        last = sample.gen_parts()[-1]
+        metadata = [
+            {
+                **(meta or {}),
+                "answer_injected": True,
+                "format_repair": "neither_answer_prefix",
+            }
+            for meta in (last.metadata or [{} for _ in range(last.batch_size)])
+        ]
+        repaired = _part_with_field(last, "metadata", metadata)
+        sample = sample.with_parts([repaired if part is last else part for part in sample.parts])
+        return self._attach_env_reward(sample, env_reward), True
+
+    @staticmethod
+    def _mark_frontier(sample: Sample, **updates: Any) -> Sample:
+        """Copy ``sample`` with metadata updates on its generated frontier."""
+        last = sample.parts[-1]
+        require(last.is_gen, "answer-rescue metadata requires a generated frontier")
+        source = last.metadata or [{} for _ in range(last.batch_size)]
+        metadata = [{**(meta or {}), **updates} for meta in source]
+        marked = _part_with_field(last, "metadata", metadata)
+        return sample.with_parts([marked if part is last else part for part in sample.parts])
+
+    def _nudge_neither_as_answer(self, sample: Sample, env_reward: Optional[float]) -> Tuple[Sample, bool]:
+        """Rescue one NEITHER turn with a user nudge and a full policy generation.
+
+        The controller contributes only an input observation. The policy samples
+        the complete assistant answer, including ``<answer>``, so replay owns real
+        log-probs for every required output token. Metadata creates an explicit
+        intervention boundary for trainer-side credit assignment.
+        """
+        sample = self._mark_frontier(
+            sample,
+            answer_rescue_trigger=True,
+            format_repair="neither_user_nudge",
+        )
+        sample = sample.observe(Texts(texts=[self._neither_answer_nudge]), role="user")
+        cap = min(int(self._sp.max_new_tokens), self._neither_answer_max_new_tokens)
+        if self._traj_token_budget is not None:
+            # ``_accumulated_tokens`` skips the newly appended input Part, so
+            # reserve a conservative chars/token estimate for the nudge itself.
+            nudge_tokens = max(1, len(self._neither_answer_nudge) // 3)
+            headroom = self._traj_token_budget - self._accumulated_tokens(sample) - nudge_tokens
+            cap = min(cap, max(1, headroom))
+        answer_sp = dataclasses.replace(self._sp, max_new_tokens=max(1, cap))
+        sample = self._inner.generate(sample.fork(1, sampling_params=answer_sp))
+        sample = self._mark_frontier(
+            sample,
+            answer_rescued=True,
+            format_repair="neither_user_nudge",
+        )
+        return self._attach_env_reward(sample, env_reward), True
 
     def _pull(self, coordinator: Any, role_name: str) -> Optional[Sample]:
         """Pull the next task from the coordinator — a blocking Ray RPC on this

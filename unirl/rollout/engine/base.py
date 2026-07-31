@@ -17,6 +17,7 @@ import torch
 from unirl.distributed.group.dispatch import Dispatch, distributed
 from unirl.distributed.group.remote import Remote
 from unirl.types.sample import Sample
+from unirl.types.sampling import BaseSamplingParams
 
 #: The rollout batch contract (LIN-522). Single-turn engines return one ``Sample``;
 #: the agentic engine returns a list of variable-depth trajectory ``Sample``s (one
@@ -237,6 +238,31 @@ class BaseSingleTurnRolloutEngine(BaseRolloutEngine, ABC):
     @abstractmethod
     def generate(self, sample: Sample) -> Sample:
         """Synchronously fill and return one request ``Sample``."""
+
+    def continue_generation(
+        self,
+        sample: Sample,
+        *,
+        prefix: str,
+        sampling_params: Optional[BaseSamplingParams] = None,
+        stop: Optional[List[str]] = None,
+    ) -> Sample:
+        """Continue the frontier generation after a decoder-injected prefix.
+
+        This is an optional text-engine capability used to repair an otherwise
+        terminal assistant message without adding a user/tool prompt.  The
+        continuation is a second physical decode whose input is the frontier's
+        exact rollout prompt + response tokens + ``prefix``.  Concrete engines
+        must return it as a new generated :class:`~unirl.types.sample.Part` whose
+        segment contains only newly sampled suffix tokens; the injected prefix is
+        conditioning, not a policy action.
+
+        ``sampling_params`` defaults to those of the frontier generation.
+        ``stop`` is engine-specific; text implementations normally use
+        ``["</answer>"]`` for answer repair.
+        """
+        del sample, prefix, sampling_params, stop
+        raise NotImplementedError(f"{type(self).__name__} does not support decoder-prefix continuation")
 
     def _stamp_weight_version(self, sample: Sample) -> Sample:
         """Stamp ``self._weight_version`` onto the frontier (last) gen Part."""

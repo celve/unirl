@@ -59,6 +59,8 @@ def main(cfg: DictConfig) -> None:
         adv_normalization_scope=cfg.get("adv_normalization_scope", "group"),
         normalize_adv_by_std=cfg.get("normalize_adv_by_std", True),
         stop=cfg.get("stop"),
+        mask_answer_rescue_trigger_task_credit=cfg.get("mask_answer_rescue_trigger_task_credit", False),
+        answer_rescue_trigger_penalty=cfg.get("answer_rescue_trigger_penalty", 0.0),
         train_fraction=cfg.get("train_fraction", 0.5),
         oversample_batch_size=cfg.get("oversample_batch_size"),
         buffer_max_staleness=cfg.get("buffer_max_staleness"),

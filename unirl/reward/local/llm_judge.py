@@ -49,7 +49,9 @@ _DEFAULT_JUDGE_PROMPT = (
 # double-negatives ("not incorrect") are out of scope; ambiguous replies score
 # 0.0 (under-reward on uncertainty, matching the judge-failure convention).
 _INCORRECT_RE = re.compile(r"\b(?:incorrect|not\s+correct|isn'?t\s+correct|wrong|not\s+equivalent)\b")
-_CORRECT_RE = re.compile(r"\b(?:correct|equivalent|yes)\b")
+# ``correct`` must not be the head of "correct answer": a judge explaining the
+# reference ("the correct answer is X") is NOT a positive verdict (LIN-564).
+_CORRECT_RE = re.compile(r"\b(?:correct(?!\s+answer)|equivalent|yes)\b")
 
 
 def _parse_verdict(content: str) -> float:
@@ -88,6 +90,16 @@ class LLMJudgeRewardScorer(LocalRewardBackend):
             )
 
     def _judge_one(self, question: str, prediction: str, answer: str) -> float:
+        # LIN-564: an empty / whitespace-only prediction is definitionally wrong;
+        # never route it to the judge. The LLM judge scores ~20% of empty
+        # predictions "correct", which GRPO exploits — the policy collapses to a
+        # single empty EOS token, abandons tool use, and the reward curve climbs
+        # deceptively. Hard-zero it so real research always out-scores silence.
+        # Gated by $HARD_ZERO_EMPTY (default on). Set to 0 to reproduce AReaL's
+        # process faithfully: AReaL routes empty/untagged predictions to the judge
+        # (lenient), which is the reward-sign difference that lets its turns grow.
+        if os.environ.get("HARD_ZERO_EMPTY", "1").lower() in ("1", "true", "yes") and not (prediction or "").strip():
+            return 0.0
         prompt = self._spec.prompt_template.format(
             question=question,
             answer=answer,
@@ -140,5 +152,5 @@ class LLMJudgeSpec(BaseRewardComponentSpec):
     timeout: float = 60.0
     max_tokens: int = 512
     max_retries: int = 3
-    max_prediction_chars: int = 4000
+    max_prediction_chars: int = 200  # tongyi_deepresearch caps the graded answer at 200 chars (LIN-564)
     prompt_template: str = _DEFAULT_JUDGE_PROMPT

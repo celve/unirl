@@ -29,12 +29,14 @@ import torch
 from unirl.config.require import require
 from unirl.distributed.group.dispatch import Dispatch, distributed
 from unirl.rollout.engine.base import BaseSingleTurnRolloutEngine
-from unirl.rollout.engine.sglang.adapters import get_adapter
+from unirl.rollout.engine.sglang.adapters import PreparedInputs, get_adapter
 from unirl.rollout.engine.sglang.backends import HTTPBackend, NativeBackend
 from unirl.rollout.engine.sglang.config import SGLangEngineConfig, SGLangPorts
 from unirl.rollout.engine.sglang.utils import resolve_sampling
 from unirl.rollout.engine.sglang.weight_sync import WeightSync
-from unirl.types.sample import Sample
+from unirl.types.primitives import Texts
+from unirl.types.sample import Sample, _part_with_field
+from unirl.types.sampling import BaseSamplingParams
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +87,7 @@ class SGLangRolloutEngine(BaseSingleTurnRolloutEngine):
         from transformers import AutoTokenizer
 
         tokenizer = AutoTokenizer.from_pretrained(config.pretrained_model_ckpt_path, trust_remote_code=True)
+        self._tokenizer = tokenizer
         processor = None
         if config.image_token is not None:
             from transformers import AutoProcessor
@@ -175,6 +178,141 @@ class SGLangRolloutEngine(BaseSingleTurnRolloutEngine):
         prepared = self._prepare_generation(sample)
         raw = self._backend.generate(prepared.wire)
         return self._finish_generation(sample, prepared, raw)
+
+    @distributed(dispatch_mode=Dispatch.DP_SCATTER)
+    def continue_generation(
+        self,
+        sample: Sample,
+        *,
+        prefix: str,
+        sampling_params: Optional[BaseSamplingParams] = None,
+        stop: Optional[List[str]] = None,
+    ) -> Sample:
+        """Continue the current assistant message after an injected decoder prefix.
+
+        This is deliberately a second physical SRT request, but it does not render
+        another chat turn.  For each frontier row its wire input is the *exact*
+        prompt ids stored by the first decode, followed by that decode's response
+        ids (with terminal EOS removed), followed by ``prefix`` ids.  Only the
+        newly sampled suffix becomes the new generated Part's segment/log-probs;
+        therefore every stored old log-prob still belongs to a real policy action.
+
+        The decoded primitive prepends ``prefix`` to the returned suffix because
+        terminal reward extraction reads the final generated Part rather than its
+        prompt condition.  ``</answer>`` is the default stop and stop trimming is
+        forcibly disabled so the scorer sees a complete tagged span.
+        """
+        require(bool(sample.parts), "SGLang continuation requires a non-empty Sample")
+        previous = sample.parts[-1]
+        require(previous.is_gen, "SGLang continuation requires a generated frontier Part")
+        require(bool(prefix), "SGLang continuation requires a non-empty decoder prefix")
+
+        segment = previous.segment
+        require(
+            segment is not None
+            and getattr(segment, "tokens", None) is not None
+            and getattr(segment, "cu_seqlens", None) is not None,
+            "SGLang continuation requires packed frontier response tokens",
+        )
+        prompt = (previous.conditions or {}).get("prompt")
+        require(
+            prompt is not None
+            and getattr(prompt, "input_ids", None) is not None
+            and getattr(prompt, "attention_mask", None) is not None,
+            "SGLang continuation requires the frontier's exact prompt condition",
+        )
+
+        params = sampling_params or previous.sampling_params
+        require(params is not None, "SGLang continuation requires sampling params")
+        request = sample.fork(1, sampling_params=params)
+        sampling = resolve_sampling(self.cfg, request)
+        require(sampling.n == 1, f"SGLang continuation requires branch-1 generation; got n={sampling.n}")
+
+        encoded_prefix = self._tokenizer.encode(prefix, add_special_tokens=False)
+        if hasattr(encoded_prefix, "tolist"):
+            encoded_prefix = encoded_prefix.tolist()
+        prefix_ids = [int(token_id) for token_id in encoded_prefix]
+        require(bool(prefix_ids), "SGLang continuation prefix encoded to zero tokens")
+
+        prompt_ids = prompt.input_ids
+        prompt_mask = prompt.attention_mask
+        batch_size = int(previous.batch_size)
+        require(
+            int(prompt_ids.shape[0]) == batch_size and int(prompt_mask.shape[0]) == batch_size,
+            "SGLang continuation prompt condition is not frontier-row aligned",
+        )
+        cu = [int(x) for x in segment.cu_seqlens.tolist()]
+        require(
+            len(cu) == batch_size + 1,
+            "SGLang continuation packed response offsets are not frontier-row aligned",
+        )
+
+        eos = getattr(self._tokenizer, "eos_token_id", None)
+        eos_ids = (
+            {int(x) for x in eos} if isinstance(eos, (list, tuple, set)) else ({int(eos)} if eos is not None else set())
+        )
+        full_inputs: List[List[int]] = []
+        for row in range(batch_size):
+            real_prompt = prompt_ids[row][prompt_mask[row].to(dtype=torch.bool)].tolist()
+            response = segment.tokens[cu[row] : cu[row + 1]].tolist()
+            # An EOS was sampled to end the first request; retaining it before the
+            # injected prefix would ask the model to continue *after* end-of-sequence.
+            while response and int(response[-1]) in eos_ids:
+                response.pop()
+            full_inputs.append([int(x) for x in real_prompt] + [int(x) for x in response] + prefix_ids)
+
+        block = dict(sampling.block)
+        block["stop"] = list(stop) if stop is not None else ["</answer>"]
+        block["no_stop_trim"] = True
+        # ``request`` is branch-1, but spell this invariant on the wire too so a
+        # future sampling resolver change cannot fan out a repair continuation.
+        block["n"] = 1
+        wire = [
+            {
+                "input_ids": ids,
+                "sampling_params": dict(block),
+                "return_logprob": sampling.return_logprob,
+                "logprob_start_len": 0,
+            }
+            for ids in full_inputs
+        ]
+        active_adapter = self._weight_sync.active_adapter
+        if active_adapter:
+            for payload in wire:
+                payload["lora_path"] = active_adapter
+        prepared = PreparedInputs(
+            wire=wire,
+            prompt_token_ids=full_inputs,
+            resolved_n=1,
+        )
+
+        raw = self._backend.generate(wire)
+        continued = self._finish_generation(request, prepared, raw)
+        frontier = continued.parts[-1]
+        frontier_text = frontier.primitives.get("text")
+        require(
+            isinstance(frontier_text, Texts),
+            "SGLang decoder-prefix continuation requires a text response",
+        )
+        visible = _part_with_field(
+            frontier,
+            "primitives",
+            {**frontier.primitives, "text": Texts(texts=[prefix + text for text in frontier_text.texts])},
+        )
+        metadata = []
+        prior_metadata = frontier.metadata or [{} for _ in range(frontier.batch_size)]
+        for row in range(frontier.batch_size):
+            item = dict(prior_metadata[row] or {}) if row < len(prior_metadata) else {}
+            item.update(
+                {
+                    "answer_injected": True,
+                    "format_repair": True,
+                    "decoder_prefix": prefix,
+                }
+            )
+            metadata.append(item)
+        visible = _part_with_field(visible, "metadata", metadata)
+        return continued.with_parts([*continued.parts[:-1], visible])
 
     # ── control plane — sync; reached via the raw Worker.call RPC ──────────
     def abort(self, ids: Optional[List[str]] = None) -> List[Sample]:

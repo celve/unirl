@@ -91,6 +91,10 @@ class GRPO(StageAlgorithm):
         self.clip_range_high = None if clip_range_high is None else float(clip_range_high)
         self.clip_schedule = str(clip_schedule)
         self.loss_agg_mode = str(loss_agg_mode)
+        # ``global-token-mean`` is only a global mean if the stack also combines
+        # micros by their valid-token share instead of their sample share; the
+        # masked micro loss below supplies the matching per-micro numerator.
+        self.loss_weighting = "token" if self.loss_agg_mode == "global-token-mean" else "sample"
         self.horizon = int(horizon)
         self.conditions_cls = conditions_cls
         if sampling_temperature is None:
@@ -144,13 +148,25 @@ class GRPO(StageAlgorithm):
         #    then mean over sequences (length-UNbiased).
         #  - "seq-mean-token-mean" (ORIGINAL GRPO): per-seq token-MEAN, then mean
         #    over sequences (length-normalized, the standard-GRPO length bias).
-        #  - "token-mean" (default): flat mean over all tokens.
+        #  - "token-mean" (default): flat mean within this micro-batch; the
+        #    historical stack still combines micros by sample share.
+        #  - "global-token-mean": flat mean over active tokens across every
+        #    micro-batch and DP rank; TrainStack supplies the global token share.
         if self.loss_agg_mode in ("seq-mean-token-sum-norm", "seq-mean-token-mean") and segment.lengths is not None:
             parts = torch.split(loss_per_elem, segment.lengths.tolist())
             if self.loss_agg_mode == "seq-mean-token-sum-norm":
                 loss = torch.stack([p.sum() for p in parts]).mean() / float(self.horizon)
             else:  # seq-mean-token-mean — guard 0-length responses (mean of empty = NaN)
                 loss = torch.stack([p.mean() if p.numel() else p.new_zeros(()) for p in parts]).mean()
+        elif self.loss_agg_mode == "global-token-mean" and segment.loss_mask is not None:
+            mask = segment.loss_mask.to(device=loss_per_elem.device, dtype=torch.bool)
+            if mask.shape != loss_per_elem.shape:
+                raise ValueError(
+                    "GRPO global-token-mean loss_mask must align with packed tokens; "
+                    f"got {tuple(mask.shape)} vs {tuple(loss_per_elem.shape)}"
+                )
+            loss = torch.where(mask, loss_per_elem, torch.zeros_like(loss_per_elem)).sum()
+            loss = loss / mask.count_nonzero().clamp(min=1)
         else:
             loss = loss_per_elem.mean()
         (loss * loss_scale).backward()

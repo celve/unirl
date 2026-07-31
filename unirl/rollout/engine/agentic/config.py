@@ -16,7 +16,7 @@ worker gets its **own local** inner engine + environment instance.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Optional
 
 from unirl.rollout.engine.base import BaseEngineConfig
 
@@ -52,6 +52,44 @@ class AgenticRolloutEngineConfig(BaseEngineConfig):
     #: to the barrier ``generate``. The engine provides the mechanism; the policy
     #: (how many, when to sync) lives in the trainer.
     partial_rollout: bool = False
+
+    #: Per-trajectory token budget (AReaL tongyi_deepresearch: 27648). When set, the
+    #: agent loop forces a final answer once a trajectory's accumulated tokens reach
+    #: ``force_answer_fraction`` of it — capping runaway tool loops and preventing the
+    #: context overflow that would otherwise zero the reward. ``None`` disables the
+    #: guard, so other agentic recipes (calculator / ALFWorld) stay byte-identical.
+    max_tokens_per_trajectory: Optional[int] = None
+    #: Fraction of ``max_tokens_per_trajectory`` at which to force the final answer,
+    #: leaving headroom for the forced answer turn (AReaL forces at 0.8 of context).
+    force_answer_fraction: float = 0.8
+
+    #: Decoder-side repair for a generation that is neither a parseable tool call
+    #: nor a complete ``<answer>...</answer>``. When enabled, the agent does not add
+    #: a synthetic user turn. Instead it appends ``neither_answer_prefix`` to the
+    #: exact assistant token stream and performs one raw continuation, stopping at
+    #: ``neither_answer_stop``. Disabled by default so existing recipes are unchanged.
+    inject_answer_after_neither: bool = False
+    #: Literal assistant-side prefix inserted before the repair continuation.
+    neither_answer_prefix: str = "\n<answer>"
+    #: Stop boundary for the repair continuation; retained in decoded output.
+    neither_answer_stop: str = "</answer>"
+    #: Maximum sampled suffix length for the one-shot repair continuation.
+    neither_answer_max_new_tokens: int = 1024
+
+    #: Intervention-aware answer rescue for a true NEITHER generation. Unlike
+    #: ``inject_answer_after_neither``, this appends a user-side format nudge and
+    #: performs an ordinary generation, so the policy itself samples the complete
+    #: ``<answer>...</answer>`` response (including the opener). The triggering
+    #: NEITHER and rescued answer are marked separately for trainer-side credit.
+    nudge_answer_after_neither: bool = False
+    #: User observation used by the one-shot NEITHER rescue. Kept configurable so
+    #: experiments can match an external controller without changing engine code.
+    neither_answer_nudge: str = (
+        "Your previous response did not use the required final-answer tags. Stop "
+        "making tool calls and, based on all the information above, provide your "
+        "most likely answer in the following format:"
+        "<think>your final thinking</think>\n<answer>your answer</answer>"
+    )
 
     def make_engine(self, **deps: Any):
         """Construct the runtime :class:`AgenticRolloutEngine` (lazy import)."""

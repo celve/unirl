@@ -45,7 +45,6 @@ import sys
 import time
 from typing import Dict, Iterable, List, Literal, Optional, Set, Tuple
 
-import torch
 from hydra.utils import instantiate
 from omegaconf import DictConfig
 
@@ -53,7 +52,7 @@ from unirl.distributed.group.placement import placement, remote
 from unirl.train.stack import TrainStepResult
 from unirl.trainer.agentic import AgenticTrainer
 from unirl.trainer.base import BaseTrainer, build_sampling_dict
-from unirl.types.sample import Part, Sample, _part_with_field
+from unirl.types.sample import Part, Sample
 from unirl.types.sampling import BaseSamplingParams
 from unirl.utils.hydra import parse_hydra_cfg, remote_hydra
 
@@ -202,6 +201,8 @@ class AsyncAgenticTrainer(AgenticTrainer):
         adv_normalization_scope: str = "group",
         normalize_adv_by_std: bool = True,
         stop: Optional[List[str]] = None,
+        mask_answer_rescue_trigger_task_credit: bool = False,
+        answer_rescue_trigger_penalty: float = 0.0,
         # ---- async knobs ----
         train_fraction: float = 0.5,
         oversample_batch_size: Optional[int] = None,
@@ -223,6 +224,12 @@ class AsyncAgenticTrainer(AgenticTrainer):
         self.weight_sync = None
         # Per-turn stop (AgenticTrainer.__init__): a tool-call turn ends at ``</tool_call>``.
         self._stop = list(stop) if stop else ["</tool_call>"]
+        self._mask_answer_rescue_trigger_task_credit = bool(mask_answer_rescue_trigger_task_credit)
+        self._answer_rescue_trigger_penalty = float(answer_rescue_trigger_penalty)
+        if self._answer_rescue_trigger_penalty < 0:
+            raise ValueError("answer_rescue_trigger_penalty must be non-negative")
+        if self._answer_rescue_trigger_penalty and not self._mask_answer_rescue_trigger_task_credit:
+            raise ValueError("answer_rescue_trigger_penalty requires mask_answer_rescue_trigger_task_credit=true")
 
         # ---- async state ----
         self._train_fraction = float(train_fraction)
@@ -441,9 +448,16 @@ class AsyncAgenticTrainer(AgenticTrainer):
     def _train_on_groups(
         self, groups: List[List[Sample]], *, training_progress: float, rollout_id: int, t0: float
     ) -> Tuple[TrainStepResult, float]:
-        """Reward + GROUP-relative advantage + one step over ``batch_size`` complete
-        groups. Reuses :class:`AgenticTrainer`'s reward/GRPO/log helpers; the train-part
-        assembly mirrors :meth:`AgenticTrainer.train_step` (steps 5-6)."""
+        """Reward + one infrastructure-aware step over complete groups.
+
+        The producer/buffer is async-specific, but once a complete group batch is
+        selected its policy semantics must be identical to the synchronous and
+        colocated-partial trainers. In particular, auth or exhausted-transient tool
+        failures invalidate every sibling in that GRPO group before advantage
+        normalization, training assembly, trajectory dumping, and rollout logging.
+        Delegate that shared tail instead of maintaining a second subtly divergent
+        copy here.
+        """
         trajs: List[Sample] = [t for group in groups for t in group]
         # Reconstruct a request whose root Part carries every trajectory's root id +
         # ground-truth answer (looked up in _gt_by_root, not the trajectory), so the
@@ -454,37 +468,15 @@ class AsyncAgenticTrainer(AgenticTrainer):
         rewards, group_ids = self._rewards_and_groups(request, trajs, rollout_id)
         for root in set(roots):
             self._gt_by_root.pop(root, None)
-        finite = torch.isfinite(rewards)
-        mean_reward = float(rewards[finite].mean().item()) if bool(finite.any()) else 0.0
-        advantages = self._group_advantages(rewards, group_ids)
-
-        train_parts: List[Part] = []
-        for i, tr in enumerate(trajs):
-            adv_i = float(advantages[i].item())
-            for gp in tr.gen_parts():
-                gp = _part_with_field(gp, "advantages", torch.full((gp.batch_size,), adv_i, dtype=torch.float32))
-                gp = _part_with_field(gp, "primitives", {})  # free decoded content before train
-                gp = _part_with_field(gp, "rewards", None)
-                train_parts.append(gp)
-
-        depths = [len(tr.gen_parts()) for tr in trajs]
-        if not train_parts:
-            logger.warning("AsyncAgenticTrainer rollout %d produced no trainable turns.", rollout_id)
-            return TrainStepResult(0.0, 0.0, 0.0, False, [], {}), mean_reward
-
-        train_part = self._pad_to_dp_multiple(Part.concat(train_parts))
-        result = self.stack.train_track(train_part, training_progress=float(training_progress))
-
-        log_sample = self._build_log_sample(trajs, rewards, advantages, rollout_id)
         versions = [gp.weight_version for tr in trajs for gp in tr.gen_parts() if gp.weight_version is not None]
-        self.wandb_logger.log_rollout_step(
-            rollout_id,
-            result,
-            log_sample,
-            step_time_s=time.perf_counter() - t0,
+        result, mean_reward = self._advantage_train_and_log(
+            trajs,
+            rewards,
+            group_ids,
+            rollout_id=rollout_id,
+            training_progress=training_progress,
+            t0=t0,
             extra_metrics={
-                "agent/mean_turns": (sum(depths) / len(depths)) if depths else 0.0,
-                "agent/max_turns": max(depths) if depths else 0,
                 "async/buffer_groups": self._buffer.size(),
                 "async/weight_version": self._weight_version,
                 "async/version_span": (max(versions) - min(versions)) if versions else 0,
