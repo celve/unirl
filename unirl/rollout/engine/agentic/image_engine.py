@@ -19,11 +19,37 @@ coordinator/drain surface unchanged (``set_workers`` / ``submit`` / ``poll`` /
 demux over ``{ar, diffusion}``) and lifecycle (cover both children) are
 overridden.
 
-v1 scope: colocated diffusion (same workers, wake/sleep), the barrier
-``generate`` path (``partial_rollout=false``), one terminal text-conditioned
-diffusion gen. Deferred (see the LIN-577 plan): the joint trainer, a runnable
-recipe, partial/async diffusion timing, separate-slab placement, and
-image/IT2I agent→diffusion conditions.
+Two shapes, selected by ``config.in_loop_images``:
+
+**Terminal** (``False``, the v1 shape). The agent loop is all-text; after
+``run_drain`` joins every drain thread, each finished trajectory's final answer
+conditions ONE diffusion generation, appended as a terminal gen Part. Cheap,
+because the whole worker's trajectories batch into a single diffusion call.
+
+**In-loop** (``True``). The agent renders *mid*-trajectory by calling the ``draw``
+tool: the image lands on the trajectory as a **trainable** diffusion gen Part
+(carrying its ``LatentSegment``), the agent sees it on the next turn, and a later
+draw edits it (ti2i). Three constraints make this work, each load-bearing:
+
+1. *The image Part is tagged* ``role="tool"``. A gen Part's role resolves to
+   ``"assistant"``, and ``build_vision_conversations`` fuses **consecutive
+   same-role** turns into one message ordered ``image_blocks + text_blocks`` — so
+   an untagged image would collapse draw/critique/redraw into a single assistant
+   message with every image hoisted in front of every text, destroying the
+   temporal structure the agent needs to refine. Role is orthogonal to ``is_gen``,
+   so the tagged Part stays trainable.
+2. *Requests are re-rooted, then written back.* The ti2i adapter demands exactly
+   one text and one image turn, which a multi-turn trajectory never satisfies. The
+   batcher re-roots onto a fresh ``{"text", "image"}`` input Part (one turn per
+   modality via ``PRIMITIVE_MODALITY_ORDER``) and this engine writes the resulting
+   block back onto the real lineage.
+3. *Concurrent image turns are coalesced* (:class:`DiffusionTurnBatcher`). The
+   diffusion engines serialize concurrent ``generate`` callers, unlike the AR
+   inner whose backend batches them, so K drain threads would otherwise cost K
+   sequential passes.
+
+Still deferred (see the LIN-577 plan): the joint trainer, a runnable recipe, and
+partial/async diffusion timing.
 """
 
 from __future__ import annotations
@@ -35,10 +61,11 @@ from typing import Any, Dict, List, Optional
 from unirl.config.require import require
 from unirl.distributed.group.dispatch import Dispatch, distributed
 from unirl.rollout.engine.agentic.engine import AgenticRolloutEngine
+from unirl.rollout.engine.agentic.image_batcher import DiffusionTurnBatcher
 from unirl.rollout.engine.agentic.image_config import AgenticImageRolloutEngineConfig
 from unirl.rollout.engine.base import BaseSingleTurnRolloutEngine
-from unirl.types.primitives import Texts
-from unirl.types.sample import Part, Sample
+from unirl.types.primitives import Images, Texts
+from unirl.types.sample import Part, Primitive, Sample, _part_with_field
 from unirl.types.sampling import total_samples_per_prompt
 
 logger = logging.getLogger(__name__)
@@ -67,7 +94,7 @@ def _shutdown_quietly(engine: Any) -> None:
 
 
 class AgenticImageRolloutEngine(AgenticRolloutEngine):
-    """Agentic multi-turn LLM loop with a terminal diffusion image generation."""
+    """Agentic multi-turn LLM loop with diffusion image turns (terminal or in-loop)."""
 
     _component_name = "agentic_image"
 
@@ -125,6 +152,38 @@ class AgenticImageRolloutEngine(AgenticRolloutEngine):
         self._answer_max_chars = config.answer_max_chars
         # Colocated diffusion: wake/sleep it around the terminal phase (shared slab).
         self._colocate = bool(config.sleep_diffusion_on_start)
+
+        # In-loop image turns (see the module docstring). Validated here rather than
+        # discovered mid-drain, where a bad shape would surface as a mangled
+        # conversation or a silently branched trajectory.
+        self._in_loop = bool(config.in_loop_images)
+        self._draw_tool = str(config.draw_tool_name)
+        self._batcher: Optional[DiffusionTurnBatcher] = None
+        if self._in_loop:
+            require(
+                self._diff_M == 1,
+                "AgenticImageRolloutEngine: in_loop_images requires diffusion samples_per_prompt == 1 "
+                f"(got M={self._diff_M}); forking M>1 mid-trajectory branches it and leaves later AR "
+                "turns M-wide. Fan GRPO siblings with the agentic engine's n instead.",
+            )
+            require(
+                not self._colocate,
+                "AgenticImageRolloutEngine: in_loop_images requires sleep_diffusion_on_start=false. "
+                "Per-phase wake/sleep cannot work when diffusion turns interleave with in-flight AR "
+                "turns on other drain threads; keep both children resident and budget them with "
+                "per-engine mem_fraction_static (see examples/pe/pe_sglang_full_wise.yaml).",
+            )
+            require(
+                bool(self._draw_tool),
+                "AgenticImageRolloutEngine: in_loop_images requires a non-empty draw_tool_name",
+            )
+            self._batcher = DiffusionTurnBatcher(
+                self._diffusion,
+                self._diff_sp,
+                max_batch=self._concurrency,
+                window_s=float(config.draw_batch_window_s),
+            )
+
         if self._colocate:
             self._diffusion.sleep()
 
@@ -133,15 +192,111 @@ class AgenticImageRolloutEngine(AgenticRolloutEngine):
     # ------------------------------------------------------------------
 
     def run_drain(self, coordinator: Any, role_name: str) -> None:
-        """Run the inherited LLM trajectory drain, then diffuse the terminal set.
+        """Run this worker's drain, rendering images in-loop or after the barrier.
 
-        ``super().run_drain`` joins every drain thread before returning (barrier),
-        so the inner engine is idle and ``self._completed`` holds this worker's
-        finished trajectories. We then generate one image batch (M per trajectory)
-        conditioned on each trajectory's final answer and append it as a terminal
-        diffusion Part (connected lineage)."""
-        super().run_drain(coordinator, role_name)
-        self._diffuse_completed()
+        **Terminal mode.** ``super().run_drain`` joins every drain thread before
+        returning (barrier), so the inner engine is idle and ``self._completed``
+        holds this worker's finished trajectories. We then generate one image batch
+        (M per trajectory) conditioned on each trajectory's final answer and append
+        it as a terminal diffusion Part (connected lineage).
+
+        **In-loop mode.** The images were already rendered *inside* the loop by
+        :meth:`_observe`, so there is no terminal phase — only the batcher's
+        lifetime to bracket. It is stopped in ``finally`` so a drain that raises
+        cannot strand a caller parked on a batch, and so the next drive starts with
+        a fresh collector.
+        """
+        if not self._in_loop:
+            super().run_drain(coordinator, role_name)
+            self._diffuse_completed()
+            return
+        self._batcher.start()
+        try:
+            super().run_drain(coordinator, role_name)
+        finally:
+            self._batcher.stop()
+
+    # ------------------------------------------------------------------
+    # In-loop image turns — the agent draws, sees, and redraws
+    # ------------------------------------------------------------------
+
+    def _observe(self, sample: Sample, observation: Primitive, info: Any) -> Sample:
+        """Render a ``draw`` call as a diffusion turn; otherwise observe normally.
+
+        The environment already decided the loop continues and surfaced the parsed
+        call in ``info["tool_calls"]``; this only decides *which engine* renders the
+        turn. A malformed draw (no usable prompt) deliberately falls through to the
+        ordinary text observation, so the tool's own error message reaches the model
+        and the agent can correct itself rather than the trajectory dying.
+        """
+        if not self._in_loop:
+            return super()._observe(sample, observation, info)
+        draw = self._draw_request(info)
+        if draw is None:
+            return super()._observe(sample, observation, info)
+        return self._image_turn(sample, draw)
+
+    def _draw_request(self, info: Any) -> Optional[Dict[str, Any]]:
+        """The frontier row's draw call, or ``None`` if this turn is not a draw.
+
+        One trajectory is one row in the drain (``_run_one`` forks width 1), so
+        ``tool_calls`` carries exactly one entry to inspect.
+        """
+        calls = info.get("tool_calls") if isinstance(info, dict) else None
+        if not calls:
+            return None
+        call = calls[0]
+        if not isinstance(call, dict) or call.get("name") != self._draw_tool:
+            return None
+        args = call.get("arguments") or {}
+        prompt = args.get("prompt")
+        if not isinstance(prompt, str) or not prompt.strip():
+            logger.warning(
+                "AgenticImageRolloutEngine: %r call without a usable prompt; observing instead", self._draw_tool
+            )
+            return None
+        return {"prompt": prompt.strip(), "edit": args.get("edit")}
+
+    def _image_turn(self, sample: Sample, draw: Dict[str, Any]) -> Sample:
+        """Append one rendered image as a **trainable** diffusion gen Part.
+
+        Edits the trajectory's most recent image (ti2i) when there is one and the
+        call did not opt out; otherwise renders from scratch (t2i). The batcher
+        re-roots the request — the ti2i adapter needs exactly 1 text + 1 image turn —
+        and returns the filled block, which is written back here onto the real
+        lineage so credit assignment still sees one connected trajectory.
+
+        The Part is tagged ``role="tool"``: a gen Part would otherwise resolve to
+        ``"assistant"`` and fuse with the surrounding agent text into one message
+        (see the module docstring). Tagging keeps the turn structure intact without
+        touching ``is_gen``, so the denoise trajectory stays a training target.
+        """
+        previous = self._last_image(sample)
+        edit = draw["edit"]
+        source = previous if (previous is not None and (edit is None or bool(edit))) else None
+        block = self._batcher.generate(draw["prompt"], source)
+        filled = sample.fork(1, sampling_params=self._diff_sp).with_filled_frontier(
+            segment=block.segment,
+            primitives=dict(block.primitives),
+            primitive_metadata=dict(block.primitive_metadata),
+            conditions=dict(block.conditions),
+            media_preview=block.media_preview,
+            weight_version=block.weight_version,
+        )
+        return filled.replace_frontier(_part_with_field(filled.parts[-1], "role", "tool"))
+
+    @staticmethod
+    def _last_image(sample: Sample) -> Optional[Images]:
+        """The trajectory's most recent image, or ``None`` before the first draw."""
+        for part in reversed(sample.parts):
+            image = part.primitives.get("image")
+            if isinstance(image, Images) and len(image) > 0:
+                return image
+        return None
+
+    # ------------------------------------------------------------------
+    # Terminal image turn — one diffusion gen after the loop finishes
+    # ------------------------------------------------------------------
 
     def _diffuse_completed(self) -> None:
         """Diffuse this worker's terminal trajectories and append the image Parts.
@@ -250,6 +405,14 @@ class AgenticImageRolloutEngine(AgenticRolloutEngine):
 
     @distributed(dispatch_mode=Dispatch.BROADCAST)
     def shutdown(self) -> None:
+        # Stop the collector before the children: it may still be mid-``generate`` on
+        # the diffusion child, and a drain that raised past run_drain's finally can
+        # leave it running.
+        if self._batcher is not None:
+            try:
+                self._batcher.stop()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("AgenticImageRolloutEngine: diffusion batcher stop raised: %s", exc)
         for name, child in self._child_by_name.items():
             try:
                 child.shutdown()

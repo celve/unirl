@@ -2,9 +2,10 @@
 
 A rank-0 coordinator over a DP-replicated slab of per-worker drain thread
 pools; ``generate`` returns a flat ``List[Sample]`` of variable-depth
-trajectories. :class:`AgenticImageRolloutEngine` (LIN-577) extends it with a
-terminal diffusion image generation conditioned on each trajectory's final
-answer.
+trajectories. :class:`AgenticImageRolloutEngine` (LIN-577) extends it with
+diffusion image turns — either one terminal generation conditioned on the
+trajectory's final answer, or, with ``in_loop_images``, trainable mid-trajectory
+renders the agent can inspect and edit (ti2i).
 """
 
 from unirl.rollout.engine.agentic.config import AgenticRolloutEngineConfig

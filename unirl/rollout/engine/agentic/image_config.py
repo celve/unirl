@@ -46,7 +46,43 @@ class AgenticImageRolloutEngineConfig(AgenticRolloutEngineConfig):
     #: Colocated diffusion: sleep the diffusion child on start and wake/sleep it
     #: around the terminal diffusion phase (shared slab, like PE colocate).
     #: ``False`` keeps both children resident (no wake/sleep dance).
+    #: Incompatible with ``in_loop_images`` — see below.
     sleep_diffusion_on_start: bool = True
+
+    #: **In-loop image turns.** ``False`` (default) is the v1 shape: the agent loop is
+    #: all-text and ONE diffusion generation runs after the trajectory finishes.
+    #: ``True`` lets the agent render mid-trajectory by calling ``draw_tool_name``:
+    #: the image lands on the trajectory as a **trainable diffusion gen Part** (it
+    #: carries its ``LatentSegment``, so the denoise trajectory is a policy-gradient
+    #: target), the agent sees it on the next turn, and a later draw edits it (ti2i).
+    #:
+    #: Requires a **VLM** inner engine — a text-only agent cannot see what it drew,
+    #: and ``text_conditioning`` fails loud on the first image turn. That one is on
+    #: the recipe (the engine cannot introspect a backend's modality). The engine
+    #: ctor does validate:
+    #:
+    #: - ``diffusion_sampling.samples_per_prompt == 1`` — forking M>1 mid-trajectory
+    #:   would branch the trajectory and leave later AR turns M-wide. GRPO diversity
+    #:   comes from the ``n`` siblings the agentic engine already fans at submit time;
+    #: - ``sleep_diffusion_on_start=False`` — per-phase wake/sleep cannot work when
+    #:   diffusion turns interleave with in-flight AR turns on other threads. Both
+    #:   children stay resident, as the PE recipes already do
+    #:   (``examples/pe/pe_sglang_full_wise.yaml``), budgeted per engine via
+    #:   ``mem_fraction_static``.
+    in_loop_images: bool = False
+
+    #: Tool name that triggers an in-loop image turn (see
+    #: :class:`~unirl.rollout.loop.tools.draw.DrawTool`). The environment parses the
+    #: call and reports it in ``info["tool_calls"]``; the engine renders it.
+    draw_tool_name: str = "draw"
+
+    #: Coalescing window for in-loop image turns, seconds. The drain's per-trajectory
+    #: threads hit their image turns at slightly different moments; the diffusion
+    #: backends *serialize* concurrent ``generate`` callers, so requests are gathered
+    #: for this long (or until ``per_worker_concurrency`` have parked) and issued as
+    #: one batched call. Small next to a denoise pass — a lone trajectory pays ~this
+    #: much, a full drain saves a factor of K.
+    draw_batch_window_s: float = 0.05
 
     def make_engine(self, **deps: Any):
         """Construct the runtime :class:`AgenticImageRolloutEngine` (lazy import)."""

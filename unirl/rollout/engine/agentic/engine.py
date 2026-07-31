@@ -56,7 +56,7 @@ from unirl.config.require import require
 from unirl.distributed.group.dispatch import Dispatch, Execute, distributed
 from unirl.rollout.engine.agentic.config import AgenticRolloutEngineConfig
 from unirl.rollout.engine.base import BaseRolloutEngine, BaseSingleTurnRolloutEngine
-from unirl.types.sample import Sample, _part_with_field
+from unirl.types.sample import Primitive, Sample, _part_with_field
 from unirl.types.sampling import total_samples_per_prompt
 
 logger = logging.getLogger(__name__)
@@ -405,7 +405,7 @@ class AgenticRolloutEngine(BaseRolloutEngine):
                 if done:
                     return self._attach_env_reward(sample, env_reward), True
                 if observation is not None:
-                    sample = sample.observe(observation)  # +[obs(1)]
+                    sample = self._observe(sample, observation, info)  # +[obs(1)]
             return self._attach_env_reward(sample, env_reward), True  # max_turns reached = terminal
         except Exception as exc:  # noqa: BLE001 — isolate: one bad trajectory must not sink the drain
             # Mark the trajectory FAILED (NaN) instead of letting an infrastructure
@@ -428,6 +428,19 @@ class AgenticRolloutEngine(BaseRolloutEngine):
                     close(sample)
                 except Exception:  # noqa: BLE001 — teardown must not sink the drain
                     logger.warning("AgenticRolloutEngine: env.close failed during teardown", exc_info=True)
+
+    def _observe(self, sample: Sample, observation: Primitive, info: Any) -> Sample:
+        """Fold the world response into the trajectory — the per-turn extension seam.
+
+        The base agentic loop is homogeneous: every turn is an AR generation and every
+        world response is an observation (a mask-0 *input* Part, never trained). A
+        subclass that runs a **different modality** on some turns overrides this to
+        route on ``info``; :class:`~unirl.rollout.engine.agentic.image_engine.
+        AgenticImageRolloutEngine` replaces a ``draw`` tool result with a trainable
+        diffusion gen Part. Kept as a one-line hook so subclasses never fork
+        :meth:`_run_one` — its fault handling and teardown must stay in one place.
+        """
+        return sample.observe(observation)
 
     @staticmethod
     def _attach_env_reward(sample: Sample, reward: Optional[float]) -> Sample:
