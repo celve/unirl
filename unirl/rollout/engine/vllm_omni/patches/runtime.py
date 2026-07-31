@@ -473,7 +473,7 @@ def patch_lora_request_passthrough() -> None:
     Replaces pod-local file patch on ``vllm_omni/entrypoints/omni.py``.
     """
     try:
-        from vllm_omni.engine.async_omni_engine import AsyncOmniEngine
+        from vllm_omni.engine.asynchronousomni_engine import AsyncOmniEngine
         from vllm_omni.entrypoints.omni import Omni
     except (ImportError, AttributeError):
         return  # vllm-omni not available in this process; skip
@@ -578,7 +578,7 @@ def patch_per_request_ar_seed() -> None:
     try:
         import msgspec as _msgspec
         from vllm import SamplingParams as VLLMSamplingParams
-        from vllm_omni.engine.async_omni_engine import AsyncOmniEngine
+        from vllm_omni.engine.asynchronousomni_engine import AsyncOmniEngine
     except (ImportError, AttributeError):
         return
 
@@ -632,7 +632,7 @@ def patch_master_port_unstrip() -> None:
     in ``docs/vllm-omni-v2-engine.md``).
     """
     try:
-        from vllm_omni.engine.async_omni_engine import AsyncOmniEngine
+        from vllm_omni.engine.asynchronousomni_engine import AsyncOmniEngine
 
         _orig = AsyncOmniEngine._strip_single_engine_args
         if getattr(_orig, "_diffrl_master_port_unstrip", False):

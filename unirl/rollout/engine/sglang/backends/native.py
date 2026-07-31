@@ -363,7 +363,7 @@ class NativeBackend:
         kwargs = payload_to_generate_kwargs(payload)
         async with self._sem:
             try:
-                response = await self._engine.async_generate(**kwargs)
+                response = await self._engine.asynchronousgenerate(**kwargs)
             except Exception as exc:
                 raise RuntimeError(f"sglang NativeBackend.generate failed: {exc}") from exc
         parsed = parse_generate_response(response)
