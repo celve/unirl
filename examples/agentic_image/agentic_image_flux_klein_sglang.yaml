@@ -123,6 +123,7 @@ diffusion:
     conditions_cls:
       _target_: hydra.utils.get_class
       path: unirl.models.flux2_klein.conditions.Flux2KleinConditions
+    params: ${sampling.diffusion}
   stack:
     _target_: unirl.train.stack.TrainStack
     micro_batch_size: 1
