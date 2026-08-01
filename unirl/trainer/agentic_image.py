@@ -289,7 +289,11 @@ class AgenticImageTrainer(PETrainer):
         ``pytree_chunk``'s divisibility check; advantage 0 makes the padding a
         zero-gradient no-op for GRPO/DRPO/CPPO.
         """
-        dp = int(getattr(stack, "dp_size", getattr(self, "num_devices", 1)) or 1)
+        # Read dp off the Handle when it exposes a plain int; a Handle attribute can
+        # be a proxy that coerces to a wrong/1 value, which silently under-pads and
+        # then trips the stack's own divisibility check.
+        raw = getattr(stack, "dp_size", None)
+        dp = raw if isinstance(raw, int) and raw > 0 else int(getattr(self, "num_devices", 1) or 1)
         pad = (-int(part.batch_size)) % dp
         if pad == 0:
             return part

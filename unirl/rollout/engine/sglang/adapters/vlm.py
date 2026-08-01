@@ -29,6 +29,30 @@ from unirl.rollout.engine.sglang.utils import (
 from unirl.types.sample import Sample
 
 
+def _keep_last_image(messages: List[Dict[str, Any]], images: List[Any]) -> tuple[List[Dict[str, Any]], List[Any]]:
+    """Drop all but the final image placeholder, keeping blocks and PILs aligned.
+
+    Image blocks appear in ``messages`` in the same order as ``images``, so the
+    first ``len(images) - 1`` placeholders are removed and the last is kept. A
+    message left with no content at all is dropped so the template never sees an
+    empty turn.
+    """
+    drop = len(images) - 1
+    seen = 0
+    out: List[Dict[str, Any]] = []
+    for msg in messages:
+        content = []
+        for block in msg["content"]:
+            if block.get("type") == "image":
+                seen += 1
+                if seen <= drop:
+                    continue
+            content.append(block)
+        if content:
+            out.append({**msg, "content": content})
+    return out, images[-1:]
+
+
 @register_adapter("vlm")
 class VLMAdapter(TextLMAdapter):
     """VLM conversion (e.g. Qwen2.5-VL): processor-encoded multimodal prompts."""
@@ -69,6 +93,12 @@ class VLMAdapter(TextLMAdapter):
         prompt_token_ids: List[List[int]] = []
         mm_encs: List[MMEncoding] = []
         for messages, images in zip(conversations, images_list):
+            # ``encode_mm`` takes exactly one image. An in-loop image agent
+            # accumulates one per draw, so keep only the MOST RECENT — which is
+            # also the right semantics for refinement: the agent critiques the
+            # image it just made, not the ones it already replaced.
+            if len(images) > 1:
+                messages, images = _keep_last_image(messages, images)
             mm = self.encode_mm(messages, images)
             mm_encs.append(mm)
             payload = self.base_payload(sampling)
