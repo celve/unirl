@@ -217,6 +217,11 @@ rollout:
       _target_: unirl.rollout.engine.sglang.config.SGLangEngineConfig
       backend: native
       pretrained_model_ckpt_path: ${oc.env:VLM_MODEL,/root/unirl/models/local/Qwen2.5-VL-3B-Instruct}
+      # REQUIRED for in-loop images. This selects the VLM adapter (model_family
+      # derives "vlm" from it); left unset the engine takes the TEXT adapter and
+      # Sample.text_conditioning fails loud the moment the first rendered image
+      # enters the trajectory. Qwen2.5-VL's placeholder triple.
+      image_token: "<|vision_start|><|image_pad|><|vision_end|>"
       tp_size: 1
       max_new_tokens: 512
       # The tool SCHEMAS are auto-injected from the env, but a 3B VLM will not

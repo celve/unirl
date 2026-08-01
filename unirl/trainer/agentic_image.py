@@ -191,12 +191,17 @@ class AgenticImageTrainer(PETrainer):
             if not renders:
                 continue
             terminal = renders[-1].primitives.get("image")
-            if not isinstance(terminal, Images) or len(terminal) == 0:
+            if not isinstance(terminal, Images):
+                continue
+            # The engine returns worker-side TensorRefs; realize before indexing
+            # (TensorRef supports slices only, so ``to_list()`` would raise).
+            pixels = hydrate(terminal.pixels)
+            if pixels is None or pixels.shape[0] == 0:
                 continue
             root = tr.parts[0]
             task = root.primitives.get("text")
             prompts.append(task.texts[0] if isinstance(task, Texts) and task.texts else "")
-            images.append(terminal.to_list()[-1])  # M==1 in-loop; last row if a recipe widened it
+            images.append(pixels[-1])  # M==1 in-loop; last row if a recipe widened it
             group_ids.append(root.sample_ids[0])  # siblings of one prompt share its root id
             idx.append(i)
 
@@ -210,7 +215,9 @@ class AgenticImageTrainer(PETrainer):
             primitives={"text": Texts(texts=prompts)},
         )
         shell = root.fork(1, sampling_params=diff_sp)
-        scoring = Sample(parts=[root, shell]).with_filled_frontier(primitives={"image": Images.from_list(images)})
+        scoring = Sample(parts=[root, shell]).with_filled_frontier(
+            primitives={"image": Images(pixels=torch.stack(images))}
+        )
         scored = self.reward.score_and_attach(scoring)
         raw = scored.parts[-1].rewards
         if raw is None:
