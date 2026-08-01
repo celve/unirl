@@ -21,6 +21,11 @@
 #   python -m unirl.train_agentic_image num_devices=8 batch_size=4 num_rollouts=3
 
 num_devices: 8
+# REQUIRED by the agentic coordinator, and it defaults to 1. rank 0 runs
+# ``generate`` while fanning ``_reset_all`` / ``next_task`` to every worker
+# INCLUDING ITSELF, so a single-concurrency Ray actor deadlocks on its own call.
+# Paired 8/8 with per_worker_concurrency, as the alfworld / deep_research recipes do.
+worker_max_concurrency: 8
 init_same_noise: false     # shared by the diffusion child engine and sampling
 batch_size: 8                 # P prompts per rollout
 num_rollouts: 3000
