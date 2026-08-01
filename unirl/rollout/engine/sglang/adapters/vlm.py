@@ -49,6 +49,14 @@ class VLMAdapter(TextLMAdapter):
     # ------------------------------------------------------------------ #
 
     def build_inputs(self, sample: Sample, *, sampling: ResolvedSampling) -> PreparedInputs:
+        # A multi-turn agent trajectory is text-only until it first renders, then
+        # multimodal (LIN-577's in-loop image turns). ``vision_conditioning`` fails
+        # loud on zero images, so the pre-first-image turns go through the inherited
+        # TEXT path — same tokenizer and template, just no image blocks to fuse.
+        # ``has_image_input`` inspects the ancestors (the frontier is the empty gen
+        # shell), which is exactly "has this trajectory rendered anything yet".
+        if not sample.has_image_input():
+            return super().build_inputs(sample, sampling=sampling)
         conversations, images_list, k = build_vision_conversations(sample, sampling.system_instruction)
         require(
             k == sampling.n,

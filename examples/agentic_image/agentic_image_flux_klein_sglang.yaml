@@ -29,7 +29,15 @@ worker_max_concurrency: 8
 init_same_noise: false     # shared by the diffusion child engine and sampling
 batch_size: 8                 # P prompts per rollout
 num_rollouts: 3000
-freeze_llm: false             # train BOTH the agent and the renderer
+# TRAIN THE RENDERER ONLY, for now. Training the agent needs TensorWeightSync to
+# push merged AR weights into the sglang engine, and this venv's UPSTREAM sglang
+# 0.5.12.post1 unpickles with its own SafeUnpickler, which blocks unirl.* classes
+# (CVE-2025-10164 guard) — unirl's permissive unpickler is only installed by the
+# sglang in-process patch, which is not on this branch's base. The diffusion track
+# syncs via LocalLoraWeightSync and is unaffected, so the in-loop rollout still runs
+# in full and the image reward still trains the renderer. Flip to false once the
+# branch is rebased onto a main carrying the sglang patch.
+freeze_llm: true
 enable_fsdp_offload: true     # free train state during generate (two engines resident)
 eval_interval: 0              # AgenticImageTrainer.evaluate is not implemented
 weight_sync_interval: 1
