@@ -222,8 +222,11 @@ rollout:
         skip_server_warmup: true
         disable_cuda_graph: false
         attention_backend: triton
-        enable_memory_saver: true
-        enable_weights_cpu_backup: true
+        # NO enable_memory_saver / enable_weights_cpu_backup. PE needs them so a
+        # colocated engine's sleep() actually frees GPU; in-loop mode never sleeps
+        # the inner (both children stay resident), so they buy nothing here — and
+        # torch_memory_saver's LD_PRELOAD shim kills the scheduler subprocess with
+        # exit 127 on this image.
         enable_lora: false
     diffusion:
       _target_: unirl.rollout.engine.sglang_diffusion.config.SGLangDiffusionEngineConfig
