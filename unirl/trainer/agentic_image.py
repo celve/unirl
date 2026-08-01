@@ -209,9 +209,20 @@ class AgenticImageTrainer(PETrainer):
             logger.warning("AgenticImageTrainer rollout %d: no trajectory rendered an image.", rollout_id)
             return torch.zeros(0, dtype=torch.float32), [], []
 
+        # The reward Handle is DP_SCATTER, so the scoring batch must be a multiple
+        # of dp. How many trajectories rendered is a POLICY outcome (early on, few
+        # do), so this count is ragged by nature — pad by repeating the last row and
+        # slice the padding off the rewards.
+        n = len(idx)
+        dp = int(getattr(self, "num_devices", 1) or 1)
+        pad = (-n) % dp
+        if pad:
+            prompts = prompts + [prompts[-1]] * pad
+            images = images + [images[-1]] * pad
+
         diff_sp = self.sampling_params.get("diffusion")
         root = Part.input(
-            [f"score{rollout_id}:{k}" for k in range(len(idx))],
+            [f"score{rollout_id}:{k}" for k in range(n + pad)],
             primitives={"text": Texts(texts=prompts)},
         )
         shell = root.fork(1, sampling_params=diff_sp)
@@ -222,7 +233,16 @@ class AgenticImageTrainer(PETrainer):
         raw = scored.parts[-1].rewards
         if raw is None:
             raise ValueError("AgenticImageTrainer: reward service returned no rewards for the terminal images")
-        return hydrate(raw).to(torch.float32).reshape(-1), group_ids, idx
+        rewards = hydrate(raw).to(torch.float32).reshape(-1)[:n]
+        logger.info(
+            "rollout %d: %d/%d trajectories rendered and were scored (padded +%d for dp=%d)",
+            rollout_id,
+            n,
+            len(trajs),
+            pad,
+            dp,
+        )
+        return rewards, group_ids, idx
 
     # ------------------------------------------------------------------
     # Advantage
