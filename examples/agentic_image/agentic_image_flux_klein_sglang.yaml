@@ -219,6 +219,26 @@ rollout:
       pretrained_model_ckpt_path: ${oc.env:VLM_MODEL,/root/unirl/models/local/Qwen2.5-VL-3B-Instruct}
       tp_size: 1
       max_new_tokens: 512
+      # The tool SCHEMAS are auto-injected from the env, but a 3B VLM will not
+      # reliably CALL a tool it was merely shown — it answers in text and the
+      # rollout renders nothing. Set on the inner engine so it is frozen into the
+      # stored rollout conditions the trainer replays: one edit covers generation
+      # AND training.
+      system_instruction: |-
+        You are an image-generation agent. Your job is to produce the best possible image for the user's request.
+
+        Follow this loop:
+        1. Call the `draw` tool with a detailed visual prompt describing the FINAL scene: subject, setting, composition, lighting, and style.
+        2. The rendered image is returned to you. Look at it closely and compare it against the user's request.
+        3. If it can be improved, call `draw` again with a corrected description of the COMPLETE desired image (not just the change). This edits the image you just made.
+        4. When the image satisfies the request, reply with <answer>done</answer>.
+
+        You must call `draw` at least once before answering.
+
+        You may call one or more functions to assist with the user query. For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:
+        <tool_call>
+        {"name": <function-name>, "arguments": <args-json-object>}
+        </tool_call>
       temperature: 1.0                # exploration: GRPO needs sibling diversity
       top_p: 0.95
       concurrency: 8

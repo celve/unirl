@@ -135,6 +135,22 @@ class AgenticImageTrainer(PETrainer):
 
         # 2) Score each trajectory's TERMINAL image.
         rewards, group_ids, scored_idx = self._score_terminal_images(trajs, rollout_id)
+        if rewards.numel() == 0:
+            # Nothing rendered this round — almost always the agent not emitting a
+            # usable draw call (bad system instruction, or it answered in text).
+            # Skip the step loudly instead of crashing downstream on an empty batch:
+            # a run that silently trains on nothing is worse than one that says so.
+            turns = [len(tr.gen_parts()) for tr in trajs]
+            logger.warning(
+                "AgenticImageTrainer rollout %d: 0/%d trajectories rendered an image "
+                "(turns mean=%.2f max=%d) — skipping the step. Check the agent's "
+                "system_instruction and that the draw tool name matches draw_tool_name.",
+                rollout_id,
+                len(trajs),
+                (sum(turns) / len(turns)) if turns else 0.0,
+                max(turns, default=0),
+            )
+            return {}, 0.0
         finite = torch.isfinite(rewards)
         mean_reward = float(rewards[finite].mean().item()) if bool(finite.any()) else 0.0
 
