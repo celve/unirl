@@ -21,6 +21,7 @@
 #   python -m unirl.train_agentic_image num_devices=8 batch_size=4 num_rollouts=3
 
 num_devices: 8
+init_same_noise: false     # shared by the diffusion child engine and sampling
 batch_size: 8                 # P prompts per rollout
 num_rollouts: 3000
 freeze_llm: false             # train BOTH the agent and the renderer
@@ -228,7 +229,7 @@ rollout:
       # LOAD-BEARING for ti2i: replay consumes the SERVER's packed condition
       # tokens + their RoPE ids (image_latent / image_latent_ids).
       populate_conditions: true
-      init_same_noise: ${sampling.init_same_noise}
+      init_same_noise: ${init_same_noise}
       sampling: ${sampling.diffusion}
       forward_batch_size: 8           # >= per_worker_concurrency: one coalesced batch
       num_gpus: 1
@@ -275,7 +276,6 @@ data_source:
       prompts_per_rollout: ${batch_size}
 
 sampling:
-  init_same_noise: false
   ar:
     _target_: unirl.types.sampling.ARSamplingParams
     samples_per_prompt: 8       # n GRPO siblings per prompt — the engine fans these
