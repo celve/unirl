@@ -83,6 +83,31 @@ def _extract_answer(text: Optional[str]) -> str:
     return matches[-1].group(1).strip() if matches else text.strip()
 
 
+#: Argument names a model reaches for when it has to guess the draw schema.
+_PROMPT_ALIASES = ("prompt", "description", "text", "caption", "image_prompt", "query")
+
+
+def _draw_prompt(args: Any) -> Optional[str]:
+    """The visual description out of a draw call's arguments, or ``None``.
+
+    Chat templates vary in whether they inject tool schemas at all — Qwen2.5-VL's
+    ignores ``tools=`` outright — so a model told about ``draw`` only in prose will
+    invent its own argument names (``{"subject": …, "action": …, "setting": …}``).
+    Rejecting those would silently drop nearly every render, so try the usual
+    aliases and otherwise stitch the string values together in order. Returns
+    ``None`` only when there is no usable text at all, which the caller surfaces as
+    an ordinary tool observation so the agent can correct itself.
+    """
+    if not isinstance(args, dict):
+        return None
+    for key in _PROMPT_ALIASES:
+        value = args.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    parts = [v.strip() for v in args.values() if isinstance(v, str) and v.strip()]
+    return ", ".join(parts) if parts else None
+
+
 def _shutdown_quietly(engine: Any) -> None:
     shutdown = getattr(engine, "shutdown", None)
     if not callable(shutdown):
@@ -249,13 +274,15 @@ class AgenticImageRolloutEngine(AgenticRolloutEngine):
         if not isinstance(call, dict) or call.get("name") != self._draw_tool:
             return None
         args = call.get("arguments") or {}
-        prompt = args.get("prompt")
-        if not isinstance(prompt, str) or not prompt.strip():
+        prompt = _draw_prompt(args)
+        if prompt is None:
             logger.warning(
-                "AgenticImageRolloutEngine: %r call without a usable prompt; observing instead", self._draw_tool
+                "AgenticImageRolloutEngine: %r call without a usable prompt (args=%s); observing instead",
+                self._draw_tool,
+                sorted(args) if isinstance(args, dict) else type(args).__name__,
             )
             return None
-        return {"prompt": prompt.strip(), "edit": args.get("edit")}
+        return {"prompt": prompt, "edit": args.get("edit")}
 
     def _image_turn(self, sample: Sample, draw: Dict[str, Any]) -> Sample:
         """Append one rendered image as a **trainable** diffusion gen Part.

@@ -232,6 +232,10 @@ rollout:
       image_token: "<|vision_start|><|image_pad|><|vision_end|>"
       tp_size: 1
       max_new_tokens: 512
+      # NOTE: Qwen2.5-VL's chat template IGNORES tools= entirely (verified with
+      # scripts/agentic_image_prompt_probe.py: rendering with and without the
+      # schemas is byte-identical), so the argument shape MUST be spelled out
+      # here or the model invents its own names and nothing renders.
       # The tool SCHEMAS are auto-injected from the env, but a 3B VLM will not
       # reliably CALL a tool it was merely shown — it answers in text and the
       # rollout renders nothing. Set on the inner engine so it is frozen into the
@@ -241,7 +245,10 @@ rollout:
         You are an image-generation agent. Your job is to produce the best possible image for the user's request.
 
         Follow this loop:
-        1. Call the `draw` tool with a detailed visual prompt describing the FINAL scene: subject, setting, composition, lighting, and style.
+        1. Call the `draw` tool. It takes ONE argument named `prompt`, a single string describing the FINAL scene: subject, setting, composition, lighting, and style. Exactly this shape:
+        <tool_call>
+        {"name": "draw", "arguments": {"prompt": "a patterdale terrier at the wheel of a mud-spattered Land Rover inside a lava cave, warm rim light, cinematic wide shot"}}
+        </tool_call>
         2. The rendered image is returned to you. Look at it closely and compare it against the user's request.
         3. If it can be improved, call `draw` again with a corrected description of the COMPLETE desired image (not just the change). This edits the image you just made.
         4. When the image satisfies the request, reply with <answer>done</answer>.
