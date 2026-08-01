@@ -1,0 +1,315 @@
+# @package _global_
+# Agentic image RL (LIN-577): a VLM agent draws, LOOKS at what it drew, critiques,
+# and redraws — with one terminal image reward training BOTH models.
+#
+# Rollout: AgenticImageRolloutEngine with in_loop_images=true.
+#   turn 1  agent plans, emits <tool_call>{"name":"draw","arguments":{...}}</tool_call>
+#   turn 2  DRAW -> FLUX.2-Klein renders; lands as a TRAINABLE diffusion gen Part
+#           tagged role="tool" (so it renders as its own conversation message)
+#   turn 3  agent SEES the image (VLM), critiques it
+#   turn 4  DRAW -> ti2i edit of that image (Klein branches on has_image_input)
+#   ...
+# Training: AgenticImageTrainer — PE's two-stack placement, AgenticTrainer's
+# trajectory advantage. The terminal image is scored (PickScore), the group-relative
+# advantage over the n siblings is broadcast to every agent turn AND every render.
+#
+# Both children stay RESIDENT (sleep_diffusion_on_start MUST be false): per-phase
+# wake/sleep cannot work when diffusion turns interleave with in-flight AR turns on
+# other drain threads. Budget them with per-engine mem_fraction_static, as PE does.
+#
+# Smoke on 1x8 H20:
+#   python -m unirl.train_agentic_image num_devices=8 batch_size=4 num_rollouts=3
+
+num_devices: 8
+batch_size: 8                 # P prompts per rollout
+num_rollouts: 3000
+freeze_llm: false             # train BOTH the agent and the renderer
+enable_fsdp_offload: true     # free train state during generate (two engines resident)
+eval_interval: 0              # AgenticImageTrainer.evaluate is not implemented
+weight_sync_interval: 1
+save_interval: 0
+
+logging:
+  report_to_wandb: ${oc.decode:${oc.env:REPORT_TO_WANDB,true}}
+  project_name: ${oc.env:WANDB_PROJECT,unirl-agentic-image}
+  run_name: ${oc.env:WANDB_RUN_NAME,agentic_image_flux_klein_sglang}
+  entity: ${oc.env:WANDB_ENTITY,null}
+  tags: [agentic, in_loop_images, flux2_klein, qwen_vl, ti2i, pickscore, sglang]
+  log_media: true
+  media_max_items: 8
+  media_log_interval: 1
+
+# Shared nodes — the sglang diffusion child needs both at init.
+model_config:
+  _target_: unirl.models.flux2_klein.config.Flux2KleinPipelineConfig
+  pretrained_model_ckpt_path: ${oc.env:FLUX2_KLEIN_PATH,/root/unirl/models/local/FLUX.2-klein-base-4B}
+  model_precision: bf16
+  max_sequence_length: 512
+  shift: 1.0
+  use_lora: true
+  lora_target_modules: &lora_targets
+    - to_q
+    - to_k
+    - to_v
+    - to_out.0
+    - add_q_proj
+    - add_k_proj
+    - add_v_proj
+    - to_add_out
+    - ff.linear_in
+    - ff.linear_out
+    - ff_context.linear_in
+    - ff_context.linear_out
+    - to_qkv_mlp_proj
+
+strategy:
+  _target_: unirl.sde.kernels.DanceSDEStrategy
+
+# ── Diffusion track: FLUX.2-Klein-base-4B (renders every draw turn) ─────────
+diffusion:
+  bundle:
+    _target_: unirl.models.flux2_klein.bundle.Flux2KleinBundle.from_config
+    config: ${model_config}
+  pipeline:
+    _target_: unirl.models.flux2_klein.pipeline.Flux2KleinPipeline
+    shift: 1.0
+    autocast_precision: bf16
+    trajectory_precision: fp16
+    logprob_precision: fp32
+    max_sequence_length: 512
+    qwen3_extraction_layers: [9, 18, 27]
+    strategy: ${strategy}
+  backend:
+    _target_: unirl.train.backend.fsdp.FSDPBackend
+    block_class_names: ["Flux2TransformerBlock", "Flux2SingleTransformerBlock"]
+    trainable_attr: transformer
+    fsdp_cfg:
+      _target_: unirl.train.configs.FSDPConfig
+      param_dtype: bf16
+      master_dtype: fp32
+      cpu_offload: false
+      mixed_precision: true
+      fsdp_mode: full
+      reshard_after_forward: true
+      activation_checkpointing: true
+      use_torch_compile: false
+    optimizer_cfg:
+      _target_: unirl.train.backend.base.OptimizerConfig
+      learning_rate: 5.0e-5
+      adam_beta1: 0.9
+      adam_beta2: 0.999
+      adam_epsilon: 1.0e-8
+      weight_decay: 0.0
+    scheduler_cfg:
+      _target_: unirl.train.backend.base.LrSchedulerConfig
+      type: constant
+      warmup_steps: 0
+      total_steps: 10000
+    lora_cfg:
+      _target_: unirl.train.configs.LoraConfig
+      rank: 16
+      alpha: 32
+      dropout: 0.0
+      bias: none
+      task_type: FEATURE_EXTRACTION
+      target_modules: *lora_targets
+  algorithm:
+    _target_: unirl.algorithms.flowgrpo.FlowGRPO
+    stage_attr: diffusion
+    clip_range: 5.0e-3
+    clip_schedule: constant
+    old_logp_source: replay
+    conditions_cls:
+      _target_: hydra.utils.get_class
+      path: unirl.models.flux2_klein.conditions.Flux2KleinConditions
+  stack:
+    _target_: unirl.train.stack.TrainStack
+    micro_batch_size: 1
+    max_grad_norm: 1.0
+
+# ── AR track: Qwen2.5-VL-3B (the agent — MUST be a VLM: it looks at its own
+#    renders, and text_conditioning() fails loud on the first image turn) ─────
+ar:
+  bundle:
+    _target_: unirl.models.qwen_vl.bundle.QwenVLBundle.from_config
+    config: &vlm_config
+      _target_: unirl.models.qwen_vl.config.QwenVLPipelineConfig
+      pretrained_model_ckpt_path: ${oc.env:VLM_MODEL,/root/unirl/models/local/Qwen2.5-VL-3B-Instruct}
+      model_precision: bf16
+      freeze_vision_tower: true      # train the LM, not the encoder
+      max_prompt_length: 8192        # multi-turn transcript + image placeholders
+      use_lora: true
+      lora_target_modules: &ar_lora_targets [q_proj, k_proj, v_proj, o_proj]
+  pipeline:
+    _target_: unirl.models.qwen_vl.pipeline.QwenVLPipeline
+    autocast_precision: bf16
+    logprob_precision: fp32
+  backend:
+    _target_: unirl.train.backend.fsdp.FSDPBackend
+    block_class_names: ["Qwen2_5_VLDecoderLayer"]
+    trainable_attr: transformer
+    fsdp_cfg:
+      _target_: unirl.train.configs.FSDPConfig
+      param_dtype: bf16
+      cpu_offload: false
+      mixed_precision: true
+      fsdp_mode: full
+      reshard_after_forward: true
+      activation_checkpointing: true
+      use_torch_compile: false
+    optimizer_cfg:
+      _target_: unirl.train.backend.base.OptimizerConfig
+      learning_rate: 5.0e-6
+      adam_beta1: 0.9
+      adam_beta2: 0.999
+      adam_epsilon: 1.0e-8
+      weight_decay: 0.0
+    scheduler_cfg:
+      _target_: unirl.train.backend.base.LrSchedulerConfig
+      type: constant
+      warmup_steps: 0
+      total_steps: 10000
+    lora_cfg:
+      _target_: unirl.train.configs.LoraConfig
+      rank: 16
+      alpha: 32
+      dropout: 0.0
+      bias: none
+      task_type: CAUSAL_LM
+      target_modules: *ar_lora_targets
+  algorithm:
+    _target_: unirl.algorithms.grpo.GRPO
+    stage_attr: ar
+    clip_range: 1.0e-2
+    clip_schedule: constant
+    conditions_cls:
+      _target_: hydra.utils.get_class
+      path: unirl.models.qwen_vl.conditions.QwenVLARConditions
+  stack:
+    _target_: unirl.train.stack.TrainStack
+    micro_batch_size: 1
+    max_grad_norm: 1.0
+
+# ── Rollout: the agentic image engine, both children resident ──────────────
+rollout:
+  _target_: unirl.rollout.engine.agentic.image_engine.AgenticImageRolloutEngine
+  model_config: ${model_config}
+  strategy: ${strategy}
+  config:
+    _target_: unirl.rollout.engine.agentic.image_config.AgenticImageRolloutEngineConfig
+    in_loop_images: true
+    sleep_diffusion_on_start: false   # LOAD-BEARING: see header
+    draw_tool_name: draw
+    draw_batch_window_s: 0.05
+    max_turns: 6                      # counts gen Parts: agent turns AND renders
+    per_worker_concurrency: 8
+    episode_sampling: ${sampling.ar}
+    diffusion_sampling: ${sampling.diffusion}
+    inner:
+      _target_: unirl.rollout.engine.sglang.config.SGLangEngineConfig
+      backend: native
+      pretrained_model_ckpt_path: ${oc.env:VLM_MODEL,/root/unirl/models/local/Qwen2.5-VL-3B-Instruct}
+      tp_size: 1
+      max_new_tokens: 512
+      temperature: 1.0                # exploration: GRPO needs sibling diversity
+      top_p: 0.95
+      concurrency: 8
+      engine_kwargs:
+        mem_fraction_static: 0.30     # co-resident with the diffusion child
+        skip_server_warmup: true
+        disable_cuda_graph: false
+        attention_backend: triton
+        enable_memory_saver: true
+        enable_weights_cpu_backup: true
+        enable_lora: false
+    diffusion:
+      _target_: unirl.rollout.engine.sglang_diffusion.config.SGLangDiffusionEngineConfig
+      model_family: flux2_klein
+      # LOAD-BEARING for ti2i: replay consumes the SERVER's packed condition
+      # tokens + their RoPE ids (image_latent / image_latent_ids).
+      populate_conditions: true
+      init_same_noise: ${sampling.init_same_noise}
+      sampling: ${sampling.diffusion}
+      forward_batch_size: 8           # >= per_worker_concurrency: one coalesced batch
+      num_gpus: 1
+      tp_size: 1
+      local_mode: true
+      target_modules: *lora_targets
+      engine_kwargs:
+        model_type: flux2_klein
+        mem_fraction_static: 0
+        skip_server_warmup: true
+        disable_cuda_graph: true
+    env:
+      _target_: unirl.rollout.loop.tool_environment.ToolEnvironment
+      max_turns: 6
+      tools:
+        - _target_: unirl.rollout.loop.tools.draw.DrawTool
+
+# Per-turn stop: a draw turn ends at </tool_call> and yields to the renderer.
+stop: ["</tool_call>"]
+
+# ── Reward: PickScore, LOCAL (no HTTP service to stand up) ──────────────────
+# Scores the trajectory's TERMINAL image against the ORIGINAL task prompt, so the
+# agent is graded on what it finally produced, not on its intermediate narration.
+reward:
+  _target_: unirl.reward.service.RewardService
+  backend:
+    _target_: unirl.reward.local.pickscore.PickScoreRewardScorer
+    base_device: cuda
+    config:
+      _target_: unirl.reward.local.pickscore.PickScoreSpec
+      batch_size: 8
+      device: auto
+      processor_id: ${oc.env:CLIP_MODEL,/root/unirl/models/local/CLIP-ViT-H-14-laion2B-s32B-b79K}
+      model_id: ${oc.env:PICKSCORE_MODEL,/root/unirl/models/local/PickScore_v1}
+
+data_source:
+  _target_: unirl.data.data_source.MultimodalRLDataSource
+  args:
+    run:
+      data_path: ${oc.env:DATA_PATH,datasets/wise/train.txt}
+      eval_data_path: ${oc.env:EVAL_DATA_PATH,datasets/wise/test.txt}
+      seed: 42
+    algorithm:
+      prompts_per_rollout: ${batch_size}
+
+sampling:
+  init_same_noise: false
+  ar:
+    _target_: unirl.types.sampling.ARSamplingParams
+    samples_per_prompt: 8       # n GRPO siblings per prompt — the engine fans these
+    temperature: 1.0
+    max_new_tokens: 512
+    top_p: 0.95
+    top_k: 1024
+  diffusion:
+    _target_: unirl.types.sampling.DiffusionSamplingParams
+    # MUST be 1 in-loop: forking M>1 mid-trajectory branches it and leaves later
+    # AR turns M-wide. Diversity comes from ar.samples_per_prompt above.
+    samples_per_prompt: 1
+    num_inference_steps: 8
+    guidance_scale: 1.0         # Klein's off value
+    height: 512
+    width: 512
+    eta: 0.7
+    seed: 42
+    init_same_noise: false
+    autocast_precision: bf16
+    sde_indices: [1, 3]
+
+# ── Per-track weight sync into the matching child, routed by track_prefix ────
+# Same {ar, diffusion} keys the engine demuxes on.
+sync:
+  diffusion:
+    _target_: unirl.distributed.weight_sync.lora.LocalLoraWeightSync
+    track_prefix: diffusion
+    param_prefix: "transformer."
+    adapter_name: default
+    verify: false
+  ar:
+    _target_: unirl.distributed.weight_sync.full.tensor.TensorWeightSync
+    track_prefix: ar
+    lora_merged: true
+    flush_cache: true
+    bucket_size_mb: 512
