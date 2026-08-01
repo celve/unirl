@@ -143,9 +143,10 @@ ar:
       use_lora: true
       lora_target_modules: &ar_lora_targets [q_proj, k_proj, v_proj, o_proj]
   pipeline:
-    _target_: unirl.models.qwen_vl.pipeline.QwenVLPipeline
-    autocast_precision: bf16
-    logprob_precision: fp32
+    # QwenVLPipeline is stage-composed (chat_template + ar), not precision-keyed
+    # like Qwen3Pipeline; _wire_side injects bundle=, so use the from_bundle factory.
+    _target_: unirl.models.qwen_vl.pipeline.QwenVLPipeline.from_bundle
+    max_prompt_length: 8192
   backend:
     _target_: unirl.train.backend.fsdp.FSDPBackend
     block_class_names: ["Qwen2_5_VLDecoderLayer"]
