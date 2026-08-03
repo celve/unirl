@@ -1,0 +1,177 @@
+# @package _global_
+# MiniMax-H3 fl2va (prompt + keyframe -> video + stereo audio) Flow-GRPO.
+#
+# SAME CHECKPOINT AND BUNDLE AS t2va — fl2va is the FL2VA checkpoint's other
+# task, not a second model. The only difference from
+# minimax_h3_t2va_trainside.yaml is the dataset: supply an (image, condition)
+# MediaRef per prompt and the pipeline takes the keyframe path automatically.
+#
+# The keyframe reaches the model by TWO routes:
+#   - through the video VAE, as conditioning rows packed between the text block
+#     and the target audio/video rows, noise-augmented to t = 0.999 and held
+#     there for every denoising step;
+#   - through the Qwen3-VL conditioner, as a "<Picture 1>: " label plus a vision
+#     block inside the text stream, whose rows are tagged VIDEO not TEXT.
+#
+# Those conditioning rows are ANCHORS: they are concatenated for the forward and
+# their slice of the output is discarded, so they never enter LatentSegment and
+# the tracked trajectory / sde_logp cover generated rows only. Row counts for
+# 768x768/124f: 21312 generated video rows either way, +576 anchor rows per
+# keyframe.
+#
+# Launch (1 node x 8 GPUs):
+#   DATA_PATH=... bash examples/run_experiment_multinode_taiji.sh diffusion/minimax_h3/minimax_h3_fl2va_trainside
+
+num_devices: 8
+batch_size: 8
+num_rollouts: 10000
+
+logging:
+  report_to_wandb: true
+  project_name: ${oc.env:WANDB_PROJECT,unirl-minimax-h3-fl2va}
+  run_name: null
+  entity: ${oc.env:WANDB_ENTITY,null}
+  tags: [minimax-h3, fl2va, flowgrpo, trainside, audio, stereo, keyframe]
+  log_media: true
+  media_max_items: 2
+  media_log_interval: 1000
+
+bundle:
+  _target_: unirl.models.minimax_h3.bundle.MiniMaxH3Bundle.from_config
+  config:
+    _target_: unirl.models.minimax_h3.config.MiniMaxH3PipelineConfig
+    pretrained_model_ckpt_path: ${oc.env:PRETRAINED_MODEL,MiniMaxAI/MiniMax-H3}
+    model_precision: bf16
+    vae_dtype: fp32
+    audio_vae_dtype: fp32
+    autocast_precision: bf16
+    trajectory_precision: fp16
+    logprob_precision: fp32
+    video_shift: 12.0
+    audio_shift: 3.0
+    text_encoder_hidden_layer: 50
+    audio_joint_sde: true
+    # fl2va runs the video VAE every rollout (the keyframe encode), unlike t2va
+    # which only touches it to decode. Still CPU-parked: one 768x768 single-frame
+    # spatial encode is cheap next to a 22k-row denoising loop, and the 32B
+    # conditioner has to stay off-device regardless.
+    aux_components_on_cpu: true
+    meta_init_transformer: true
+
+pipeline:
+  _target_: unirl.models.minimax_h3.pipeline.MiniMaxH3Pipeline.from_bundle
+  config: ${bundle.config}
+  strategy:
+    _target_: unirl.sde.kernels.FlowSDEStrategy
+
+backend:
+  _target_: unirl.train.backend.fsdp.FSDPBackend
+  block_class_names: ["MiniMaxH3TransformerBlock"]
+  trainable_attr: transformer
+  # See the t2va recipe: keeps the fp32-pinned modules outside every FSDP group
+  # so MixedPrecisionPolicy never all-gathers a bf16 compute copy of them.
+  root_wrap: false
+  fsdp_cfg:
+    _target_: unirl.train.configs.FSDPConfig
+    param_dtype: bf16
+    cpu_offload: false
+    mixed_precision: true
+    fsdp_mode: full
+    reshard_after_forward: true
+    activation_checkpointing: true
+    use_torch_compile: false
+  optimizer_cfg:
+    _target_: unirl.train.backend.base.OptimizerConfig
+    learning_rate: 1.0e-4
+    adam_beta1: 0.9
+    adam_beta2: 0.999
+    adam_epsilon: 1.0e-8
+    weight_decay: 0.0
+  scheduler_cfg:
+    _target_: unirl.train.backend.base.LrSchedulerConfig
+    type: constant
+    warmup_steps: 0
+    total_steps: 10000
+  lora_cfg:
+    _target_: unirl.train.configs.LoraConfig
+    rank: 32
+    alpha: 64
+    dropout: 0.0
+    bias: none
+    task_type: FEATURE_EXTRACTION
+    target_modules:
+      - attn.to_q
+      - attn.to_k
+      - attn.to_v
+      - attn.to_out.0
+      - ff.net.0.proj
+      - ff.net.2
+
+rollout:
+  _target_: unirl.rollout.engine.trainside.engine.TrainsideRolloutEngine
+  stage_attrs: [diffusion]
+  forward_batch_size: 1
+
+reward:
+  _target_: unirl.reward.service.RewardService
+  backend:
+    _target_: unirl.reward.local.t2av_composite.T2AVCompositeScorer
+    base_device: cuda
+    config:
+      _target_: unirl.reward.local.t2av_composite.T2AVCompositeSpec
+      device: auto
+      batch_size: 2
+      # NOTE: neither sub-scorer looks at the keyframe, so nothing here rewards
+      # faithfulness to it — videopickscore reads the generated first frame
+      # against the prompt, clap reads generated audio against the prompt. For
+      # an anchored task that is a real gap; the source-consistency scorers this
+      # repo has (video_clip_delta) measure the OPPOSITE (they penalise
+      # similarity to the source, for edit tasks). Treat this as a cold-start
+      # signal, as the qwen_image_edit_plus recipes do with PickScore.
+      weights:
+        videopickscore: 0.5
+        clap: 0.5
+
+algorithm:
+  _target_: unirl.algorithms.flowgrpo.FlowGRPO
+  stage_attr: diffusion
+  clip_range: 5.0e-3
+  clip_schedule: constant
+  old_logp_source: replay
+  conditions_cls:
+    _target_: hydra.utils.get_class
+    path: unirl.models.minimax_h3.conditions.MiniMaxH3Conditions
+  params: ${sampling}
+
+stack:
+  _target_: unirl.train.stack.TrainStack
+  micro_batch_size: 1
+  max_grad_norm: 1.0
+  num_updates_per_batch: 1
+
+data_source:
+  _target_: unirl.data.data_source.MultimodalRLDataSource
+  args:
+    run:
+      # Needs a manifest carrying one (image, condition) MediaRef per prompt —
+      # the same shape wan21_i2v.yaml consumes.
+      data_path: ${oc.env:DATA_PATH}
+      eval_data_path: ${oc.env:EVAL_DATA_PATH,${oc.env:DATA_PATH}}
+      seed: 42
+    algorithm:
+      prompts_per_rollout: ${batch_size}
+
+sampling:
+  _target_: unirl.types.sampling.DiffusionSamplingParams
+  num_inference_steps: 10
+  guidance_scale: 1.0
+  height: 768
+  width: 768
+  num_frames: 124
+  eta: 0.7
+  samples_per_prompt: 4
+  seed: 42
+  init_same_noise: false
+  autocast_precision: bf16
+  trajectory_precision: fp16
+  logprob_precision: fp32

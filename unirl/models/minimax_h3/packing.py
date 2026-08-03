@@ -31,6 +31,7 @@ from .config import (
 from .vendor import (
     MINIMAX_H3_AUDIO_CHANNELS,
     MINIMAX_H3_FPS,
+    MINIMAX_H3_KEYFRAME_NOISE_AUG,
     MINIMAX_H3_TEXT_TAG,
     MiniMaxH3PackedSequence,
     align_num_frames,
@@ -137,14 +138,23 @@ class MiniMaxH3Geometry:
         return cls.resolve(height=int(params.height), width=int(params.width), num_frames=int(params.num_frames))
 
 
-def build_t2va_layout(geometry: MiniMaxH3Geometry, num_text_tokens: int) -> MiniMaxH3PackedSequence:
-    """Build the ``[text | audio | video]`` layout for a t2va request.
+def build_layout(
+    geometry: MiniMaxH3Geometry,
+    *,
+    text_token_tags: torch.Tensor,
+    keyframe_anchors: Tuple[str, ...] = (),
+) -> MiniMaxH3PackedSequence:
+    """Build the packed layout for a t2va or fl2va request.
 
-    All text rows carry the text tag. (``fl2va`` tags the rows of a keyframe's
-    vision block as VIDEO instead -- that distinction only exists once keyframes
-    do, so t2va passes a uniform tag vector.)
+    ``keyframe_anchors`` holds one entry per keyframe conditioning block, in
+    packed order: ``"first"`` anchors it at the first latent frame, ``"last"``
+    at the last. Empty (the t2va case) yields ``[text | audio | video]``.
+
+    ``text_token_tags`` is per-row, not a constant: MiniMax-H3 tags the rows of
+    a keyframe's *vision block* -- which lives inside the text stream, since the
+    keyframe also goes through the Qwen3-VL conditioner -- as VIDEO rather than
+    TEXT. t2va has no vision block and so passes a uniform vector.
     """
-    text_token_tags = torch.full((int(num_text_tokens),), MINIMAX_H3_TEXT_TAG, dtype=torch.long)
     return build_packed_sequence(
         text_token_tags=text_token_tags,
         num_latent_frames=geometry.num_latent_frames,
@@ -152,6 +162,15 @@ def build_t2va_layout(geometry: MiniMaxH3Geometry, num_text_tokens: int) -> Mini
         latent_width=geometry.latent_width,
         num_audio_latents=geometry.num_audio_latents,
         patch_size=MINIMAX_H3_PATCH_SIZE,
+        keyframe_anchors=tuple(keyframe_anchors),
+    )
+
+
+def build_t2va_layout(geometry: MiniMaxH3Geometry, num_text_tokens: int) -> MiniMaxH3PackedSequence:
+    """``[text | audio | video]`` with a uniform text tag -- the t2va case."""
+    return build_layout(
+        geometry,
+        text_token_tags=torch.full((int(num_text_tokens),), MINIMAX_H3_TEXT_TAG, dtype=torch.long),
         keyframe_anchors=(),
     )
 
@@ -161,6 +180,7 @@ def row_timestep_plan(
     *,
     video_sigma: torch.Tensor,
     audio_sigma: torch.Tensor,
+    condition_video_timestep: float = MINIMAX_H3_KEYFRAME_NOISE_AUG,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """``(unique_timesteps, timestep_indices)`` for one denoising step.
 
@@ -169,24 +189,26 @@ def row_timestep_plan(
     every other model in this repo. Text rows never reach an output head and
     inherit the video timestep.
 
-    t2va has no conditioning rows, so the condition timesteps are dead
-    arguments; they are passed as the video timestep so they cannot introduce a
-    spurious entry into the unique set if a future caller does add rows without
-    revisiting this.
+    Keyframe conditioning rows do NOT step: they are pinned at the model's
+    noise-augmentation level (``t = 0.999``, i.e. 99.9% signal) for every
+    denoising step, which is why this is a constant rather than a schedule
+    entry. With no conditioning rows the argument is inert -- ``torch.unique``
+    only sees the timesteps rows actually carry.
     """
-    video_t = float(1.0 - float(video_sigma))
-    audio_t = float(1.0 - float(audio_sigma))
     return build_row_timesteps(
         layout,
-        video_timestep=video_t,
-        audio_timestep=audio_t,
-        condition_video_timestep=video_t,
-        condition_audio_timestep=video_t,
+        video_timestep=float(1.0 - float(video_sigma)),
+        audio_timestep=float(1.0 - float(audio_sigma)),
+        condition_video_timestep=float(condition_video_timestep),
+        # No audio reference rows outside ref2va; kept aligned with the video
+        # conditioning level so it cannot add a phantom unique timestep.
+        condition_audio_timestep=float(condition_video_timestep),
     )
 
 
 __all__ = [
     "MiniMaxH3Geometry",
+    "build_layout",
     "build_t2va_layout",
     "row_timestep_plan",
 ]

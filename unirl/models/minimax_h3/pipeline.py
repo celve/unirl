@@ -8,13 +8,19 @@ from unirl.config.require import require
 from unirl.sde.kernels import StepStrategy
 from unirl.sde.runtime import FlowMatchSchedulePolicy
 from unirl.types.noise_recipe import NoiseRecipe
-from unirl.types.primitives import Texts
+from unirl.types.primitives import Images, Texts
 from unirl.types.sample import Sample
 
 from .bundle import MiniMaxH3Bundle
 from .conditions import MiniMaxH3Conditions
 from .config import MINIMAX_H3_PATCH_SIZE, MiniMaxH3PipelineConfig
 from .diffusion import MiniMaxH3DiffusionStage
+from .keyframe import (
+    MiniMaxH3KeyframeEncodeStage,
+    encode_keyframe_anchors,
+    prepare_keyframes,
+    resolve_keyframe_anchors,
+)
 from .packing import MiniMaxH3Geometry
 from .text_embed import MiniMaxH3TextEmbedStage
 from .vae import (
@@ -33,6 +39,7 @@ class MiniMaxH3Pipeline:
         *,
         bundle: MiniMaxH3Bundle,
         text_embed: MiniMaxH3TextEmbedStage,
+        keyframe_encode: MiniMaxH3KeyframeEncodeStage,
         diffusion: MiniMaxH3DiffusionStage,
         video_decode: MiniMaxH3VideoDecodeStage,
         audio_decode: MiniMaxH3AudioDecodeStage,
@@ -40,6 +47,7 @@ class MiniMaxH3Pipeline:
     ) -> None:
         self.bundle = bundle
         self.text_embed = text_embed
+        self.keyframe_encode = keyframe_encode
         self.diffusion = diffusion
         self.video_decode = video_decode
         self.audio_decode = audio_decode
@@ -60,6 +68,7 @@ class MiniMaxH3Pipeline:
         return cls(
             bundle=bundle,
             text_embed=MiniMaxH3TextEmbedStage(bundle),
+            keyframe_encode=MiniMaxH3KeyframeEncodeStage(bundle),
             diffusion=MiniMaxH3DiffusionStage(
                 bundle,
                 strategy,
@@ -116,13 +125,42 @@ class MiniMaxH3Pipeline:
         require(texts is not None, "MiniMaxH3Pipeline.generate: no text prompt in the sample conditioning")
 
         geometry = MiniMaxH3Geometry.from_params(params)
-        conditions = MiniMaxH3Conditions(text=self.text_embed.embed(texts))
 
-        # Driver-authoritative x_T. MiniMax-H3 draws VIDEO noise first, then
-        # audio, off the one request generator -- the ``salt`` sibling
-        # reproduces that split byte-identically, and the ORDER is part of what
-        # makes a rollout reproducible.
+        # fl2va: a keyframe anchors the first and/or last latent frame. It
+        # reaches the model twice -- through the video VAE as conditioning rows,
+        # and through the Qwen3-VL conditioner as a vision block inside the text
+        # stream -- so it is handed to BOTH stages below.
+        images = next((c for c in conditioning if isinstance(c, Images)), None)
+        keyframes = prepare_keyframes(list(images.to_list()), geometry) if images is not None else []
+        anchors = resolve_keyframe_anchors(has_first=len(keyframes) > 0, has_last=False)
+        require(
+            len(keyframes) <= 1,
+            f"MiniMaxH3Pipeline.generate: got {len(keyframes)} keyframes. The data path carries at most one "
+            f"(image, condition) MediaRef per prompt, so only the 'first' anchor is reachable today; "
+            f"'last'/both need a loader that can express which anchor an image belongs to.",
+        )
+
+        text_condition, text_token_tags = self.text_embed.embed(texts, keyframes=keyframes)
+
+        # Driver-authoritative x_T. MiniMax-H3 draws CONDITIONING noise first,
+        # then video, then audio, off the one request generator. UniRL authors
+        # each stream as an independently-salted sibling of the same recipe --
+        # reproducible, but NOT byte-identical to the reference pipeline's
+        # sequential draws. Parity runs must inject x_T from the fixture rather
+        # than expect the two RNG walks to agree.
         recipe = NoiseRecipe.from_sample(sample)
+        conditions = MiniMaxH3Conditions(text=text_condition, text_token_tags=text_token_tags)
+        if keyframes:
+            condition_noise = recipe.resolve(
+                device=self.bundle.device,
+                salt="keyframe",
+                latent_shape=(len(keyframes) * geometry.rows_per_frame, geometry.video_token_dim),
+            )
+            conditions.keyframe_latent = self.keyframe_encode.encode(
+                keyframes, geometry, noise=condition_noise
+            ).unsqueeze(0)
+            conditions.keyframe_anchor_codes = encode_keyframe_anchors(anchors).unsqueeze(0)
+
         video_noise = recipe.resolve(device=self.bundle.device, latent_shape=geometry.latent_shape)
         require(
             video_noise is not None,

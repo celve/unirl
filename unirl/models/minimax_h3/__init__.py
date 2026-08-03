@@ -15,7 +15,12 @@ from .config import (
     MiniMaxH3PipelineConfig,
 )
 from .diffusion import MiniMaxH3DiffusionStage, MiniMaxH3DiffusionStep
-from .packing import MiniMaxH3Geometry, build_t2va_layout, row_timestep_plan
+from .keyframe import (
+    MiniMaxH3KeyframeEncodeStage,
+    prepare_keyframes,
+    resolve_keyframe_anchors,
+)
+from .packing import MiniMaxH3Geometry, build_layout, build_t2va_layout, row_timestep_plan
 from .pipeline import MiniMaxH3Pipeline
 from .text_embed import MiniMaxH3TextEmbedStage
 from .vae import (
@@ -36,10 +41,14 @@ __all__ = [
     "MiniMaxH3DiffusionStage",
     "MiniMaxH3DiffusionStep",
     "MiniMaxH3Geometry",
+    "MiniMaxH3KeyframeEncodeStage",
     "MiniMaxH3Pipeline",
     "MiniMaxH3PipelineConfig",
     "MiniMaxH3TextEmbedStage",
     "MiniMaxH3VideoDecodeStage",
+    "build_layout",
     "build_t2va_layout",
+    "prepare_keyframes",
+    "resolve_keyframe_anchors",
     "row_timestep_plan",
 ]

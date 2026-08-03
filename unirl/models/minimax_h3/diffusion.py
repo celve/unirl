@@ -42,7 +42,9 @@ from unirl.utils.dtypes import parse_torch_dtype
 
 from .bundle import MiniMaxH3Bundle
 from .conditions import MiniMaxH3Conditions
-from .packing import MiniMaxH3Geometry, build_t2va_layout, row_timestep_plan
+from .keyframe import decode_keyframe_anchors
+from .packing import MiniMaxH3Geometry, build_layout, row_timestep_plan
+from .vendor import MINIMAX_H3_TEXT_TAG
 
 
 def _combine_modality_logp(
@@ -87,14 +89,30 @@ class MiniMaxH3DiffusionStep:
         video_sigma: torch.Tensor,
         audio_sigma: torch.Tensor,
         layout,
+        keyframe_latent: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """One forward -> ``(video_velocity, audio_velocity)``, sign-corrected.
 
         Latents stay ``[B=1, rows, C]`` throughout, which lands directly on the
         transformer's batch dim -- no ``[None]`` / ``[0]`` reshaping.
+
+        ``keyframe_latent`` (fl2va) is CONCATENATED onto the generated video
+        rows for the forward and its slice of the output is DISCARDED. Those
+        anchors therefore never enter the tensor whose trajectory and log-prob
+        are tracked, so nothing downstream needs to mask them -- the same
+        token-concat-then-slice idiom qwen_image_edit_plus and flux2_klein use.
         """
         unique_timesteps, timestep_indices = row_timestep_plan(layout, video_sigma=video_sigma, audio_sigma=audio_sigma)
         device = video_sample.device
+        num_condition_rows = layout.num_condition_video_rows
+        if num_condition_rows:
+            require(
+                keyframe_latent is not None,
+                f"MiniMaxH3DiffusionStep: layout declares {num_condition_rows} keyframe conditioning rows but no "
+                f"keyframe_latent was supplied.",
+            )
+            video_sample = torch.cat([keyframe_latent.to(video_sample), video_sample], dim=1)
+
         video_velocity, audio_velocity = self.bundle.transformer(
             hidden_states=video_sample,
             audio_hidden_states=audio_sample,
@@ -108,6 +126,9 @@ class MiniMaxH3DiffusionStep:
             text_indices=layout.text_indices.to(device),
             return_dict=False,
         )
+        # Drop the anchors' predictions: only generated rows are ever stepped.
+        if num_condition_rows:
+            video_velocity = video_velocity[:, num_condition_rows:]
         # The one line that reconciles H3's data-ward velocity with the
         # noise-ward convention every downstream SDE path assumes. See module
         # docstring for the algebra.
@@ -145,6 +166,27 @@ class MiniMaxH3DiffusionStage:
 
     def trainable_module(self) -> torch.nn.Module:
         return self.bundle.transformer
+
+    @staticmethod
+    def _layout_for(conditions: MiniMaxH3Conditions, geometry: MiniMaxH3Geometry):
+        """Rebuild the packed layout from the conditions alone.
+
+        Everything the layout needs rides on ``conditions`` -- the per-row text
+        tags and, for fl2va, which keyframe anchors are present -- so
+        ``generate`` and ``replay`` derive the identical layout without the
+        caller threading it through. That matters because ``FlowGRPO`` calls
+        ``replay(conditions, segment=, params=, step_indices=)`` and has no
+        channel to pass anything else.
+        """
+        tags = conditions.text_token_tags
+        if tags is None:
+            tags = torch.full((int(conditions.text.embeds.shape[1]),), MINIMAX_H3_TEXT_TAG, dtype=torch.long)
+        tags = tags.reshape(-1).to("cpu")
+        return build_layout(
+            geometry,
+            text_token_tags=tags,
+            keyframe_anchors=decode_keyframe_anchors(conditions.keyframe_anchor_codes),
+        )
 
     def audio_schedule(self, video_schedule: torch.Tensor) -> torch.Tensor:
         """The audio sigma grid, derived from the video one.
@@ -188,8 +230,7 @@ class MiniMaxH3DiffusionStage:
             f"unbatched per-row metadata, so callers chunk instead: set rollout.forward_batch_size=1 and "
             f"stack.micro_batch_size=1. Mirrors the bagel navit recipe.",
         )
-        num_text_tokens = int(conditions.text.embeds.shape[1])
-        layout = build_t2va_layout(geometry, num_text_tokens)
+        layout = self._layout_for(conditions, geometry)
         audio_sigmas = self.audio_schedule(sigmas)
 
         num_steps = int(sigmas.shape[0]) - 1
@@ -228,6 +269,7 @@ class MiniMaxH3DiffusionStage:
                     video_sigma=sigmas[step_idx],
                     audio_sigma=audio_sigmas[step_idx],
                     layout=layout,
+                    keyframe_latent=conditions.keyframe_latent,
                 )
 
                 x_next, log_prob, _ = self.strategy.denoise(
@@ -279,7 +321,6 @@ class MiniMaxH3DiffusionStage:
         *,
         segment: LatentSegment,
         params: DiffusionSamplingParams,
-        geometry: Optional[MiniMaxH3Geometry] = None,
         step_indices: Optional[List[int]] = None,
     ) -> ReplayResult:
         """Recompute log-probs for the stored transitions (training path).
@@ -300,12 +341,13 @@ class MiniMaxH3DiffusionStage:
             "MiniMaxH3DiffusionStage.replay: segment.aux_latents (audio trajectory) missing -- the packed forward "
             "couples video to the per-step audio state, so replay needs it. Was the segment produced by generate()?",
         )
-        require(geometry is not None, "MiniMaxH3DiffusionStage.replay: geometry is required to rebuild the row layout")
-
+        # FlowGRPO calls replay with (conditions, segment, params, step_indices)
+        # and nothing else, so the geometry is re-derived from params -- which
+        # is exactly what generate() resolved it from -- rather than threaded in.
+        geometry = MiniMaxH3Geometry.from_params(params)
         sigmas = segment.sigmas.to(self.bundle.device)
         audio_sigmas = self.audio_schedule(sigmas)
-        num_text_tokens = int(conditions.text.embeds.shape[1])
-        layout = build_t2va_layout(geometry, num_text_tokens)
+        layout = self._layout_for(conditions, geometry)
 
         stored = [int(i) for i in segment.sde_indices.tolist()]
         targets = [int(i) for i in (step_indices if step_indices is not None else stored)]
@@ -326,6 +368,7 @@ class MiniMaxH3DiffusionStage:
                     video_sigma=sigmas[step_idx],
                     audio_sigma=audio_sigmas[step_idx],
                     layout=layout,
+                    keyframe_latent=conditions.keyframe_latent,
                 )
                 _, log_prob, mean = self.strategy.denoise(
                     noise_pred=video_pred,
