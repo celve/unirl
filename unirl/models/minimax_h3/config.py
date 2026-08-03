@@ -91,6 +91,12 @@ class MiniMaxH3PipelineConfig:
     # path (False) gets that from ``from_pretrained`` natively.
     meta_init_transformer: bool = False
 
+    # ref2va runs against the checkpoint's OTHER 33B partition, `transformer_ref`,
+    # instead of `transformer` -- not in addition to it. Loading both would cost
+    # ~66 GB for weights only one task uses, so this switches the subfolder
+    # rather than adding a second module.
+    transformer_subfolder: str = "transformer"
+
     # Keep the frozen aux (both VAEs, the 32B Qwen3-VL conditioner) on CPU
     # instead of the train device. The conditioner alone is ~64 GB in bf16 and
     # is only needed to embed prompts, which the pipeline caches -- so for any

@@ -44,6 +44,9 @@ class MiniMaxH3Conditions(Batch):
     text_token_tags: Optional[torch.Tensor] = concat_field(default=None)
     keyframe_latent: Optional[torch.Tensor] = concat_field(default=None)
     keyframe_anchor_codes: Optional[torch.Tensor] = concat_field(default=None)
+    reference_video_latent: Optional[torch.Tensor] = concat_field(default=None)
+    reference_audio_latent: Optional[torch.Tensor] = concat_field(default=None)
+    reference_geometry: Optional[torch.Tensor] = concat_field(default=None)
 
     @classmethod
     def from_dict(cls, d: dict) -> "MiniMaxH3Conditions":

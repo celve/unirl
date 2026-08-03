@@ -75,7 +75,7 @@ class MiniMaxH3Bundle:
         # explicit `keep_in_fp32` hand-off below.
         meta_init_state = None
         if config.meta_init_transformer:
-            transformer_config = MiniMaxH3Transformer3DModel.load_config(path, subfolder="transformer")
+            transformer_config = MiniMaxH3Transformer3DModel.load_config(path, subfolder=config.transformer_subfolder)
             transformer, meta_init_state = build_meta_init_transformer(
                 lambda: MiniMaxH3Transformer3DModel.from_config(transformer_config),
                 dtype=dtype,
@@ -83,7 +83,7 @@ class MiniMaxH3Bundle:
             )
         else:
             transformer = MiniMaxH3Transformer3DModel.from_pretrained(
-                path, subfolder="transformer", torch_dtype=dtype
+                path, subfolder=config.transformer_subfolder, torch_dtype=dtype
             ).to(device)
 
         # Video VAE (frozen, fp32).
@@ -127,7 +127,7 @@ class MiniMaxH3Bundle:
         if config.meta_init_transformer:
             # Diffusers layout: the backend's sharded loader reads the
             # safetensors under <ckpt>/transformer after `to_empty`.
-            bundle._transformer_weights_path = os.path.join(path, "transformer")
+            bundle._transformer_weights_path = os.path.join(path, config.transformer_subfolder)
             bundle._meta_init_state = meta_init_state
         return bundle
 

@@ -1,13 +1,15 @@
-"""Geometry resolution and packed-row layout for MiniMax-H3 t2va.
+"""Geometry resolution and packed-row layout for MiniMax-H3.
 
 MiniMax-H3 runs its transformer over ONE packed 1-D sequence holding every
-modality at once. For t2va the row order is::
+modality at once. The row order depends on the task::
 
-    [ text (L) | target audio (A) | target video (V) ]
+    t2va   [ text | target audio | target video ]
+    fl2va  [ text | keyframe conditions | target audio | target video ]
+    ref2va [ text | reference blocks    | target audio | target video ]
 
-(``fl2va`` inserts keyframe conditioning rows between text and audio; that is
-Track B and deliberately not built here, though the vendored builder already
-supports it via ``keyframe_anchors``.)
+In every case the conditioning rows are a PREFIX of their modality's rows and
+are never stepped, so the generated-row counts are identical across all three
+tasks -- which is what keeps ``LatentSegment`` task-agnostic.
 
 This module is a thin resolver over the vendored builders -- the row geometry,
 the float64 rotary clock and the tag values are checkpoint contracts, so they
@@ -41,6 +43,12 @@ from .vendor import (
     resolve_canvas_size,
     video_latent_num_frames,
 )
+from .vendor.packing_ref2va import build_ref2va_packed_sequence
+
+# MiniMax-H3's "clean" end of the timestep axis. Its convention is t = 1 - sigma
+# with t = 1 meaning fully denoised, which is the opposite direction to every
+# other model in this repo -- hence a name rather than a bare 1.0 at the call site.
+MINIMAX_H3_CLEAN_TIMESTEP = 1.0
 
 
 @dataclass(frozen=True)
@@ -166,6 +174,29 @@ def build_layout(
     )
 
 
+def build_ref2va_layout(
+    geometry: MiniMaxH3Geometry,
+    *,
+    text_token_tags: torch.Tensor,
+    references,
+) -> MiniMaxH3PackedSequence:
+    """``[text | reference blocks | target audio | target video]`` for ref2va.
+
+    ``references`` are ``MiniMaxH3PreparedReference`` rows in packed order; only
+    their latent geometry is read, which is what lets ``replay`` rebuild the
+    layout from the serialized geometry table without touching a VAE.
+    """
+    return build_ref2va_packed_sequence(
+        text_token_tags=text_token_tags,
+        references=list(references),
+        num_latent_frames=geometry.num_latent_frames,
+        latent_height=geometry.latent_height,
+        latent_width=geometry.latent_width,
+        num_audio_latents=geometry.num_audio_latents,
+        patch_size=MINIMAX_H3_PATCH_SIZE,
+    )
+
+
 def build_t2va_layout(geometry: MiniMaxH3Geometry, num_text_tokens: int) -> MiniMaxH3PackedSequence:
     """``[text | audio | video]`` with a uniform text tag -- the t2va case."""
     return build_layout(
@@ -181,6 +212,7 @@ def row_timestep_plan(
     video_sigma: torch.Tensor,
     audio_sigma: torch.Tensor,
     condition_video_timestep: float = MINIMAX_H3_KEYFRAME_NOISE_AUG,
+    condition_audio_timestep: float = MINIMAX_H3_CLEAN_TIMESTEP,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """``(unique_timesteps, timestep_indices)`` for one denoising step.
 
@@ -189,26 +221,32 @@ def row_timestep_plan(
     every other model in this repo. Text rows never reach an output head and
     inherit the video timestep.
 
-    Keyframe conditioning rows do NOT step: they are pinned at the model's
-    noise-augmentation level (``t = 0.999``, i.e. 99.9% signal) for every
-    denoising step, which is why this is a constant rather than a schedule
-    entry. With no conditioning rows the argument is inert -- ``torch.unique``
-    only sees the timesteps rows actually carry.
+    Conditioning rows do NOT step -- they are pinned for every denoising step,
+    which is why these are constants rather than schedule entries. The two
+    modalities are pinned DIFFERENTLY, and the asymmetry is the model's:
+
+    * **Visual** conditioning (fl2va keyframes, ref2va image/video references)
+      is noise-augmented to ``t = 0.999`` -- 99.9% signal, not fully clean.
+    * **Audio** conditioning (ref2va reference soundtracks) rides **clean** at
+      ``t = 1.0``: it is never noised, and its VAE posterior is taken as the
+      mean rather than sampled.
+
+    With no conditioning rows both arguments are inert -- ``torch.unique`` only
+    sees the timesteps rows actually carry.
     """
     return build_row_timesteps(
         layout,
         video_timestep=float(1.0 - float(video_sigma)),
         audio_timestep=float(1.0 - float(audio_sigma)),
         condition_video_timestep=float(condition_video_timestep),
-        # No audio reference rows outside ref2va; kept aligned with the video
-        # conditioning level so it cannot add a phantom unique timestep.
-        condition_audio_timestep=float(condition_video_timestep),
+        condition_audio_timestep=float(condition_audio_timestep),
     )
 
 
 __all__ = [
     "MiniMaxH3Geometry",
     "build_layout",
+    "build_ref2va_layout",
     "build_t2va_layout",
     "row_timestep_plan",
 ]

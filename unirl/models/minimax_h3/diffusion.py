@@ -43,8 +43,23 @@ from unirl.utils.dtypes import parse_torch_dtype
 from .bundle import MiniMaxH3Bundle
 from .conditions import MiniMaxH3Conditions
 from .keyframe import decode_keyframe_anchors
-from .packing import MiniMaxH3Geometry, build_layout, row_timestep_plan
+from .packing import MiniMaxH3Geometry, build_layout, build_ref2va_layout, row_timestep_plan
+from .reference import decode_reference_geometry
 from .vendor import MINIMAX_H3_TEXT_TAG
+
+
+def _video_condition_rows(conditions: MiniMaxH3Conditions) -> Optional[torch.Tensor]:
+    """The video conditioning rows for whichever task is running.
+
+    fl2va supplies keyframe anchors, ref2va the visual reference blocks; both
+    occupy the same span of the packed sequence and are handled identically
+    once packed, so the step takes one tensor rather than branching on task.
+    """
+    return (
+        conditions.reference_video_latent
+        if conditions.reference_video_latent is not None
+        else conditions.keyframe_latent
+    )
 
 
 def _combine_modality_logp(
@@ -90,6 +105,7 @@ class MiniMaxH3DiffusionStep:
         audio_sigma: torch.Tensor,
         layout,
         keyframe_latent: Optional[torch.Tensor] = None,
+        reference_audio_latent: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """One forward -> ``(video_velocity, audio_velocity)``, sign-corrected.
 
@@ -105,13 +121,24 @@ class MiniMaxH3DiffusionStep:
         unique_timesteps, timestep_indices = row_timestep_plan(layout, video_sigma=video_sigma, audio_sigma=audio_sigma)
         device = video_sample.device
         num_condition_rows = layout.num_condition_video_rows
+        num_condition_audio_rows = layout.num_condition_audio_rows
         if num_condition_rows:
             require(
                 keyframe_latent is not None,
-                f"MiniMaxH3DiffusionStep: layout declares {num_condition_rows} keyframe conditioning rows but no "
-                f"keyframe_latent was supplied.",
+                f"MiniMaxH3DiffusionStep: layout declares {num_condition_rows} video conditioning rows but no "
+                f"conditioning latent was supplied.",
             )
             video_sample = torch.cat([keyframe_latent.to(video_sample), video_sample], dim=1)
+        # ref2va is the first task with AUDIO conditioning rows (reference
+        # soundtracks, which ride clean at t = 1.0). fl2va keyframes contribute
+        # none, so this branch is inert there.
+        if num_condition_audio_rows:
+            require(
+                reference_audio_latent is not None,
+                f"MiniMaxH3DiffusionStep: layout declares {num_condition_audio_rows} audio conditioning rows but no "
+                f"reference_audio_latent was supplied.",
+            )
+            audio_sample = torch.cat([reference_audio_latent.to(audio_sample), audio_sample], dim=1)
 
         video_velocity, audio_velocity = self.bundle.transformer(
             hidden_states=video_sample,
@@ -129,6 +156,8 @@ class MiniMaxH3DiffusionStep:
         # Drop the anchors' predictions: only generated rows are ever stepped.
         if num_condition_rows:
             video_velocity = video_velocity[:, num_condition_rows:]
+        if num_condition_audio_rows:
+            audio_velocity = audio_velocity[:, num_condition_audio_rows:]
         # The one line that reconciles H3's data-ward velocity with the
         # noise-ward convention every downstream SDE path assumes. See module
         # docstring for the algebra.
@@ -182,6 +211,12 @@ class MiniMaxH3DiffusionStage:
         if tags is None:
             tags = torch.full((int(conditions.text.embeds.shape[1]),), MINIMAX_H3_TEXT_TAG, dtype=torch.long)
         tags = tags.reshape(-1).to("cpu")
+        if conditions.reference_geometry is not None:
+            return build_ref2va_layout(
+                geometry,
+                text_token_tags=tags,
+                references=decode_reference_geometry(conditions.reference_geometry),
+            )
         return build_layout(
             geometry,
             text_token_tags=tags,
@@ -269,7 +304,8 @@ class MiniMaxH3DiffusionStage:
                     video_sigma=sigmas[step_idx],
                     audio_sigma=audio_sigmas[step_idx],
                     layout=layout,
-                    keyframe_latent=conditions.keyframe_latent,
+                    keyframe_latent=_video_condition_rows(conditions),
+                    reference_audio_latent=conditions.reference_audio_latent,
                 )
 
                 x_next, log_prob, _ = self.strategy.denoise(
@@ -368,7 +404,8 @@ class MiniMaxH3DiffusionStage:
                     video_sigma=sigmas[step_idx],
                     audio_sigma=audio_sigmas[step_idx],
                     layout=layout,
-                    keyframe_latent=conditions.keyframe_latent,
+                    keyframe_latent=_video_condition_rows(conditions),
+                    reference_audio_latent=conditions.reference_audio_latent,
                 )
                 _, log_prob, mean = self.strategy.denoise(
                     noise_pred=video_pred,
