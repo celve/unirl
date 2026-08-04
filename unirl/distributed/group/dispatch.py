@@ -241,6 +241,7 @@ def resolve_backward_dispatch_mode(
 
 
 DISTRIBUTED_CONFIG_ATTR = "_distributed_config"
+ADDRESSED_CONFIG_ATTR = "_addressed_config"
 
 
 def distributed(
@@ -278,6 +279,42 @@ def distributed(
                 "execute_mode": execute_mode,
             },
         )
+        return wrapper
+
+    if _func is not None:
+        return decorator(_func)
+    return decorator
+
+
+def addressed(_func: Callable = None) -> Callable:
+    """Declare a Role method point-to-point: ONE target worker, ONE result.
+
+    The counterpart to :func:`distributed`. Every ``Dispatch`` mode targets the whole
+    slab and ``PendingHandleCall.ready()`` is all-or-nothing across it, so a caller
+    that must place one unit of work on one worker and reap it the moment it lands
+    has no dispatch mode to express that. An ``@addressed`` method skips dispatch
+    (args go whole to one worker) and collect (the result is that worker's, unmerged),
+    and is bound on ``Handle.worker(k)`` rather than on ``Handle``.
+
+    A method may carry ``@addressed`` or ``@distributed``, never both — ``Handle``
+    rejects that at bind time, because the two answer different questions about the
+    same name.
+
+    Usage:
+        class AgenticRolloutEngine(Remote):
+            @addressed
+            def run_trajectory(self, task): ...
+    """
+
+    def decorator(func: Callable) -> Callable:
+        # ``wraps`` copies ``__dict__``, which is what lets this decorator and
+        # ``distributed`` stack in either order without the inner one's marker
+        # being lost. Removing it silently deletes the other marker.
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            return func(*args, **kwargs)
+
+        setattr(wrapper, ADDRESSED_CONFIG_ATTR, {"addressed": True})
         return wrapper
 
     if _func is not None:

@@ -35,10 +35,12 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Sequence,
 import ray
 
 from unirl.distributed.group.dispatch import (
+    ADDRESSED_CONFIG_ATTR,
     DISPATCH_MODE_REGISTRY,
     DISTRIBUTED_CONFIG_ATTR,
     Dispatch,
     Execute,
+    _unwrap_broadcast,
     resolve_backward_dispatch_mode,
 )
 from unirl.distributed.group.remote import RankInfo, Remote
@@ -59,6 +61,33 @@ logger = logging.getLogger(__name__)
 
 
 _role_name_counter: Dict[str, int] = {}
+
+# Handle attributes a bound @distributed method must not overwrite. ``_bind_methods``
+# ends in ``setattr(self, name, bound)``: against a read-only property that raises
+# opaquely, and against a plain method or attribute it silently wins. Both deserve a
+# named error instead.
+_HANDLE_RESERVED_NAMES = frozenset(
+    {
+        "worker",
+        "workers",
+        "worker_ids",
+        "role_name",
+        "role_cls",
+        "rank_infos",
+        "device_ids",
+        "world_size",
+        "pool",
+        "initialize",
+        "launch_nowait",
+        "engine_replicas",
+        "dp_size",
+        "sp_size",
+        "tp_size",
+        "pp_size",
+        "ep_size",
+        "tp_zero_workers",
+    }
+)
 
 
 def _owning_class(role_cls) -> Type[Remote]:
@@ -350,6 +379,128 @@ class PendingHandleCall:
         return self._value
 
 
+class PendingWorkerCall:
+    """Future-like result of :meth:`WorkerHandle.launch_nowait`: ONE worker, ONE ref.
+
+    The point-to-point twin of :class:`PendingHandleCall`, whose ``ready()`` is
+    all-or-nothing across the slab. Here ``ready()`` means exactly what it says,
+    which is what lets a caller reap completions as they land rather than at the
+    slowest worker's pace.
+
+    ``result()`` runs the resolution phase — ``ray.get`` then rebind onto the worker
+    that actually ran the call. It is cached after the first success, because rebind
+    registers GC finalizers on the result handles and asserts once-only.
+    """
+
+    def __init__(self, owner: "WorkerHandle", ref: Any) -> None:
+        self._owner = owner
+        self._ref = ref
+        self._consumed = False
+        self._value: Any = None
+
+    @property
+    def ref(self) -> Any:
+        """The underlying ObjectRef — :func:`wait_any` batches these into one ``ray.wait``."""
+        return self._ref
+
+    def ready(self) -> bool:
+        """True once this call's ref is resolved (non-blocking probe)."""
+        done, _ = ray.wait([self._ref], num_returns=1, timeout=0)
+        return bool(done)
+
+    def wait(self) -> None:
+        """Block until the worker finishes, without collecting; re-raises worker errors."""
+        ray.get(self._ref)
+
+    def result(self) -> Any:
+        """Block if needed, then resolve: the method's return value, rebound locally."""
+        if self._consumed:
+            return self._value
+        self._value = self._owner._resolve_one(self._ref)
+        self._consumed = True
+        return self._value
+
+
+def wait_any(pendings: Sequence[PendingWorkerCall], *, timeout: float = 0) -> List[PendingWorkerCall]:
+    """The ready subset of *pendings*, in ONE ``ray.wait``.
+
+    Probing N pendings via :meth:`PendingWorkerCall.ready` is N round trips through
+    the object store, which is exactly the cost a per-call pending exists to avoid.
+    Duplicate pendings collapse (``ray.wait`` requires unique refs) and a pending
+    that is already consumed still reports ready, so callers may re-probe safely.
+    """
+    by_ref: Dict[Any, PendingWorkerCall] = {p.ref: p for p in pendings}
+    if not by_ref:
+        return []
+    done, _ = ray.wait(list(by_ref), num_returns=len(by_ref), timeout=timeout)
+    return [by_ref[ref] for ref in done]
+
+
+class WorkerHandle:
+    """Point-to-point calls at ONE worker of a slab.
+
+    Answers *call worker k*. It must never grow *which worker*, *how many at once*,
+    or *retry* — placement and admission are the caller's policy, and putting them
+    here would rebuild a scheduler inside the transport layer.
+
+    Obtained from :meth:`Handle.worker`, which supplies the localize/rebind context
+    so ``TensorRef`` arguments are transferred to this worker and returned handles
+    are bound to it. ``@addressed`` methods of the role are available as attributes;
+    ``launch_nowait`` is the non-blocking form.
+    """
+
+    def __init__(self, handle: "Handle", index: int) -> None:
+        self._handle = handle
+        self._index = index
+        self._actor = handle.workers[index]
+        self._role = handle.role_name
+        for name in handle._addressed_methods:
+            setattr(self, name, self._make_fn(name))
+
+    def __repr__(self) -> str:  # pragma: no cover - diagnostics only
+        return f"WorkerHandle(role={self._role!r}, index={self._index})"
+
+    def _make_fn(self, method_name: str) -> Callable:
+        def worker_fn(*args, **kwargs):
+            return self.launch_nowait(method_name, *args, **kwargs).result()
+
+        worker_fn.__name__ = method_name
+        return worker_fn
+
+    def launch_nowait(self, method_name: str, *args, **kwargs) -> PendingWorkerCall:
+        """Launch an ``@addressed`` method at this worker without blocking."""
+        if method_name not in self._handle._addressed_methods:
+            raise AttributeError(
+                f"{method_name!r} is not an @addressed method of "
+                f"{_owning_class(self._handle.role_cls).__name__}"
+            )
+        # A single-worker forward under a GradContext would be answered by the
+        # slab-wide _auto_backward, which finds no saved call_id on the other
+        # workers; whether that yields a silent zero-gradient or an IndexError
+        # depends on which worker lands first in the collect. Refuse instead.
+        if current_grad_context() is not None:
+            raise RuntimeError(
+                f"@addressed {method_name!r} called under a GradContext; backward is "
+                "slab-wide and cannot answer a single-worker forward."
+            )
+        # Broadcast is a controller-side annotation consumed by the dispatch fns.
+        # The addressed path skips dispatch, so it must strip them itself or the
+        # wrapper object reaches the worker.
+        args, kwargs = _unwrap_broadcast(args, kwargs)
+        (args, kwargs) = self._handle._localize_one((args, kwargs), self._index)
+        ref = self._actor.call.remote(self._role, method_name, args, kwargs)
+        return PendingWorkerCall(self, ref)
+
+    def _resolve_one(self, ref: Any) -> Any:
+        """``ray.get`` + rebind onto THIS worker (never ``workers[0]``).
+
+        Rebinding to the wrong actor sends the decref to a store that has no such
+        key; ``GPUTensorHandle._release`` is fire-and-forget and swallows the error,
+        so the real owner leaks for the process lifetime with no diagnostic.
+        """
+        return self._handle._rebind_tree(ray.get(ref), self._actor, worker_local=self._handle._worker_local)
+
+
 class Handle:
     """Controller-side SPMD handle.
 
@@ -466,6 +617,8 @@ class Handle:
         )
 
         self._method_configs: Dict[str, tuple] = {}
+        self._addressed_methods: set = set()
+        self._worker_handles: Dict[int, "WorkerHandle"] = {}
         self._bind_methods(role_cls)
 
         self._grad_call_counter = count()
@@ -508,6 +661,50 @@ class Handle:
         returns every worker (identical to ``self.workers``)."""
         return [w for w, ri in zip(self.workers, self.rank_infos) if ri.tp_rank == 0]
 
+    @property
+    def engine_replicas(self) -> List[int]:
+        """Indices of the workers that host one engine each — the DP heads.
+
+        ``tp_rank == 0 and pp_rank == 0``: the ranks a whole unit of work may be
+        addressed to. Non-tp-zero ranks are no-op shells whose ``generate`` returns
+        ``None`` (the slab collect filters that; a point-to-point call would not),
+        and the pp ranks of one group are one engine, not several. Identical to
+        ``range(world_size)`` while tp_size == pp_size == 1."""
+        return [i for i, ri in enumerate(self.rank_infos) if ri.tp_rank == 0 and ri.pp_rank == 0]
+
+    @property
+    def _worker_local(self) -> bool:
+        """Whether returned handles must be rebound to their producing worker.
+
+        Same value ``_launch_call`` computes; a wrong ``False`` on a worker-local
+        backend means no GC finalizer is registered and every returned tensor pins
+        its worker's store for the process lifetime, with no error."""
+        return issubclass(self.pool.transport_cls, WorkerLocalTransport)
+
+    def worker(self, index: int) -> "WorkerHandle":
+        """A point-to-point handle for one worker of this slab (``@addressed`` methods).
+
+        ``index`` is a position in ``self.workers``; use :attr:`engine_replicas` to
+        pick one that actually hosts an engine. Cached, because callers address the
+        same worker repeatedly."""
+        if not 0 <= index < self.world_size:
+            raise IndexError(f"worker index {index} out of range for world_size={self.world_size}")
+        cached = self._worker_handles.get(index)
+        if cached is None:
+            cached = self._worker_handles[index] = WorkerHandle(self, index)
+        return cached
+
+    def _localize_one(self, shard: Tuple[tuple, dict], index: int) -> Tuple[tuple, dict]:
+        """Make every ref in one shard resolvable on worker ``index``.
+
+        The single-target slice of what ``_launch_call`` does for the whole slab;
+        ``localize`` zips shards against ``(worker_ids, device_ids)`` elementwise, so
+        one-element lists are a correct slice. Skipping this is what makes a task
+        produced on one worker unresolvable on another."""
+        return self.pool.transport_cls.localize(
+            [shard], self.pool, [self.device_ids[index]], [self.worker_ids[index]]
+        )[0]
+
     def initialize(self, *args, **kwargs) -> None:
         """Call role.initialize(*args, **kwargs) on all workers.
 
@@ -521,12 +718,17 @@ class Handle:
         self.rank_infos = ray.get([w.get_rank_info.remote(self.role_name) for w in self.workers])
 
     def _bind_methods(self, role_cls) -> None:
-        """Scan role_cls for @distributed methods and create handle functions.
+        """Scan role_cls for @distributed / @addressed methods and bind them.
 
         For classmethod ``role_cls`` (e.g. ``SD3Bundle.from_config``)
         we scan the owning class instead — the constructed instance is
         of that class, so its ``@distributed`` methods are the ones
         callers will dispatch through this Handle.
+
+        ``@distributed`` methods are bound on this Handle; ``@addressed`` ones are
+        recorded for :meth:`worker` to bind on a :class:`WorkerHandle`. A method
+        carrying both is rejected here rather than silently resolving to whichever
+        marker is checked first.
         """
         role_cls = _owning_class(role_cls)
         for name in dir(role_cls):
@@ -534,8 +736,23 @@ class Handle:
             if method is None:
                 continue
             config = getattr(method, DISTRIBUTED_CONFIG_ATTR, None)
+            addressed_config = getattr(method, ADDRESSED_CONFIG_ATTR, None)
+            if config is not None and addressed_config is not None:
+                raise TypeError(
+                    f"{role_cls.__name__}.{name} is both @distributed and @addressed; "
+                    "a method is either a slab collective or point-to-point, not both."
+                )
+            if addressed_config is not None:
+                self._addressed_methods.add(name)
+                continue
             if config is None:
                 continue
+            if name in _HANDLE_RESERVED_NAMES:
+                # setattr below would shadow the Handle API silently (or raise
+                # opaquely on the read-only properties). Fail with the reason.
+                raise TypeError(
+                    f"@distributed {role_cls.__name__}.{name} collides with the Handle API; rename it."
+                )
 
             fns = DISPATCH_MODE_REGISTRY[config["dispatch_mode"]]
             dispatch_fn = fns["dispatch_fn"]
