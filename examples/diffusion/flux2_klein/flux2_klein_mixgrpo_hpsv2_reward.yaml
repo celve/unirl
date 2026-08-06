@@ -91,7 +91,12 @@ backend:
     mixed_precision: true
     fsdp_mode: full
     reshard_after_forward: true
-    activation_checkpointing: false
+    # ON, unlike every other Klein recipe (they keep it off for speed). CFG puts
+    # a second, grad-tracked transformer forward inside the FlowGRPO replay, so
+    # the backward holds two activation sets per SDE step. Without this the run
+    # OOMs at 95 GiB on H20 in stack._run_update -> flowgrpo.replay ->
+    # predict_noise, even at micro_batch_size=1 (measured, LIN-707 run 1).
+    activation_checkpointing: ${oc.decode:${oc.env:ACTIVATION_CHECKPOINTING,true}}
     use_torch_compile: false
   optimizer_cfg:
     _target_: unirl.train.backend.base.OptimizerConfig
