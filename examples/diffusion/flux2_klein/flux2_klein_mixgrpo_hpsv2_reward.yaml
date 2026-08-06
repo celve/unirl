@@ -1,0 +1,213 @@
+# @package _global_
+# FLUX.2-klein MixGRPO + HPSv2 reward — CFG-on rollout (LIN-707).
+#
+# Derived from flux2_klein_trainside.yaml (the known-good Klein FlowGRPO
+# recipe). Three deliberate deltas, nothing else:
+#
+#   1. scheduler   AllSDEScheduler -> WindowScheduler(progressive)   [MixGRPO]
+#   2. reward      PickScore -> HPSv2 local scorer
+#   3. guidance    1.0 -> ${GUIDANCE_SCALE} (default 4.0)            [CFG ON]
+#
+# Why CFG matters here: FLUX.2-klein *Base* is "trained without step or
+# guidance distillation" (its own model card), so it carries no guidance
+# embedder — `transformer/config.json` has `guidance_embeds: false` and
+# Flux2KleinDiffusionStep always feeds `guidance=torch.zeros(B)`. The only
+# way to steer it is classical CFG: a second transformer forward on a
+# negative branch, combined as
+#     eps = eps_neg + w * (eps_pos - eps_neg).
+# Flux2KleinPipeline.build_conditions materialises that negative branch
+# automatically once `guidance_scale > 1.0` (empty-string negatives), and
+# both the rollout and the FlowGRPO log-prob recompute go through the same
+# `predict_noise`, so the policy being optimised IS the CFG-composed policy.
+# The canonical Klein recipes all pin guidance_scale=1.0, i.e. CFG off — this
+# recipe is the first that exercises the branch end to end.
+#
+# Cost of CFG, both worth watching in the run:
+#   - 2x transformer forwards per denoising step (rollout AND training).
+#   - `negative_text` rides in Part.conditions alongside `text`, so the
+#     replayed trajectory carries 2x text-embed bytes
+#     (512 tok x 15360 dim x fp16 = 15.7 MB per sample per branch).
+#
+# Launch (1 node x 8 GPUs):
+#   export FLUX2_KLEIN_PATH=/root/unirl/models/local/FLUX.2-klein-base-4B
+#   export HPS_OPEN_CLIP_PATH=/root/unirl/hps_ckpt/open_clip_pytorch_model.bin
+#   export HPS_CKPT_PATH=/root/unirl/hps_ckpt/HPS_v2.1_compressed.pt
+#   bash examples/run_experiment_single_node.sh \
+#     diffusion/flux2_klein/flux2_klein_mixgrpo_hpsv2_reward
+#
+# CFG-off control arm (same recipe, guidance_scale=1.0 skips the negative
+# branch entirely):
+#   GUIDANCE_SCALE=1.0 bash examples/run_experiment_single_node.sh ...
+
+num_devices: 8                # launcher auto-overrides via NUM_NODES * GPUS_PER_NODE
+# prompts_per_rollout. Halved vs flux2_klein_trainside's 64 because CFG doubles
+# the rollout forward count; 16 x 16 samples = 256 per rollout keeps the step
+# time in the same range as the CFG-off recipe.
+batch_size: ${oc.decode:${oc.env:BATCH_SIZE,16}}
+num_rollouts: 10000
+
+logging:
+  report_to_wandb: ${oc.decode:${oc.env:REPORT_TO_WANDB,true}}
+  project_name: ${oc.env:WANDB_PROJECT,unirl-flux2klein-mixgrpo-cfg}
+  run_name: ${oc.env:WANDB_RUN_NAME,flux2_klein_mixgrpo_hpsv2_cfg}
+  entity: ${oc.env:WANDB_ENTITY,null}
+  tags: ["flux2-klein", "mixgrpo", "hpsv2", "cfg", "trainside", "v2"]
+  log_media: true
+  media_max_items: 8
+  media_log_interval: 1
+
+bundle:
+  _target_: unirl.models.flux2_klein.bundle.Flux2KleinBundle.from_config
+  config:
+    _target_: unirl.models.flux2_klein.config.Flux2KleinPipelineConfig
+    pretrained_model_ckpt_path: ${oc.env:FLUX2_KLEIN_PATH,black-forest-labs/FLUX.2-klein-base-4B}
+    model_precision: bf16
+    max_sequence_length: 512
+    # Static-shift fallback only; Klein's checkpoint enables empirical-mu
+    # dynamic shifting (build_schedule_policy) and this value is ignored at runtime.
+    shift: 1.0
+
+pipeline:
+  _target_: unirl.models.flux2_klein.pipeline.Flux2KleinPipeline
+  shift: 1.0
+  autocast_precision: bf16
+  trajectory_precision: fp16
+  logprob_precision: fp32
+  max_sequence_length: 512
+  qwen3_extraction_layers: [9, 18, 27]
+  strategy:
+    _target_: unirl.sde.kernels.DanceSDEStrategy
+
+backend:
+  _target_: unirl.train.backend.fsdp.FSDPBackend
+  block_class_names: ["Flux2TransformerBlock", "Flux2SingleTransformerBlock"]
+  trainable_attr: transformer
+  fsdp_cfg:
+    _target_: unirl.train.configs.FSDPConfig
+    # fp32 master — Klein's empirical-mu schedule is numerically sensitive; bf16
+    # master weights drift reward after ~hundreds of rollouts.
+    param_dtype: fp32
+    cpu_offload: false
+    mixed_precision: true
+    fsdp_mode: full
+    reshard_after_forward: true
+    activation_checkpointing: false
+    use_torch_compile: false
+  optimizer_cfg:
+    _target_: unirl.train.backend.base.OptimizerConfig
+    learning_rate: 5.0e-5
+    adam_beta1: 0.9
+    adam_beta2: 0.999
+    adam_epsilon: 1.0e-8
+    weight_decay: 0.0
+  scheduler_cfg:
+    _target_: unirl.train.backend.base.LrSchedulerConfig
+    type: constant
+    warmup_steps: 0
+    total_steps: 10000
+  lora_cfg:
+    _target_: unirl.train.configs.LoraConfig
+    rank: 16
+    alpha: 32
+    dropout: 0.0
+    bias: none
+    task_type: FEATURE_EXTRACTION
+    # Same targets as flux2_klein_trainside.yaml — see that file for why single
+    # blocks list only the fused `to_qkv_mlp_proj`.
+    target_modules:
+      - to_q
+      - to_k
+      - to_v
+      - to_out.0
+      - add_q_proj
+      - add_k_proj
+      - add_v_proj
+      - to_add_out
+      - ff.linear_in
+      - ff.linear_out
+      - ff_context.linear_in
+      - ff_context.linear_out
+      - to_qkv_mlp_proj
+
+rollout:
+  _target_: unirl.rollout.engine.trainside.engine.TrainsideRolloutEngine
+  stage_attrs: [diffusion]
+  # 8, not 16: with CFG the step holds two transformer activations plus both
+  # text branches. Stays a divisor of samples_per_prompt so groups never
+  # straddle a chunk boundary (matters with init_same_noise).
+  forward_batch_size: ${oc.decode:${oc.env:FORWARD_BATCH_SIZE,8}}
+
+reward:
+  _target_: unirl.reward.service.RewardService
+  backend:
+    _target_: unirl.reward.local.hpsv2.HPSv2RewardScorer
+    base_device: cuda
+    config:
+      _target_: unirl.reward.local.hpsv2.HPSv2Spec
+      batch_size: 8
+      device: auto
+      # ViT-H-14 backbone + HPS v2.1 head. Both must be on pod-local disk;
+      # HPS_v2.1_compressed.pt comes from the xswu/HPSv2 HF repo, the backbone
+      # from laion/CLIP-ViT-H-14-laion2B-s32B-b79K (open_clip_pytorch_model.bin).
+      open_clip_path: ${oc.env:HPS_OPEN_CLIP_PATH,./hps_ckpt/open_clip_pytorch_model.bin}
+      checkpoint_path: ${oc.env:HPS_CKPT_PATH,./hps_ckpt/HPS_v2.1_compressed.pt}
+
+algorithm:
+  _target_: unirl.algorithms.flowgrpo.FlowGRPO
+  stage_attr: diffusion
+  # Loosened vs SD3's 1e-4 — Klein sigmas are heavily skewed to 1.0 and the
+  # PPO ratio drifts past 1 +/- 1e-4 quickly.
+  clip_range: 5.0e-3
+  clip_schedule: constant
+  old_logp_source: replay
+  conditions_cls:
+    _target_: hydra.utils.get_class
+    path: unirl.models.flux2_klein.conditions.Flux2KleinConditions
+  params: ${sampling}
+
+stack:
+  _target_: unirl.train.stack.TrainStack
+  micro_batch_size: 1
+  max_grad_norm: 1.0
+  num_updates_per_batch: 2      # PPO mini-batches per rollout (pi_old frozen once)
+
+data_source:
+  _target_: unirl.data.data_source.MultimodalRLDataSource
+  args:
+    run:
+      data_path: ${oc.env:DATA_PATH,datasets/pickscore/train.txt}
+      eval_data_path: ${oc.env:EVAL_DATA_PATH,datasets/pickscore/test.txt}
+      seed: 42
+    algorithm:
+      prompts_per_rollout: ${batch_size}
+
+sampling:
+  _target_: unirl.types.sampling.DiffusionSamplingParams
+  num_inference_steps: 10
+  # CFG ON. > 1.0 makes Flux2KleinPipeline.build_conditions encode an
+  # empty-string negative branch and Flux2KleinDiffusionStep run the second
+  # forward + combine. 4.0 is the value FLUX.2-klein Base's own model card
+  # uses for inference. Set GUIDANCE_SCALE=1.0 for the CFG-off control arm.
+  guidance_scale: ${oc.decode:${oc.env:GUIDANCE_SCALE,4.0}}
+  height: 512
+  width: 512
+  eta: 0.7
+  samples_per_prompt: 16
+  seed: 42
+  init_same_noise: true
+  # MixGRPO: progressive sliding-window SDE-index schedule. The window of
+  # SDE-recorded steps advances with the rollout id and rolls back to the
+  # start once it sweeps the schedule. Hyperparameters match sd3_mixgrpo.yaml.
+  scheduler:
+    _target_: unirl.utils.scheduler_utils.WindowScheduler
+    num_timesteps: ${..num_inference_steps}
+    config:
+      _target_: unirl.utils.scheduler_utils.WindowConfig
+      strategy: progressive
+      window_size: 4
+      iters_per_window: 25
+      init_timestep: 0
+      overlap_size: 1
+      roll_back: true
+      max_iters_per_window: 10
+      min_iters_per_window: 1
