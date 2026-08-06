@@ -46,6 +46,14 @@ num_devices: 8                # launcher auto-overrides via NUM_NODES * GPUS_PER
 batch_size: ${oc.decode:${oc.env:BATCH_SIZE,16}}
 num_rollouts: 10000
 
+# Checkpoint the LoRA adapter (MBs, not GBs). The LIN-707 arms ran 81 rollouts
+# each with this unset, so neither is resumable — and the CFG arm spends its
+# first ~20 rollouts on LoRA warm-up before reward moves at all, which is a
+# painful thing to re-pay. Point SAVE_DIR at Ceph to outlive the pod.
+save_interval: ${oc.env:SAVE_INTERVAL,25}
+save_mode: ${oc.env:SAVE_MODE,adapter}
+save_dir: ${oc.env:SAVE_DIR,checkpoints/flux2klein_mixgrpo_cfg}
+
 logging:
   report_to_wandb: ${oc.decode:${oc.env:REPORT_TO_WANDB,true}}
   project_name: ${oc.env:WANDB_PROJECT,unirl-flux2klein-mixgrpo-cfg}
