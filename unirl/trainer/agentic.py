@@ -77,9 +77,10 @@ class AgenticTrainer(BaseTrainer):
         try:
             self.batch_size = int(batch_size)
             self.data_source = instantiate(data_source_cfg)
+            self._validate_epoch_horizon(cfg=cfg, backend_cfg=backend_cfg)
             self.sampling_params: Dict[str, BaseSamplingParams] = build_sampling_dict(sampling_cfg)
             self._group_size = total_samples_per_prompt(self.sampling_params)
-            self._stop = list(stop) if stop else ["</tool_call>"]
+            self._stop = ["</tool_call>"] if stop is None else list(stop)
             self._per_worker_inflight = int(per_worker_inflight)
 
             with placement(self.pool, fraction=1.0, shared_workers=True):
@@ -111,6 +112,47 @@ class AgenticTrainer(BaseTrainer):
         except BaseException:
             self._shutdown_runtime()
             raise
+
+    def _validate_epoch_horizon(self, *, cfg: DictConfig, backend_cfg: DictConfig) -> None:
+        total_train_epochs = cfg.get("total_train_epochs")
+        if total_train_epochs is None:
+            return
+        total_train_epochs = int(total_train_epochs)
+        if total_train_epochs <= 0:
+            raise ValueError(f"total_train_epochs must be positive; got {total_train_epochs}")
+
+        source_batch_size = int(getattr(self.data_source, "prompts_per_rollout", self.batch_size))
+        if source_batch_size != self.batch_size:
+            raise ValueError(
+                f"data-source prompts_per_rollout ({source_batch_size}) must equal batch_size ({self.batch_size})"
+            )
+        updates_per_epoch = int(getattr(self.data_source, "num_batches_per_epoch", 0))
+        if updates_per_epoch <= 0:
+            raise ValueError(f"data source produced invalid num_batches_per_epoch={updates_per_epoch}")
+        expected_rollouts = total_train_epochs * updates_per_epoch
+        configured_rollouts = cfg.get("num_rollouts")
+        if configured_rollouts is None or int(configured_rollouts) != expected_rollouts:
+            raise ValueError(
+                f"num_rollouts must equal total_train_epochs * updates_per_epoch "
+                f"({total_train_epochs} * {updates_per_epoch} = {expected_rollouts}); got {configured_rollouts}"
+            )
+
+        scheduler_cfg = backend_cfg.get("scheduler_cfg")
+        if scheduler_cfg is None or int(scheduler_cfg.get("total_steps", -1)) != expected_rollouts:
+            configured_total = None if scheduler_cfg is None else scheduler_cfg.get("total_steps")
+            raise ValueError(
+                f"backend.scheduler_cfg.total_steps must equal num_rollouts ({expected_rollouts}); "
+                f"got {configured_total}"
+            )
+        warmup_proportion = cfg.get("warmup_proportion")
+        if warmup_proportion is not None:
+            expected_warmup = int(float(warmup_proportion) * expected_rollouts)
+            configured_warmup = int(scheduler_cfg.get("warmup_steps", -1))
+            if configured_warmup != expected_warmup:
+                raise ValueError(
+                    f"backend.scheduler_cfg.warmup_steps must equal int(warmup_proportion * num_rollouts) "
+                    f"({expected_warmup}); got {configured_warmup}"
+                )
 
     @staticmethod
     def _validate_config(

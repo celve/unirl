@@ -6,7 +6,8 @@ trainer then scores terminal ``<answer>`` values, computes group-normalized GRPO
 advantages, and performs one synchronous update.
 
 Launch (per node, SPMD; rank 0 owns the driver):
-  QWEN3_INSTRUCT_PATH=/path/to/Qwen3-4B-Instruct DATA_PATH=data/asearcher/train.jsonl \
+  QWEN3_PATH=/path/to/Qwen3-1.7B DATA_PATH=data/asearcher/train.jsonl \
+  DEEP_RESEARCH_RUN_DATE=YYYY-MM-DD \
   SERPER_KEY_ID=... JINA_API_KEYS=... JUDGE_URL=... JUDGE_MODEL=... \
   python -m unirl.train_agentic --config-name=deep_research/deep_research_search_judge
 
@@ -14,15 +15,29 @@ Launch (per node, SPMD; rank 0 owns the driver):
 
 from __future__ import annotations
 
+import datetime
+
 import hydra
 from omegaconf import DictConfig
 
 from unirl.trainer.agentic import AgenticTrainer
 from unirl.utils.graceful_shutdown import GracefulShutdown
+from unirl.utils.misc import set_seed
 
 
 @hydra.main(version_base=None, config_path="../examples", config_name="deep_research/deep_research_search_judge")
 def main(cfg: DictConfig) -> None:
+    if cfg.get("seed") is not None:
+        set_seed(int(cfg.seed))
+    if cfg.get("run_date") is not None:
+        run_date = str(cfg.run_date)
+        try:
+            parsed_date = datetime.date.fromisoformat(run_date)
+        except ValueError as exc:
+            raise ValueError(f"run_date must use YYYY-MM-DD format; got {cfg.run_date!r}") from exc
+        if parsed_date.isoformat() != run_date:
+            raise ValueError(f"run_date must use YYYY-MM-DD format; got {cfg.run_date!r}")
+
     trainer = None
 
     def teardown() -> None:

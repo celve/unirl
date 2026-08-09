@@ -8,6 +8,8 @@ Runtime prompt embeddings are produced inside rollout engines and training
 pipelines, not provided by the external dataset.
 """
 
+import hashlib
+import json
 import logging
 import os
 from collections import Counter
@@ -274,6 +276,131 @@ def _input_sample(
     return Sample.request(*parts)
 
 
+def _sha256_file(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+class _StatefulEpochOrder:
+    """Deterministic epoch permutations with an exact within-batch cursor."""
+
+    _SCHEMA_VERSION = 1
+
+    def __init__(
+        self,
+        *,
+        dataset_size: int,
+        epoch_batch_size: int,
+        sampler_seed: int,
+        shuffle: bool,
+        drop_last: bool,
+    ) -> None:
+        self.dataset_size = int(dataset_size)
+        self.epoch_batch_size = int(epoch_batch_size)
+        self.sampler_seed = int(sampler_seed)
+        self.shuffle = bool(shuffle)
+        self.drop_last = bool(drop_last)
+        if self.dataset_size <= 0:
+            raise ValueError(f"stateful epoch order requires a non-empty dataset; got {self.dataset_size}")
+        if self.epoch_batch_size <= 0:
+            raise ValueError(f"epoch_batch_size must be positive; got {self.epoch_batch_size}")
+        if self.drop_last and self.dataset_size < self.epoch_batch_size:
+            raise ValueError(
+                "stateful epoch order would expose no data with drop_last=True "
+                f"(dataset_size={self.dataset_size}, epoch_batch_size={self.epoch_batch_size})"
+            )
+
+        self.epoch = 0
+        self._cursor = 0
+        self._indices: List[int] = []
+        self._refresh_epoch()
+
+    @property
+    def num_batches_per_epoch(self) -> int:
+        if self.drop_last:
+            return self.dataset_size // self.epoch_batch_size
+        return (self.dataset_size + self.epoch_batch_size - 1) // self.epoch_batch_size
+
+    def take(self, count: int) -> List[Tuple[int, int]]:
+        count = int(count)
+        if count <= 0:
+            raise ValueError(f"get_samples count must be positive; got {count}")
+
+        selected: List[Tuple[int, int]] = []
+        while len(selected) < count:
+            if self._cursor == len(self._indices):
+                self.epoch += 1
+                self._cursor = 0
+                self._refresh_epoch()
+            take = min(count - len(selected), len(self._indices) - self._cursor)
+            selected.extend((self.epoch, index) for index in self._indices[self._cursor : self._cursor + take])
+            self._cursor += take
+        return selected
+
+    def state_dict(self) -> Dict[str, Any]:
+        return {
+            "schema_version": self._SCHEMA_VERSION,
+            "dataset_size": self.dataset_size,
+            "epoch_batch_size": self.epoch_batch_size,
+            "sampler_seed": self.sampler_seed,
+            "shuffle": self.shuffle,
+            "drop_last": self.drop_last,
+            "epoch": self.epoch,
+            "batch_index": self._cursor // self.epoch_batch_size,
+            "within_batch_offset": self._cursor % self.epoch_batch_size,
+            "permutation_sha256": self._permutation_sha256(),
+        }
+
+    def load_state_dict(self, state: Dict[str, Any]) -> None:
+        expected = {
+            "schema_version": self._SCHEMA_VERSION,
+            "dataset_size": self.dataset_size,
+            "epoch_batch_size": self.epoch_batch_size,
+            "sampler_seed": self.sampler_seed,
+            "shuffle": self.shuffle,
+            "drop_last": self.drop_last,
+        }
+        mismatches = {key: (state.get(key), value) for key, value in expected.items() if state.get(key) != value}
+        if mismatches:
+            raise ValueError(f"stateful epoch-order configuration changed since checkpoint: {mismatches}")
+
+        epoch = int(state["epoch"])
+        batch_index = int(state["batch_index"])
+        within_batch_offset = int(state["within_batch_offset"])
+        if epoch < 0 or batch_index < 0 or not 0 <= within_batch_offset < self.epoch_batch_size:
+            raise ValueError("invalid stateful epoch-order cursor")
+
+        self.epoch = epoch
+        self._refresh_epoch()
+        if state.get("permutation_sha256") != self._permutation_sha256():
+            raise ValueError("stateful epoch-order permutation does not match checkpoint")
+        cursor = batch_index * self.epoch_batch_size + within_batch_offset
+        if cursor > len(self._indices):
+            raise ValueError(f"stateful epoch-order cursor {cursor} exceeds epoch size {len(self._indices)}")
+        self._cursor = cursor
+
+    def _refresh_epoch(self) -> None:
+        if self.shuffle:
+            generator = torch.Generator()
+            generator.manual_seed(self.sampler_seed + self.epoch)
+            indices = torch.randperm(self.dataset_size, generator=generator).tolist()
+        else:
+            indices = list(range(self.dataset_size))
+        if self.drop_last:
+            effective_size = (self.dataset_size // self.epoch_batch_size) * self.epoch_batch_size
+            indices = indices[:effective_size]
+        self._indices = indices
+
+    def _permutation_sha256(self) -> str:
+        digest = hashlib.sha256()
+        for index in self._indices:
+            digest.update(int(index).to_bytes(8, "big"))
+        return digest.hexdigest()
+
+
 class MultimodalRLDataSource:
     """
     Multimodal runtime data source for RL training.
@@ -297,20 +424,29 @@ class MultimodalRLDataSource:
                 - run.data_path: Path to data file (JSON, JSONL, or TXT)
                 - run.seed: Random seed
                 - run.shuffle: Whether to shuffle the training prompts (default: True)
+                - run.drop_last: Whether to omit an incomplete epoch tail (default: True)
+                - run.stateful_epoch_order: Enable exact epoch/cursor state (default: False)
+                - run.manifest_path: Optional conversion manifest to verify
+                - run.expected_num_prompts: Optional exact loaded-row count
                 - algorithm.prompts_per_rollout: Batch size
         """
         self.args = args
         self.data_path = args.run.data_path
-        self.eval_data_path = args.run.eval_data_path
+        self.eval_data_path = getattr(args.run, "eval_data_path", None)
         self.seed = args.run.seed
         self.shuffle = bool(getattr(args.run, "shuffle", True))
         self.prompts_per_rollout = int(args.algorithm.prompts_per_rollout)
-        self.drop_last = True
+        self.drop_last = bool(getattr(args.run, "drop_last", True))
+        self.stateful_epoch_order = bool(getattr(args.run, "stateful_epoch_order", False))
+        self.manifest_path = getattr(args.run, "manifest_path", None)
+        self.expected_num_prompts = getattr(args.run, "expected_num_prompts", None)
 
         self.train_dataset = None
         self.eval_dataset = None
         self._dataloader = None
         self._iter: Optional[Iterator] = None
+        self._epoch_order: Optional[_StatefulEpochOrder] = None
+        self._dataset_sha256: Optional[str] = None
         self._eval_dataset_ready = False
         self._shuffle_generator = torch.Generator()
         if self.seed is None:
@@ -333,7 +469,31 @@ class MultimodalRLDataSource:
             self.data_path,
             len(self.train_dataset),
         )
+        self._validate_training_data()
         self._create_dataloader()
+
+    def _validate_training_data(self) -> None:
+        if self.train_dataset is None:
+            return
+        dataset_size = len(self.train_dataset)
+        if self.expected_num_prompts is not None and dataset_size != int(self.expected_num_prompts):
+            raise ValueError(f"Training dataset has {dataset_size} prompts; expected {int(self.expected_num_prompts)}")
+
+        if self.manifest_path:
+            if not os.path.isfile(self.manifest_path):
+                raise FileNotFoundError(f"Training-data manifest not found: {self.manifest_path}")
+            with open(self.manifest_path, encoding="utf-8") as stream:
+                manifest = json.load(stream)
+            manifest_rows = manifest.get("written_rows")
+            if manifest_rows != dataset_size:
+                raise ValueError(
+                    f"Training-data manifest reports {manifest_rows} rows but dataset loaded {dataset_size}"
+                )
+            self._dataset_sha256 = _sha256_file(self.data_path)
+            if manifest.get("converted_file_sha256") != self._dataset_sha256:
+                raise ValueError("Training dataset SHA-256 does not match its conversion manifest")
+        elif self.stateful_epoch_order:
+            self._dataset_sha256 = _sha256_file(self.data_path)
 
     def _build_dataset(self, path: str) -> PromptExampleDataset:
         """Build one prompt dataset instance for either training or evaluation."""
@@ -376,9 +536,23 @@ class MultimodalRLDataSource:
         if self.train_dataset is None:
             return
 
+        if self.stateful_epoch_order:
+            if self.seed is None:
+                raise ValueError("stateful_epoch_order requires args.run.seed")
+            self._epoch_order = _StatefulEpochOrder(
+                dataset_size=len(self.train_dataset),
+                epoch_batch_size=self.prompts_per_rollout,
+                sampler_seed=int(self.seed),
+                shuffle=self.shuffle,
+                drop_last=self.drop_last,
+            )
+            self._dataloader = None
+            self._iter = None
+            return
+
         # prompts_per_rollout determines the DataLoader batch size; do not repeat each prompt k times here
         sampler = None
-        if len(self.train_dataset) < self.prompts_per_rollout:
+        if self.drop_last and len(self.train_dataset) < self.prompts_per_rollout:
             raise ValueError(
                 "Training dataset is smaller than prompts_per_rollout, which would produce an "
                 f"empty DataLoader with drop_last=True (num_prompts={len(self.train_dataset)}, "
@@ -394,7 +568,7 @@ class MultimodalRLDataSource:
             generator=self._shuffle_generator if should_shuffle else None,
             num_workers=0,
             collate_fn=self._collate_text,
-            drop_last=True,
+            drop_last=self.drop_last,
         )
 
         self._iter = iter(self._dataloader)
@@ -432,11 +606,29 @@ class MultimodalRLDataSource:
             return len(self.train_dataset)
         return 0
 
-    def _prompt_examples_to_batch(self, prompt_examples: List[Dict[str, Any]]) -> Sample:
+    @property
+    def num_batches_per_epoch(self) -> int:
+        if self._epoch_order is not None:
+            return self._epoch_order.num_batches_per_epoch
+        if self.train_dataset is None:
+            return 0
+        if self.drop_last:
+            return len(self.train_dataset) // self.prompts_per_rollout
+        return (len(self.train_dataset) + self.prompts_per_rollout - 1) // self.prompts_per_rollout
+
+    def _prompt_examples_to_batch(
+        self,
+        prompt_examples: List[Dict[str, Any]],
+        *,
+        sample_ids: Optional[List[str]] = None,
+    ) -> Sample:
         """Convert normalized prompt examples into an input-only ``Sample``."""
         prompts = [item["prompt"] for item in prompt_examples]
         prompt_ids = self._resolve_prompt_ids(prompt_examples)
-        sample_ids = [f"prompt:{pid}:sample:0" for pid in prompt_ids]
+        if sample_ids is None:
+            sample_ids = [f"prompt:{pid}:sample:0" for pid in prompt_ids]
+        elif len(sample_ids) != len(prompt_examples):
+            raise ValueError(f"sample_ids count {len(sample_ids)} != prompt count {len(prompt_examples)}")
 
         media_refs = [item.get("media_refs", []) for item in prompt_examples]
         if any(media_refs):
@@ -473,6 +665,22 @@ class MultimodalRLDataSource:
 
     def get_samples(self, batch_size: int) -> Sample:
         """Get the next batch as an input-only request ``Sample``."""
+        if self._epoch_order is not None:
+            if self.train_dataset is None:
+                raise RuntimeError("MultimodalRLDataSource training dataset is unavailable")
+            get_prompt_example = getattr(self.train_dataset, "get_prompt_example", None)
+            if not callable(get_prompt_example):
+                raise TypeError(
+                    f"Training dataset {type(self.train_dataset).__name__} must implement get_prompt_example(idx)"
+                )
+            exposures = self._epoch_order.take(batch_size)
+            prompt_examples = [get_prompt_example(index) for _, index in exposures]
+            prompt_ids = self._resolve_prompt_ids(prompt_examples)
+            sample_ids = [
+                f"prompt:{prompt_id}:epoch:{epoch}:sample:0" for prompt_id, (epoch, _) in zip(prompt_ids, exposures)
+            ]
+            return self._prompt_examples_to_batch(prompt_examples, sample_ids=sample_ids)
+
         if self._iter is None:
             raise RuntimeError("MultimodalRLDataSource is not initialized. Training DataLoader is unavailable.")
 
@@ -483,6 +691,24 @@ class MultimodalRLDataSource:
             batch = next(self._iter)
 
         return batch
+
+    def state_dict(self) -> Dict[str, Any]:
+        if self._epoch_order is None:
+            raise RuntimeError("Exact data-source state requires stateful_epoch_order=true")
+        return {
+            "dataset_sha256": self._dataset_sha256,
+            "epoch_order": self._epoch_order.state_dict(),
+        }
+
+    def load_state_dict(self, state: Dict[str, Any]) -> None:
+        if self._epoch_order is None:
+            raise RuntimeError("Exact data-source restore requires stateful_epoch_order=true")
+        if state.get("dataset_sha256") != self._dataset_sha256:
+            raise ValueError("Training dataset changed since data-source checkpoint")
+        epoch_order = state.get("epoch_order")
+        if not isinstance(epoch_order, dict):
+            raise ValueError("Data-source checkpoint is missing epoch_order state")
+        self._epoch_order.load_state_dict(epoch_order)
 
     def iter_eval_batches(
         self,

@@ -1,41 +1,70 @@
 # @package _global_
-# Deep-research agentic RL with the single service-scored barrier trainer.
+# Deep-research agentic RL with service-scored barrier training.
 #
-# Prerequisites (operational — set on the pod):
-#   - QWEN3_INSTRUCT_PATH : local Qwen3-Instruct checkpoint dir
-#   - DATA_PATH           : ASearcher jsonl (python -m unirl.utils.prepare_asearcher --out-dir data/asearcher)
-#   - SERPER_KEY_ID       : Serper web-search API key (search tool)
-#   - JINA_API_KEYS       : Jina reader key (visit tool)
-#   - JUDGE_URL/JUDGE_MODEL: an OpenAI-compatible judge endpoint (e.g. a separate
-#                            SGLang/vLLM server hosting Qwen2.5-72B-Instruct)
-#   - SUMMARY_URL/SUMMARY_MODEL (optional): summarizer for the visit tool (the judge
-#                            endpoint works); without it, visit returns raw page text.
+# AReaL alignment status:
+#   Stage 1: dataset, ordering, model, initial prompt, seeds, and horizon.
+#   Later stages: controller/transcript, tools/judge, objective, and async runtime.
 #
-# Run (single node, >=2 GPUs; scale num_devices / batch_size / n up for real training):
-#   QWEN3_INSTRUCT_PATH=... DATA_PATH=data/asearcher/train.jsonl \
-#   SERPER_KEY_ID=... JINA_API_KEYS=... JUDGE_URL=... JUDGE_MODEL=... \
-#   python -m unirl.train_agentic --config-name=deep_research/deep_research_search_judge num_devices=2
+# Prerequisites:
+#   - QWEN3_PATH          : local Qwen3-1.7B checkpoint dir
+#   - DATA_PATH           : converted ASearcher-LRM-35k train.jsonl
+#   - DATA_MANIFEST       : optional override; defaults to ${DATA_PATH}.manifest.json
+#   - DEEP_RESEARCH_RUN_DATE: frozen YYYY-MM-DD date embedded in the prompt
+#   - SERPER_KEY_ID       : Serper web-search API key
+#   - JINA_API_KEYS       : Jina reader key
+#   - JUDGE_URL/JUDGE_MODEL: external OpenAI-compatible judge endpoint
+#   - SUMMARY_URL/SUMMARY_MODEL (optional): visit summarizer endpoint
+#
+# Convert data:
+#   python -m unirl.utils.prepare_asearcher \
+#     --source /path/to/ASearcher-LRM-35k.jsonl --out-dir data/asearcher
 
-num_devices: 2
-batch_size: 4 # P prompts_per_rollout; P*n = 8 must be divisible by num_devices
-num_rollouts: 200
+seed: 1
+dataset_sampler_seed: 0
+run_date: ${oc.env:DEEP_RESEARCH_RUN_DATE}
+
+system_instruction: |-
+  You are a deep research assistant. Your core function is to conduct thorough, multi-source investigations into any topic. You must handle both broad, open-domain inquiries and queries within specialized academic fields. For every request, synthesize information from credible, diverse sources to deliver a comprehensive, accurate, and objective response. When you have gathered sufficient information and are ready to provide the definitive response, you must enclose the entire final answer within <answer></answer> tags.
+
+  # Tools
+
+  You may call one or more functions to assist with the user query.
+
+  You are provided with function signatures within <tools></tools> XML tags:
+  <tools>
+  {"type": "function", "function": {"name": "search", "description": "Perform Google web searches then returns a string of the top search results. Accepts multiple queries.", "parameters": {"type": "object", "properties": {"query": {"type": "array", "items": {"type": "string", "description": "The search query."}, "minItems": 1, "description": "The list of search queries."}}, "required": ["query"]}}}
+  {"type": "function", "function": {"name": "visit", "description": "Visit webpage(s) and return the summary of the content.", "parameters": {"type": "object", "properties": {"url": {"type": "array", "items": {"type": "string"}, "description": "The URL(s) of the webpage(s) to visit. Can be a single URL or an array of URLs."}, "goal": {"type": "string", "description": "The specific information goal for visiting webpage(s)."}}, "required": ["url", "goal"]}}}
+  </tools>
+
+  For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:
+  <tool_call>
+  {"name": <function-name>, "arguments": <args-json-object>}
+  </tool_call>
+
+  Current date: ${run_date}
+
+num_devices: 2 # Barrier/colocated until the Stage 5 topology alignment.
+batch_size: 128
+total_train_epochs: 10
+warmup_proportion: 0.001
+num_rollouts: 2730 # 10 * floor(35000 / 128)
 
 worker_max_concurrency: 10
-per_worker_inflight: 4 # per-slot trajectory cap (2 slots x 4 covers the 8 concurrent tasks)
-stop: ["</tool_call>"]
+per_worker_inflight: 4
+stop: []
 
 sampling:
   _target_: unirl.types.sampling.ARSamplingParams
-  samples_per_prompt: 2
+  samples_per_prompt: 8
   temperature: 1.0
   top_p: 1.0
   top_k: 0
-  max_new_tokens: 2048
+  max_new_tokens: 2048 # Stage 2 aligns per-call and trajectory limits.
 
 logging:
   report_to_wandb: false
   project_name: unirl-deep-research
-  run_name: deepresearch_search_judge_qwen3
+  run_name: deepresearch_search_judge_qwen3_1_7b
   entity: ${oc.env:WANDB_ENTITY,null}
   tags: [deep-research, agentic, search, visit, llm-judge, qwen3]
 
@@ -43,14 +72,17 @@ bundle:
   _target_: unirl.models.qwen3.bundle.Qwen3Bundle.from_config
   config:
     _target_: unirl.models.qwen3.config.Qwen3PipelineConfig
-    pretrained_model_ckpt_path: ${oc.env:QWEN3_INSTRUCT_PATH,Qwen/Qwen3-4B-Instruct}
-    model_precision: fp32
+    pretrained_model_ckpt_path: ${oc.env:QWEN3_PATH}
+    tokenizer_ckpt_path: ${oc.env:QWEN3_TOKENIZER_PATH,${oc.env:QWEN3_PATH}}
+    model_precision: bf16
     use_gradient_checkpointing: true
     attn_implementation: flex_attention
 
 pipeline:
   _target_: unirl.models.qwen3.pipeline.Qwen3Pipeline.from_bundle
-  enable_thinking: false
+  system_instruction: ${system_instruction}
+  enable_thinking: true
+  max_prompt_length: 32768
   autocast_precision: bf16
   logprob_precision: fp32
 
@@ -71,56 +103,47 @@ backend:
     defer_grad_sync: false
   optimizer_cfg:
     _target_: unirl.train.backend.base.OptimizerConfig
-    learning_rate: 1.0e-6
+    learning_rate: 3.0e-6
     adam_beta1: 0.9
     adam_beta2: 0.999
     adam_epsilon: 1.0e-8
-    weight_decay: 0.01
+    weight_decay: 0.003
   scheduler_cfg:
     _target_: unirl.train.backend.base.LrSchedulerConfig
     type: constant
-    warmup_steps: 0
-    total_steps: 2000
+    warmup_steps: 2
+    total_steps: ${num_rollouts}
 
 rollout:
   _target_: unirl.rollout.engine.agentic.engine.AgenticRolloutEngine
   config:
     _target_: unirl.rollout.engine.agentic.config.AgenticRolloutEngineConfig
-    max_turns: 8
+    max_turns: 8 # Stage 2 replaces the generic turn loop with the aligned controller.
     inner:
       _target_: unirl.rollout.engine.sglang.config.SGLangEngineConfig
       backend: native
-      pretrained_model_ckpt_path: ${oc.env:QWEN3_INSTRUCT_PATH,Qwen/Qwen3-4B-Instruct}
+      pretrained_model_ckpt_path: ${oc.env:QWEN3_PATH}
       tp_size: 1
-      max_new_tokens: 2048 # per TURN (reasoning + a tool call / the final answer)
+      max_new_tokens: 2048
       temperature: 1.0
       top_p: 1.0
       concurrency: 8
-      # The deep-research framing — verbatim from AReaL's tongyi_deepresearch
-      # SYSTEM_PROMPT, adapted for UniRL: the <tools> JSON block is dropped because
-      # the tool SCHEMAS are auto-injected into the chat template from the env.
-      # Set on the inner engine, so it is frozen into the stored rollout
-      # conditions the trainer replays -> one edit covers generation AND training.
-      system_instruction: |-
-        You are a deep research assistant. Your core function is to conduct thorough, multi-source investigations into any topic. You must handle both broad, open-domain inquiries and queries within specialized academic fields. For every request, synthesize information from credible, diverse sources to deliver a comprehensive, accurate, and objective response. When you have gathered sufficient information and are ready to provide the definitive response, you must enclose the entire final answer within <answer></answer> tags.
-
-        You may call one or more functions to assist with the user query. For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:
-        <tool_call>
-        {"name": <function-name>, "arguments": <args-json-object>}
-        </tool_call>
+      system_instruction: ${system_instruction}
       chat_template_kwargs:
-        enable_thinking: false
-        # `tools` is auto-injected from the env's tool_schemas() at engine build.
+        enable_thinking: true
+        tools: null # Keep the literal prompt schemas; suppress native tool injection.
       engine_kwargs:
+        context_length: 32768
         mem_fraction_static: 0.3
         skip_server_warmup: true
         attention_backend: triton
         disable_cuda_graph: false
         cuda_graph_max_bs: 16
         enable_lora: false
+        random_seed: ${seed}
     env:
       _target_: unirl.rollout.env.tool_environment.ToolEnvironment
-      max_turns: 8 # keep == config.max_turns
+      max_turns: 8
       tools:
         - _target_: unirl.rollout.env.tools.search.SearchTool
           top_k: 10
@@ -130,9 +153,6 @@ rollout:
     episode_sampling: ${sampling}
 
 reward:
-  # LLM-as-judge over text: the judge decides whether the trajectory's <answer> is
-  # equivalent to the reference answer (metadata["answer"]) -> 1.0 / 0.0. Hosted
-  # out-of-band; the scorer only POSTs to $JUDGE_URL.
   _target_: unirl.reward.service.RewardService
   truncated_reward: keep
   backend:
@@ -166,13 +186,18 @@ stack:
   _target_: unirl.train.stack.TrainStack
   micro_batch_size: 1
   max_grad_norm: 1.0
-  num_updates_per_batch: 1 # strict on-policy MVP
+  num_updates_per_batch: 1
 
 data_source:
   _target_: unirl.data.data_source.MultimodalRLDataSource
   args:
     run:
-      data_path: ${oc.env:DATA_PATH} # ASearcher jsonl: {"prompt": ..., "metadata": {"answer": ...}}
-      seed: 42
+      data_path: ${oc.env:DATA_PATH}
+      manifest_path: ${oc.env:DATA_MANIFEST,${oc.env:DATA_PATH}.manifest.json}
+      expected_num_prompts: 35000
+      stateful_epoch_order: true
+      seed: ${dataset_sampler_seed}
+      shuffle: true
+      drop_last: true
     algorithm:
       prompts_per_rollout: ${batch_size}
