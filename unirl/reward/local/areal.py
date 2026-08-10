@@ -19,6 +19,16 @@ from .base import LocalRewardBackend
 
 logger = logging.getLogger(__name__)
 
+_JUDGE_TIMEOUT_SECONDS = 200.0
+_JUDGE_CONNECT_TIMEOUT_SECONDS = 10.0
+_JUDGE_TRANSPORT_ATTEMPTS = 3
+_JUDGE_RETRY_BACKOFF_SECONDS = 0.5
+_JUDGE_TEMPERATURE = 1.0
+_JUDGE_TOP_P = 1.0
+_JUDGE_MAX_PREDICTION_CHARS = 200
+_JUDGE_MAX_COMPLETION_TOKENS = 8192
+_JUDGE_STORE = False
+
 _JUDGE_PROMPT = (
     "You are an evaluation assistant. Please determine if the predicted answer is equivalent to the labeled answer.\n"
     "You should first give your rationale for the judgement, and then give your judgement result (i.e., correct or incorrect).\n\n"
@@ -62,13 +72,13 @@ class ARealJudgeRewardScorer(LocalRewardBackend):
     def __init__(self, *, config: "ARealJudgeSpec", base_device: str) -> None:
         del base_device
         self._spec = config
-        super().__init__(timeout=config.timeout_seconds)
+        super().__init__(timeout=_JUDGE_TIMEOUT_SECONDS)
 
     def _load_model(self) -> None:
         self.model = "areal_judge"
         self._endpoint = os.environ.get("JUDGE_URL", self._spec.endpoint)
         self._judge_model = os.environ.get("JUDGE_MODEL", self._spec.model)
-        self._api_key = os.environ.get("JUDGE_API_KEY", self._spec.api_key)
+        self._api_key = os.environ.get("JUDGE_API_KEY", "")
         if not self._endpoint or not self._judge_model:
             raise ValueError("ARealJudgeRewardScorer requires endpoint and model")
 
@@ -88,10 +98,10 @@ class ARealJudgeRewardScorer(LocalRewardBackend):
         answers: list[Any],
     ) -> list[float]:
         timeout = aiohttp.ClientTimeout(
-            total=self._spec.timeout_seconds,
-            connect=self._spec.connect_timeout_seconds,
-            sock_connect=self._spec.connect_timeout_seconds,
-            sock_read=self._spec.timeout_seconds,
+            total=_JUDGE_TIMEOUT_SECONDS,
+            connect=_JUDGE_CONNECT_TIMEOUT_SECONDS,
+            sock_connect=_JUDGE_CONNECT_TIMEOUT_SECONDS,
+            sock_read=_JUDGE_TIMEOUT_SECONDS,
         )
         semaphore = asyncio.Semaphore(max(1, self._spec.submission_concurrency))
         async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -114,22 +124,22 @@ class ARealJudgeRewardScorer(LocalRewardBackend):
         prompt = _JUDGE_PROMPT.format(
             question=question,
             gt_answer=str(answer),
-            pred_answer=prediction[: self._spec.max_prediction_chars],
+            pred_answer=prediction[:_JUDGE_MAX_PREDICTION_CHARS],
         )
         payload = {
             "model": self._judge_model,
             "messages": [{"role": "user", "content": prompt}],
-            "temperature": self._spec.temperature,
-            "top_p": self._spec.top_p,
-            "max_completion_tokens": self._spec.max_completion_tokens,
-            "store": self._spec.store,
+            "temperature": _JUDGE_TEMPERATURE,
+            "top_p": _JUDGE_TOP_P,
+            "max_completion_tokens": _JUDGE_MAX_COMPLETION_TOKENS,
+            "store": _JUDGE_STORE,
         }
         headers = {"Content-Type": "application/json"}
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
 
         async with semaphore:
-            for attempt in range(max(1, self._spec.transport_attempts)):
+            for attempt in range(_JUDGE_TRANSPORT_ATTEMPTS):
                 try:
                     async with session.post(self._endpoint, json=payload, headers=headers) as response:
                         if response.status < 200 or response.status >= 300:
@@ -141,11 +151,11 @@ class ARealJudgeRewardScorer(LocalRewardBackend):
                             return 0.0
                         return _parse_judge_result(content)
                 except Exception:
-                    if attempt + 1 < max(1, self._spec.transport_attempts):
-                        await asyncio.sleep(self._spec.retry_backoff_seconds)
+                    if attempt + 1 < _JUDGE_TRANSPORT_ATTEMPTS:
+                        await asyncio.sleep(_JUDGE_RETRY_BACKOFF_SECONDS)
             logger.warning(
                 "AReaL judge request failed after %d transport attempt(s); scoring zero",
-                max(1, self._spec.transport_attempts),
+                _JUDGE_TRANSPORT_ATTEMPTS,
             )
             return 0.0
 
@@ -154,17 +164,7 @@ class ARealJudgeRewardScorer(LocalRewardBackend):
 class ARealJudgeSpec(BaseRewardComponentSpec):
     endpoint: str = ""
     model: str = ""
-    api_key: str = ""
-    timeout_seconds: float = 200.0
-    connect_timeout_seconds: float = 10.0
-    transport_attempts: int = 3
-    retry_backoff_seconds: float = 0.5
     submission_concurrency: int = 32
-    temperature: float = 1.0
-    top_p: float = 1.0
-    max_prediction_chars: int = 200
-    max_completion_tokens: int = 8192
-    store: bool = False
 
 
 __all__ = ["ARealJudgeRewardScorer", "ARealJudgeSpec"]

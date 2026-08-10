@@ -27,14 +27,15 @@ seed: 1
 dataset_sampler_seed: 0
 run_date: ${oc.env:DEEP_RESEARCH_RUN_DATE}
 
-# AReaL passes one Qwen2.5-72B client to both visit summarization and judging.
-# The deployment owns the global capacity of 32; submission_concurrency below
-# only bounds each UniRL reward worker's pending requests.
+# Only deployment-owned values are exposed here. The dedicated AReaL tools and
+# judge freeze task behavior such as endpoints, retry counts, timeouts, request
+# values, context headroom, and parsing. AReaL passes one Qwen2.5-72B client to
+# both visit summarization and judging. The deployment owns global capacity 32;
+# the same value only bounds each UniRL reward worker's pending requests.
 areal_service:
   endpoint: ${oc.env:JUDGE_URL}
   model: ${oc.env:JUDGE_MODEL}
   tokenizer_path: ${oc.env:JUDGE_TOKENIZER_PATH}
-  context_limit: 32768
   max_concurrent_requests: 32
 
 system_instruction: |-
@@ -167,32 +168,10 @@ rollout:
       _target_: unirl.rollout.env.areal_deep_research.ARealDeepResearchEnvironment
       tools:
         - _target_: unirl.rollout.env.tools.areal.ARealSearchTool
-          endpoint: https://google.serper.dev/search
-          max_attempts: 5
-          retry_backoff_seconds: 0.5
-          connect_timeout_seconds: 10
-          read_timeout_seconds: 30
-          total_timeout_seconds: 45
         - _target_: unirl.rollout.env.tools.areal.ARealVisitTool
           endpoint: ${areal_service.endpoint}
           model: ${areal_service.model}
           tokenizer_path: ${areal_service.tokenizer_path}
-          jina_endpoint: https://r.jina.ai/
-          jina_attempts: 3
-          jina_timeout_seconds: 50
-          content_validity_attempts: 8
-          summary_transport_attempts: 3
-          short_output_regenerations: 4
-          parse_regenerations: 3
-          retry_backoff_seconds: 0.5
-          summary_temperature: 0.7
-          summary_top_p: 1.0
-          summary_max_completion_tokens: 512
-          summary_context_limit: ${areal_service.context_limit}
-          summary_context_safety_tokens: 256
-          summary_connect_timeout_seconds: 10
-          summary_timeout_seconds: 200
-          multi_url_timeout_seconds: 900
     episode_sampling: ${sampling}
 
 reward:
@@ -205,16 +184,7 @@ reward:
       _target_: unirl.reward.local.areal.ARealJudgeSpec
       endpoint: ${areal_service.endpoint}
       model: ${areal_service.model}
-      timeout_seconds: 200
-      connect_timeout_seconds: 10
-      transport_attempts: 3
-      retry_backoff_seconds: 0.5
       submission_concurrency: ${areal_service.max_concurrent_requests}
-      temperature: 1.0
-      top_p: 1.0
-      max_prediction_chars: 200
-      max_completion_tokens: 8192
-      store: false
 
 algorithm:
   _target_: unirl.algorithms.grpo.GRPO

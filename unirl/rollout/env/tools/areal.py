@@ -16,7 +16,28 @@ from unirl.rollout.env.tools.base import Tool
 _T = TypeVar("_T")
 
 _SERPER_URL = "https://google.serper.dev/search"
+_SEARCH_MAX_ATTEMPTS = 5
+_SEARCH_RETRY_BACKOFF_SECONDS = 0.5
+_SEARCH_CONNECT_TIMEOUT_SECONDS = 10.0
+_SEARCH_READ_TIMEOUT_SECONDS = 30.0
+_SEARCH_TOTAL_TIMEOUT_SECONDS = 45.0
+
 _JINA_URL = "https://r.jina.ai/"
+_JINA_ATTEMPTS = 3
+_JINA_TIMEOUT_SECONDS = 50.0
+_CONTENT_VALIDITY_ATTEMPTS = 8
+_SUMMARY_TRANSPORT_ATTEMPTS = 3
+_SHORT_OUTPUT_REGENERATIONS = 4
+_PARSE_REGENERATIONS = 3
+_VISIT_RETRY_BACKOFF_SECONDS = 0.5
+_SUMMARY_TEMPERATURE = 0.7
+_SUMMARY_TOP_P = 1.0
+_SUMMARY_MAX_COMPLETION_TOKENS = 512
+_SUMMARY_CONTEXT_LIMIT = 32768
+_SUMMARY_CONTEXT_SAFETY_TOKENS = 256
+_SUMMARY_CONNECT_TIMEOUT_SECONDS = 10.0
+_SUMMARY_TIMEOUT_SECONDS = 200.0
+_MULTI_URL_TIMEOUT_SECONDS = 900.0
 
 _EXTRACTOR_PROMPT = """Please process the following webpage content and user goal to extract relevant information:
 
@@ -52,24 +73,12 @@ class ARealSearchTool(Tool):
 
     name = "search"
 
-    def __init__(
-        self,
-        *,
-        endpoint: str = _SERPER_URL,
-        max_attempts: int = 5,
-        retry_backoff_seconds: float = 0.5,
-        connect_timeout_seconds: float = 10.0,
-        read_timeout_seconds: float = 30.0,
-        total_timeout_seconds: float = 45.0,
-    ) -> None:
-        self._endpoint = str(endpoint)
-        self._max_attempts = max(1, int(max_attempts))
-        self._retry_backoff_seconds = max(0.0, float(retry_backoff_seconds))
+    def __init__(self) -> None:
         self._timeout = aiohttp.ClientTimeout(
-            total=float(total_timeout_seconds),
-            connect=float(connect_timeout_seconds),
-            sock_connect=float(connect_timeout_seconds),
-            sock_read=float(read_timeout_seconds),
+            total=_SEARCH_TOTAL_TIMEOUT_SECONDS,
+            connect=_SEARCH_CONNECT_TIMEOUT_SECONDS,
+            sock_connect=_SEARCH_CONNECT_TIMEOUT_SECONDS,
+            sock_read=_SEARCH_READ_TIMEOUT_SECONDS,
         )
 
     def json_schema(self) -> Dict[str, Any]:
@@ -123,9 +132,9 @@ class ARealSearchTool(Tool):
             "Content-Type": "application/json",
         }
         async with aiohttp.ClientSession(timeout=self._timeout) as session:
-            for attempt in range(self._max_attempts):
+            for attempt in range(_SEARCH_MAX_ATTEMPTS):
                 try:
-                    async with session.post(self._endpoint, json=payload, headers=headers) as response:
+                    async with session.post(_SERPER_URL, json=payload, headers=headers) as response:
                         text = await response.text()
                         if response.status < 200 or response.status >= 300:
                             raise RuntimeError("search service returned a non-success status")
@@ -149,8 +158,8 @@ class ARealSearchTool(Tool):
                             "\n\n## Web Results\n" + "\n\n".join(snippets)
                         )
                 except Exception:
-                    if attempt + 1 < self._max_attempts:
-                        await asyncio.sleep(self._retry_backoff_seconds)
+                    if attempt + 1 < _SEARCH_MAX_ATTEMPTS:
+                        await asyncio.sleep(_SEARCH_RETRY_BACKOFF_SECONDS)
         return "Google search Timeout or error; return None, Please try again later."
 
 
@@ -165,48 +174,18 @@ class ARealVisitTool(Tool):
         endpoint: str,
         model: str,
         tokenizer_path: str,
-        jina_endpoint: str = _JINA_URL,
-        jina_attempts: int = 3,
-        jina_timeout_seconds: float = 50.0,
-        content_validity_attempts: int = 8,
-        summary_transport_attempts: int = 3,
-        short_output_regenerations: int = 4,
-        parse_regenerations: int = 3,
-        retry_backoff_seconds: float = 0.5,
-        summary_temperature: float = 0.7,
-        summary_top_p: float = 1.0,
-        summary_max_completion_tokens: int = 512,
-        summary_context_limit: int = 32768,
-        summary_context_safety_tokens: int = 256,
-        summary_connect_timeout_seconds: float = 10.0,
-        summary_timeout_seconds: float = 200.0,
-        multi_url_timeout_seconds: float = 900.0,
     ) -> None:
         if not endpoint or not model or not tokenizer_path:
             raise ValueError("ARealVisitTool requires endpoint, model, and tokenizer_path")
         self._endpoint = str(endpoint)
         self._model = str(model)
         self._tokenizer_path = str(tokenizer_path)
-        self._jina_endpoint = str(jina_endpoint)
-        self._jina_attempts = max(1, int(jina_attempts))
-        self._jina_timeout_seconds = float(jina_timeout_seconds)
-        self._content_validity_attempts = max(1, int(content_validity_attempts))
-        self._summary_transport_attempts = max(1, int(summary_transport_attempts))
-        self._short_output_regenerations = max(0, int(short_output_regenerations))
-        self._parse_regenerations = max(0, int(parse_regenerations))
-        self._retry_backoff_seconds = max(0.0, float(retry_backoff_seconds))
-        self._summary_temperature = float(summary_temperature)
-        self._summary_top_p = float(summary_top_p)
-        self._summary_max_completion_tokens = int(summary_max_completion_tokens)
-        self._summary_context_limit = int(summary_context_limit)
-        self._summary_context_safety_tokens = int(summary_context_safety_tokens)
         self._summary_timeout = aiohttp.ClientTimeout(
-            total=float(summary_timeout_seconds),
-            connect=float(summary_connect_timeout_seconds),
-            sock_connect=float(summary_connect_timeout_seconds),
-            sock_read=float(summary_timeout_seconds),
+            total=_SUMMARY_TIMEOUT_SECONDS,
+            connect=_SUMMARY_CONNECT_TIMEOUT_SECONDS,
+            sock_connect=_SUMMARY_CONNECT_TIMEOUT_SECONDS,
+            sock_read=_SUMMARY_TIMEOUT_SECONDS,
         )
-        self._multi_url_timeout_seconds = float(multi_url_timeout_seconds)
         self._tokenizer = None
 
     def json_schema(self) -> Dict[str, Any]:
@@ -258,7 +237,7 @@ class ARealVisitTool(Tool):
                 responses = []
                 for item in url:
                     item = str(item)
-                    if time.monotonic() - started > self._multi_url_timeout_seconds:
+                    if time.monotonic() - started > _MULTI_URL_TIMEOUT_SECONDS:
                         response = self._failed_response(item, goal)
                     else:
                         try:
@@ -283,10 +262,10 @@ class ARealVisitTool(Tool):
         messages = [{"role": "user", "content": self._extractor_prompt(content, goal)}]
         raw = await self._call_summary(messages, summary_session)
 
-        for regeneration in range(self._short_output_regenerations):
+        for regeneration in range(_SHORT_OUTPUT_REGENERATIONS):
             if not isinstance(raw, str) or len(raw) >= 10:
                 break
-            if regeneration + 1 < self._short_output_regenerations:
+            if regeneration + 1 < _SHORT_OUTPUT_REGENERATIONS:
                 truncate_length = int(0.7 * len(content))
             else:
                 truncate_length = 25000
@@ -306,12 +285,12 @@ class ARealVisitTool(Tool):
                     raise TypeError("summary response must be an object")
                 break
             except Exception:
-                if parse_attempt >= self._parse_regenerations:
+                if parse_attempt >= _PARSE_REGENERATIONS:
                     raw_object = None
                     break
                 raw = await self._call_summary(messages, summary_session)
                 parse_attempt += 1
-                if parse_attempt >= self._parse_regenerations:
+                if parse_attempt >= _PARSE_REGENERATIONS:
                     # The pinned AReaL loop issues its final regeneration but
                     # exits without parsing that response.
                     raw_object = None
@@ -333,16 +312,16 @@ class ARealVisitTool(Tool):
         payload = {
             "model": self._model,
             "messages": messages,
-            "temperature": self._summary_temperature,
-            "top_p": self._summary_top_p,
-            "max_completion_tokens": self._summary_max_completion_tokens,
+            "temperature": _SUMMARY_TEMPERATURE,
+            "top_p": _SUMMARY_TOP_P,
+            "max_completion_tokens": _SUMMARY_MAX_COMPLETION_TOKENS,
         }
         headers = {"Content-Type": "application/json"}
         api_key = os.environ.get("JUDGE_API_KEY", "")
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
 
-        for attempt in range(self._summary_transport_attempts):
+        for attempt in range(_SUMMARY_TRANSPORT_ATTEMPTS):
             try:
                 async with session.post(self._endpoint, json=payload, headers=headers) as response:
                     if response.status < 200 or response.status >= 300:
@@ -362,28 +341,28 @@ class ARealVisitTool(Tool):
                         return content
                     return None
             except Exception:
-                if attempt + 1 < self._summary_transport_attempts:
-                    await asyncio.sleep(self._retry_backoff_seconds)
+                if attempt + 1 < _SUMMARY_TRANSPORT_ATTEMPTS:
+                    await asyncio.sleep(_VISIT_RETRY_BACKOFF_SECONDS)
         return ""
 
     async def _jina_readpage(self, url: str) -> str:
-        timeout = aiohttp.ClientTimeout(total=self._jina_timeout_seconds)
+        timeout = aiohttp.ClientTimeout(total=_JINA_TIMEOUT_SECONDS)
         headers = {"Authorization": f"Bearer {os.environ.get('JINA_API_KEYS', '')}"}
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            for attempt in range(self._jina_attempts):
+            for attempt in range(_JINA_ATTEMPTS):
                 try:
-                    async with session.get(f"{self._jina_endpoint}{url}", headers=headers) as response:
+                    async with session.get(f"{_JINA_URL}{url}", headers=headers) as response:
                         if response.status == 200:
                             return await response.text()
                         await response.read()
                         raise RuntimeError("page reader returned a non-success status")
                 except Exception:
-                    if attempt + 1 < self._jina_attempts:
-                        await asyncio.sleep(self._retry_backoff_seconds)
+                    if attempt + 1 < _JINA_ATTEMPTS:
+                        await asyncio.sleep(_VISIT_RETRY_BACKOFF_SECONDS)
         return _READ_FAILURE
 
     async def _html_readpage_jina(self, url: str) -> str:
-        for _ in range(self._content_validity_attempts):
+        for _ in range(_CONTENT_VALIDITY_ATTEMPTS):
             content = await self._jina_readpage(url)
             if self._valid_content(content):
                 return content
@@ -404,9 +383,7 @@ class ARealVisitTool(Tool):
 
     def _truncate_for_summary(self, content: str, goal: Any) -> str:
         tokenizer = self._get_tokenizer()
-        max_prompt_tokens = (
-            self._summary_context_limit - self._summary_max_completion_tokens - self._summary_context_safety_tokens
-        )
+        max_prompt_tokens = _SUMMARY_CONTEXT_LIMIT - _SUMMARY_MAX_COMPLETION_TOKENS - _SUMMARY_CONTEXT_SAFETY_TOKENS
         if max_prompt_tokens <= 0:
             raise ValueError("summary completion allowance leaves no prompt capacity")
 
