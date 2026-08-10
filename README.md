@@ -108,19 +108,20 @@ schema, and how to add a recipe.
 
 ## Agentic Workflows 🤖
 
-The agentic rollout engine repeatedly performs model generation followed by an
-environment step and returns a trajectory of `Sample` objects. One public
-workflow is supported:
+The agentic rollout engine hosts a recipe-selected harness that performs model
+generation and environment interaction. The aligned deep-research workflow has
+its own trajectory-level trainer:
 
 | Workflow | Entrypoint | Example recipe |
 |---|---|---|
-| Service-scored multi-turn tool use | `train_agentic` | [`deep_research/deep_research_search_judge`](examples/deep_research/deep_research_search_judge.yaml) |
+| AReaL-compatible deep research | `train_areal` | [`deep_research/deep_research_search_judge`](examples/deep_research/deep_research_search_judge.yaml) |
 
-`AgenticTrainer` synchronizes current training weights before every rollout,
-dispatches sibling trajectories concurrently, and waits for complete GRPO groups
-before scoring and training. Each successful trajectory receives one group-normalized
-advantage, which is applied to every generated assistant turn. Failed
-trajectories are excluded from the update.
+`ARealTrainer` synchronizes current training weights before every rollout,
+dispatches sibling trajectories concurrently, and waits for complete groups
+before scoring and training. It validates the AReaL harness protocol and turns
+each successful multi-turn trace into one masked training row. The generic
+`AgenticTrainer` remains available for explicit custom recipes and keeps its
+per-assistant-turn training behavior.
 
 See the [agent environment guide](unirl/rollout/env/README.md) for the
 environment, tool, and trajectory contracts.

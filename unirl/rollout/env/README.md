@@ -21,6 +21,11 @@ itself lives in [`unirl/rollout/harness/tool_agent.py`](../harness/tool_agent.py
 must therefore derive state from the `Sample`, keep it behind a per-trajectory key, or guard it
 with locks.
 
+Every `AgenticRolloutEngineConfig` selects a harness config explicitly. The
+generic loop uses `ToolAgentHarnessConfig(max_turns=...)`; task-specific configs
+such as `ARealDeepResearchHarnessConfig` implement the same `make_harness(...)`
+contract. The engine does not infer a harness from an omitted field.
+
 ## Synchronous execution
 
 One turn is mechanically:
@@ -38,7 +43,7 @@ turn on the `"policy"` engine, and stops when the environment returns `done=True
 `max_turns`, or — at a turn boundary — when the runtime requests a cooperative suspension
 (`HarnessContext.suspend_requested`).
 
-`AgenticTrainer` expands `P` prompts into `P * n` tasks, and `RolloutManager`
+`AgenticTrainer` and `ARealTrainer` expand `P` prompts into `P * n` tasks, and `RolloutManager`
 dispatches each through a single engine slot. Ray actor concurrency lets each
 worker run up to `per_worker_inflight` synchronous trajectories while the inner
 backend batches requests.
@@ -58,16 +63,18 @@ IDs. The engine fills that frontier. `Sample.observe` appends a branch-one input
 its role to `tool`, and carries no sampling parameters, so observations are conditioning rather
 than trainable policy output. The next generation reconstructs its chat history from the ancestor
 chain. Environments produce observations and termination; the trainer scores
-valid terminal answers through its configured `RewardService`.
+valid terminal answers through its configured `RewardService`. The AReaL path
+uses harness-stamped predictions and masked whole-trajectory training rows.
 
 ### Manager quiescence
 
 On manager `quiesce`, dispatch pauses and each in-flight turn finishes. A
 nonterminal trajectory is checkpointed before its next turn, so generation is
 never interrupted mid-turn. The manager returns retained queued or suspended
-tasks according to its root filter. The public `AgenticTrainer` does not resume
-these across optimizer steps: normal steps block until every requested group is
-complete, and failure cleanup quiesces and discards unfinished work.
+tasks according to its root filter. The current barrier `AgenticTrainer` and
+`ARealTrainer` do not resume these across optimizer steps: normal steps block
+until every requested group is complete, and failure cleanup quiesces and
+discards unfinished work.
 
 ## Included environments and tools
 

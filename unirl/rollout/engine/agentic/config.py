@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from unirl.rollout.engine.base import BaseEngineConfig
+from unirl.rollout.harness.protocol import BaseHarnessConfig
 
 
 @dataclass
@@ -14,9 +15,8 @@ class AgenticRolloutEngineConfig(BaseEngineConfig):
 
     inner: Any
     env: Any
+    harness: BaseHarnessConfig
 
-    harness: Any = None
-    max_turns: int = 8
     episode_sampling: Any = None
 
     def make_engine(self, **deps: Any):

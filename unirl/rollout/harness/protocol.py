@@ -10,10 +10,12 @@ trainside unchanged).
 
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Literal, Mapping, Protocol
 
 if TYPE_CHECKING:
+    from unirl.rollout.env.protocol import Environment
     from unirl.types.sample import Sample
 
 
@@ -91,4 +93,12 @@ class RolloutHarness(Protocol):
     def run(self, request: "Sample", context: HarnessContext) -> HarnessOutcome: ...
 
 
-__all__ = ["HarnessContext", "HarnessOutcome", "RolloutHarness"]
+class BaseHarnessConfig(ABC):
+    """Explicit construction contract for a configured rollout harness."""
+
+    @abstractmethod
+    def make_harness(self, *, env: "Environment", sampling: Any) -> RolloutHarness:
+        """Bind recipe-owned settings to the runtime environment and sampling policy."""
+
+
+__all__ = ["BaseHarnessConfig", "HarnessContext", "HarnessOutcome", "RolloutHarness"]

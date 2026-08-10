@@ -47,9 +47,9 @@ stay swappable by `_target_`.
   receives the trainable frontier `Part`; `UnifiedModelTrainStack` receives the
   whole `Sample` so AR and image Parts are sharded by the same prompt trees.
   `AgenticTrainer` uses a manager to collect `List[Sample]` groups of
-  variable-depth trajectories, scores valid terminal answers, assigns each
-  trajectory's advantage to all generated turns, and concatenates those turn
-  Parts for training. (ReFL — which differentiates
+  variable-depth trajectories and trains their generated turns. `ARealTrainer`
+  uses the same lower-level contracts but validates the AReaL protocol and
+  assembles one masked training row for each complete trajectory. (ReFL — which differentiates
   directly through decoded media and uses no rollout Samples or advantages —
   lives outside core as `experimental/refl`.)
 
@@ -65,6 +65,7 @@ The current trainer surface is:
 | `PETrainer` | `ar` + `diffusion` Parts → two `TrainStack`s | Composed prompt-rewrite/image rollout; image rewards propagate to AR rewrites. `freeze_llm=true` trains and checkpoints diffusion only. |
 | `UnifiedModelTrainer` | whole `Sample` → one `UnifiedModelTrainStack` | AR and image losses accumulate into shared-backbone optimizer steps while prompt-tree lineage remains intact during DP scatter. |
 | `AgenticTrainer` | variable-depth `List[Sample]` → concatenated turn `Part` | Colocated barrier multi-turn tool use. It syncs every step, waits for complete groups, scores terminal answers through `RewardService`, and excludes failed trajectories. |
+| `ARealTrainer` | variable-depth `List[Sample]` → one masked `Part` per trajectory | Dedicated AReaL deep-research policy. It requires stamped harness metadata, scores its exact prediction, and excludes failed or structurally invalid traces. |
 
 All async variants use the driver-local `RolloutManager`. Batch trainers provide
 one slab-wide launcher and keep completed batches intact; the agentic trainer
@@ -72,8 +73,8 @@ provides one launcher per engine slot and lets the manager assemble root groups.
 Async batch trainers own optimizer progress, publication cadence, hard boundaries,
 scoring order, and training policy directly. The manager owns published rollout
 state and applies its configured filter against the trainer-supplied current
-version. The barrier-only `AgenticTrainer` does not expose tail, staleness, or
-cross-step buffering policies.
+version. The barrier-only `AgenticTrainer` and current `ARealTrainer` do not
+expose tail, staleness, or cross-step buffering policies.
 
 **Extending it:** a new domain is a new `<Domain>Trainer(BaseTrainer)` that builds its
 remotes inside a `placement(...)` scope and implements `train_step` + `train`; the
@@ -82,7 +83,7 @@ matching `../train_<domain>.py` entrypoint composes the recipe and calls it.
 ## Checkpointing
 
 Available for the single-backend trainers (including diffusion, AR, unified-model,
-ReFL, async, and agentic training) and for every trained side of `PETrainer`. A
+ReFL, async, agentic, and AReaL training) and for every trained side of `PETrainer`. A
 single-backend checkpoint bundles model state (`save_mode=auto`: LoRA-only when
 LoRA is active, otherwise full; `save_mode=full`: the whole model state;
 `save_mode=adapter`: LoRA keys only), optimizer and scheduler state, the step
@@ -184,8 +185,9 @@ stream, and force the restored weights into a freshly started rollout engine
 when needed. Async AR/diffusion resume reads the backend optimizer count as the
 train version, fast-forwards the deterministic input stream to the saved
 rollout step, and syncs those restored weights into the fresh engine.
-`AgenticTrainer` uses the same backend optimizer count for its next published
-rollout version and fast-forwards one input batch per completed step. ReFL does
+`AgenticTrainer` and `ARealTrainer` use the same backend optimizer count for
+their next published rollout version and fast-forward one input batch per
+completed step. ReFL does
 not currently fast-forward its data source.
 
 The W&B run also continues: driver-written `trainer_state.json` at the
@@ -249,7 +251,7 @@ an evaluation and checkpoint fall on the same step, evaluation runs first.
   diffusion/image frontier. `AsyncDiffusionTrainer` reaches an empty hard
   boundary, syncs the current train version when needed, and then scores
   the resident rollout engine without offloading it afterwards.
-- `AgenticTrainer` does not implement evaluation.
+- `AgenticTrainer` and `ARealTrainer` do not implement evaluation.
 
 ### Decoupling diffusion eval from the RL rollout
 
@@ -306,8 +308,8 @@ without driver-authored x_T. `media_log_interval` does not apply
 - **Multi-update means disjoint optimizer mini-batches, not repeated full-batch
   epochs.** See [Multiple optimizer updates per rollout](#multiple-optimizer-updates-per-rollout)
   for the algorithm and divisibility constraints.
-- **Agentic evaluation remains deferred.** `AgenticTrainer` has no evaluation
-  phase; its recipe configures training only.
+- **Agentic evaluation remains deferred.** `AgenticTrainer` and `ARealTrainer`
+  have no evaluation phase; their recipes configure training only.
 - **`layout` only branches on `"separate"`** (`"colocate"` == `"colocated"`). The
   trainside direct-sampling engine cannot live on a `separate` slab — `_build_rollout`
   raises (it needs the pipeline as a local sibling).

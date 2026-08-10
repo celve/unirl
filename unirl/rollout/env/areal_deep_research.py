@@ -31,7 +31,6 @@ class ARealDeepResearchEnvironment(ToolEnvironment):
 
     def __init__(self, tools: Sequence[Tool]) -> None:
         super().__init__(tools=tools, max_turns=0)
-        self.max_turns = None
 
     def step(self, sample: Sample) -> Tuple[Optional[Primitive], bool, dict]:
         frontier = sample.parts[-1].primitives.get("text")

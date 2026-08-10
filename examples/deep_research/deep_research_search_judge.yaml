@@ -1,5 +1,5 @@
 # @package _global_
-# Deep-research agentic RL with service-scored barrier training.
+# AReaL-compatible deep-research RL with service-scored barrier training.
 #
 # AReaL alignment status:
 #   Stages 1-2: dataset/order/model/prompt/horizon plus controller, transcript,
@@ -19,6 +19,9 @@
 # Convert data:
 #   python -m unirl.utils.prepare_asearcher \
 #     --source /path/to/ASearcher-LRM-35k.jsonl --out-dir data/asearcher
+#
+# Launch:
+#   python -m unirl.train_areal --config-name=deep_research/deep_research_search_judge
 
 seed: 1
 dataset_sampler_seed: 0
@@ -47,7 +50,6 @@ system_instruction: |-
 num_devices: 2 # Barrier/colocated until the Stage 5 topology alignment.
 batch_size: 128
 num_rollouts: 2730 # 10 * floor(35000 / 128)
-training_trajectory_format: areal
 
 worker_max_concurrency: 10
 per_worker_inflight: 4

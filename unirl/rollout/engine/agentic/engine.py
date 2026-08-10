@@ -11,8 +11,7 @@ from unirl.config.require import require
 from unirl.distributed.group.dispatch import Dispatch, distributed
 from unirl.rollout.engine.agentic.config import AgenticRolloutEngineConfig
 from unirl.rollout.engine.base import BaseRolloutEngine
-from unirl.rollout.harness.protocol import HarnessContext, RolloutHarness
-from unirl.rollout.harness.tool_agent import ToolAgentHarness
+from unirl.rollout.harness.protocol import BaseHarnessConfig, HarnessContext, RolloutHarness
 from unirl.types.sample import Sample, _part_with_field
 
 logger = logging.getLogger(__name__)
@@ -53,23 +52,15 @@ class AgenticRolloutEngine(BaseRolloutEngine):
             )
         self._inner: BaseRolloutEngine = inner
 
-        self._max_turns = int(config.max_turns)
-        env_max_turns = getattr(self._env, "max_turns", None)
         require(
-            env_max_turns is None or int(env_max_turns) == self._max_turns,
-            f"env.max_turns ({env_max_turns}) must equal config.max_turns ({self._max_turns})",
+            isinstance(config.harness, BaseHarnessConfig),
+            f"AgenticRolloutEngine requires a BaseHarnessConfig; got {type(config.harness).__name__}",
         )
         self._stopping = False
-        if config.harness is None:
-            self._harness: RolloutHarness = ToolAgentHarness(
-                env=self._env,
-                sampling=config.episode_sampling,
-                max_turns=self._max_turns,
-            )
-        else:
-            build_harness = getattr(config.harness, "build", None)
-            require(callable(build_harness), "configured agentic harness must expose build(env=..., sampling=...)")
-            self._harness = build_harness(env=self._env, sampling=config.episode_sampling)
+        self._harness: RolloutHarness = config.harness.make_harness(
+            env=self._env,
+            sampling=config.episode_sampling,
+        )
         prompt_counter = getattr(self._inner, "count_prompt_tokens", None)
         self._harness_ctx = HarnessContext(
             engines={"policy": self._inner.generate},

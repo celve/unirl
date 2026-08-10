@@ -21,19 +21,19 @@ entrypoint's built-in `config_name` — a safe place to start.
 | [`pe/`](pe/) | `python -m unirl.train_pe` | `pe/pe_trainside_pickscore` | `pe` (Qwen3 rewriter + SD3, PickScore/WISE reward) |
 | [`unified_model/`](unified_model/) | `python -m unirl.train_unified_model` | `unified_model/hi3_vllmomni` | `hi3` (HunyuanImage3, unified AR + diffusion) |
 
-Agentic training has one service-scored, colocated barrier workflow:
+AReaL-compatible agentic training has one service-scored, colocated barrier workflow:
 
 | Workflow | Entrypoint | Recipe |
 |---|---|---|
-| Multi-turn tool use with a graded terminal answer | `python -m unirl.train_agentic` | [`deep_research/deep_research_search_judge`](deep_research/deep_research_search_judge.yaml) |
+| Deep research with a graded terminal answer | `python -m unirl.train_areal` | [`deep_research/deep_research_search_judge`](deep_research/deep_research_search_judge.yaml) |
 
 ## Running a recipe
 
 The bash launchers live in this directory. The first argument is the
 domain-qualified recipe name (passed to Hydra as `--config-name`); any extra args
 are forwarded verbatim as Hydra overrides. `ENTRY` selects a non-diffusion
-entrypoint (`train_ar`, `train_sft`, `train_pe`, `train_unified_model`, or
-`train_agentic`); the default is `train_diffusion`.
+entrypoint (`train_ar`, `train_sft`, `train_pe`, `train_unified_model`,
+`train_agentic`, or `train_areal`); the default is `train_diffusion`.
 
 ```bash
 # 0. Compose-check first — verifies the config composes and every ${oc.env:...} resolves
@@ -44,7 +44,7 @@ bash examples/run_experiment_single_node.sh diffusion/sd3/sd3_trainside
 ENTRY=train_ar bash examples/run_experiment_single_node.sh ar/qwen_vl_grpo_geo3k_mc_4x8
 ENTRY=train_sft bash examples/run_experiment_single_node.sh sft/validation/qwen3_agent_sft_lora
 ENTRY=train_pe  bash examples/run_experiment_single_node.sh pe/pe_trainside_pickscore
-ENTRY=train_agentic bash examples/run_experiment_single_node.sh deep_research/deep_research_search_judge
+ENTRY=train_areal bash examples/run_experiment_single_node.sh deep_research/deep_research_search_judge
 
 # 2. Multi-node (taiji)
 bash examples/run_experiment_multinode_taiji.sh diffusion/sd3/sd3_sglang_rollout_colocate
@@ -61,7 +61,7 @@ start it on the head node with `bash examples/mooncake_master.sh start` before l
 
 To save and resume checkpoints and export them to Hugging Face, append the
 `+save_interval` / `+save_dir` / `+load_dir` overrides
-(diffusion/ar/sft/pe/unified/agentic trainers; the hi3 meta-init recipe is not
+(diffusion/ar/sft/pe/unified/agentic/AReaL trainers; the hi3 meta-init recipe is not
 yet supported) — the full
 train → resume → export → upload lifecycle is in
 [Checkpointing](../unirl/trainer/README.md#checkpointing).

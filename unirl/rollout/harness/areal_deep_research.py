@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, Mapping, Optional, Sequence
 
 from unirl.rollout.env.areal_deep_research import extract_first_answer
-from unirl.rollout.harness.protocol import HarnessContext, HarnessOutcome
+from unirl.rollout.harness.protocol import BaseHarnessConfig, HarnessContext, HarnessOutcome
 from unirl.types.primitives import Texts
 from unirl.types.sampling import ARSamplingParams
 
@@ -60,7 +60,7 @@ class _ControllerState:
 
 
 @dataclass(frozen=True)
-class ARealDeepResearchHarnessConfig:
+class ARealDeepResearchHarnessConfig(BaseHarnessConfig):
     """Recipe-owned limits for :class:`ARealDeepResearchHarness`."""
 
     max_policy_calls: int = 100
@@ -92,7 +92,7 @@ class ARealDeepResearchHarnessConfig:
         if self.wall_timeout_seconds <= 0:
             raise ValueError("wall_timeout_seconds must be positive")
 
-    def build(self, *, env: "Environment", sampling: Any) -> "ARealDeepResearchHarness":
+    def make_harness(self, *, env: "Environment", sampling: Any) -> "ARealDeepResearchHarness":
         if not isinstance(sampling, ARSamplingParams):
             raise TypeError("AReaL deep research requires ARSamplingParams")
         if int(sampling.max_new_tokens) != self.max_new_tokens_per_call:

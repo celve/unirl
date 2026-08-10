@@ -61,8 +61,8 @@ wrong objective.
   readiness; trainer-thread collection resolves results, assembles agentic
   siblings, and applies the configured filter. Async batch trainers own training
   progress and publication cadence; the manager owns the published rollout version
-  and preserves completed generations as FIFO batch chunks. `AgenticTrainer` collects
-  one complete barrier batch per step.
+  and preserves completed generations as FIFO batch chunks. `AgenticTrainer`
+  and the current `ARealTrainer` collect one complete barrier batch per step.
 
 **Extending it:** a new single-turn engine adds `engine/<name>/config.py` (a
 `BaseEngineConfig` whose `make_engine(**deps)` lazily imports and builds it) and

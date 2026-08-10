@@ -16,15 +16,37 @@ finishes naturally before the partial trace is returned.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from unirl.rollout.harness.protocol import HarnessContext, HarnessOutcome
+from unirl.config.require import require
+from unirl.rollout.harness.protocol import BaseHarnessConfig, HarnessContext, HarnessOutcome
 
 if TYPE_CHECKING:
     from unirl.rollout.env.protocol import Environment
     from unirl.types.sample import Sample
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class ToolAgentHarnessConfig(BaseHarnessConfig):
+    """Turn limit and construction policy for the generic tool-agent loop."""
+
+    max_turns: int = 8
+
+    def __post_init__(self) -> None:
+        max_turns = int(self.max_turns)
+        require(max_turns > 0, f"max_turns must be positive; got {self.max_turns}")
+        object.__setattr__(self, "max_turns", max_turns)
+
+    def make_harness(self, *, env: "Environment", sampling: Any) -> "ToolAgentHarness":
+        env_max_turns = getattr(env, "max_turns", None)
+        require(
+            env_max_turns is None or int(env_max_turns) == self.max_turns,
+            f"env.max_turns ({env_max_turns}) must equal harness.max_turns ({self.max_turns})",
+        )
+        return ToolAgentHarness(env=env, sampling=sampling, max_turns=self.max_turns)
 
 
 class ToolAgentHarness:
@@ -70,4 +92,4 @@ class ToolAgentHarness:
                     logger.warning("ToolAgentHarness: env.close failed during teardown", exc_info=True)
 
 
-__all__ = ["ToolAgentHarness"]
+__all__ = ["ToolAgentHarness", "ToolAgentHarnessConfig"]
