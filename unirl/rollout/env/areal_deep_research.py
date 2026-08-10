@@ -84,7 +84,7 @@ class ARealDeepResearchEnvironment(ToolEnvironment):
                     raise RuntimeError(f"no active session for stateful tool {name}")
                 return str(tool.execute_session(session_id, call["arguments"]))
             return str(tool.execute(call["arguments"]))
-        except Exception:  # noqa: BLE001 - corrected failure text must not expose service credentials
+        except Exception:  # noqa: BLE001 - redact service failures
             logger.warning("AReaL deep-research tool execution failed", exc_info=False)
             return f"Error: tool {name} execution failed"
 

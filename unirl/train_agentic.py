@@ -1,13 +1,5 @@
 #!/usr/bin/env python
-"""Generic service-scored barrier agentic training entry point.
-
-The rollout manager collects complete groups of variable-depth trajectories. The
-trainer then scores terminal ``<answer>`` values, computes group-normalized GRPO
-advantages, and performs one synchronous update.
-
-Pass an explicit generic agentic recipe with ``--config-name``. The aligned
-deep-research experiment uses :mod:`unirl.train_areal` instead.
-"""
+"""Generic service-scored barrier agentic training entry point."""
 
 from __future__ import annotations
 

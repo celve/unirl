@@ -1,37 +1,10 @@
 # @package _global_
-# AReaL-compatible deep-research RL with service-scored barrier training.
-#
-# AReaL alignment status:
-#   Stages 1-4: dataset/order/model/prompt/horizon, controller/transcript,
-#               one-row trajectory assembly, AReaL services, and actor objective.
-#   Later stage: async runtime and disaggregated topology.
-#
-# Prerequisites:
-#   - QWEN3_PATH          : local Qwen3-1.7B checkpoint dir
-#   - DATA_PATH           : converted ASearcher-LRM-35k train.jsonl
-#   - DATA_MANIFEST       : optional override; defaults to ${DATA_PATH}.manifest.json
-#   - DEEP_RESEARCH_RUN_DATE: frozen YYYY-MM-DD date embedded in the prompt
-#   - SERPER_KEY_ID       : Serper web-search API key
-#   - JINA_API_KEYS       : Jina reader key
-#   - JUDGE_URL/JUDGE_MODEL: external Qwen2.5-72B OpenAI-compatible endpoint
-#   - JUDGE_TOKENIZER_PATH : tokenizer for that same judge/visit-summary service
-#
-# Convert data:
-#   python -m unirl.utils.prepare_asearcher \
-#     --source /path/to/ASearcher-LRM-35k.jsonl --out-dir data/asearcher
-#
-# Launch:
-#   python -m unirl.train_areal --config-name=deep_research/deep_research_search_judge
 
 seed: 1
 dataset_sampler_seed: 0
 run_date: ${oc.env:DEEP_RESEARCH_RUN_DATE}
 
-# Only deployment-owned values are exposed here. The dedicated AReaL tools and
-# judge freeze task behavior such as endpoints, retry counts, timeouts, request
-# values, context headroom, and parsing. AReaL passes one Qwen2.5-72B client to
-# both visit summarization and judging. The deployment owns global capacity 32;
-# the same value only bounds each UniRL reward worker's pending requests.
+# The judge endpoint also serves visit summaries.
 areal_service:
   endpoint: ${oc.env:JUDGE_URL}
   model: ${oc.env:JUDGE_MODEL}
@@ -58,7 +31,7 @@ system_instruction: |-
 
   Current date: ${run_date}
 
-num_devices: 2 # Barrier/colocated until the Stage 5 topology alignment.
+num_devices: 2 # Colocated barrier mode.
 batch_size: 128
 num_rollouts: 2730 # 10 * floor(35000 / 128)
 
@@ -133,10 +106,10 @@ rollout:
     _target_: unirl.rollout.engine.agentic.config.AgenticRolloutEngineConfig
     harness:
       _target_: unirl.rollout.harness.areal_deep_research.ARealDeepResearchHarnessConfig
-      max_policy_calls: 100 # Calls 1-99 are ordinary; call 100 is reserved for rescue.
+      max_policy_calls: 100 # Reserve call 100 for rescue.
       max_new_tokens_per_call: 8192
       soft_trajectory_tokens: 27648
-      answer_now_prompt_tokens: 22118 # floor(0.8 * 27648); rescue triggers only above it.
+      answer_now_prompt_tokens: 22118 # floor(0.8 * soft_trajectory_tokens)
       hard_context_tokens: 32768
       max_generation_attempts: 3
       retry_backoff_seconds: [0.5, 1.0]
@@ -154,7 +127,7 @@ rollout:
       prompt_serialization: areal
       chat_template_kwargs:
         enable_thinking: true
-        tools: null # Keep the literal prompt schemas; suppress native tool injection.
+        tools: null # Preserve the literal tool schema.
       engine_kwargs:
         context_length: 32768
         mem_fraction_static: 0.3
@@ -186,15 +159,12 @@ reward:
       model: ${areal_service.model}
       submission_concurrency: ${areal_service.max_concurrent_requests}
 
-# AReaL exposes these tuned numeric values. The dedicated trainer fixes batch-
-# global, token-weighted, unbiased normalization with epsilon 1e-5.
+# AReaL tunes these values; normalization stays fixed in the trainer.
 reward_transform:
   bias: -0.5
   scale: 10.0
 
-# Structural choices stay in ARealPPO: actor-only (no critic/reference), one
-# proximal replay, token-level ratio masking, no lower threshold, and a global
-# original-active-token denominator.
+# ARealPPO fixes actor-only replay, masking, and denominator semantics.
 algorithm:
   _target_: unirl.algorithms.areal.ARealPPO
   stage_attr: ar

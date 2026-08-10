@@ -23,13 +23,7 @@ class ARealPPOConfig(BaseAlgorithmConfig):
 
 
 class ARealPPO(StageAlgorithm):
-    """AReaL actor loss with separate behavior and proximal log-probabilities.
-
-    The rollout policy is stored as token log-probabilities, not as a second
-    train-side model. ``prepare_segment`` freezes a proximal replay before the
-    single optimizer update; the differentiable replay then applies token-level
-    PPO clipping and the detached behavior-policy correction.
-    """
+    """AReaL actor loss over behavior and proximal log-probabilities."""
 
     supports_multi_update = False
     loss_weighting = "token"

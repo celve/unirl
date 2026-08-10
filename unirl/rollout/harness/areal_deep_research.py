@@ -183,7 +183,7 @@ class ARealDeepResearchHarness:
                 status="failed",
                 termination_reason=str(exc),
             )
-        except Exception as exc:  # noqa: BLE001 - one controller bug must not terminate the rollout drain
+        except Exception as exc:  # noqa: BLE001 - isolate controller failure
             logger.warning("AReaL deep-research controller failed (%s)", type(exc).__name__, exc_info=False)
             return self._outcome(
                 sample,
@@ -197,7 +197,7 @@ class ARealDeepResearchHarness:
             if close is not None:
                 try:
                     close(sample)
-                except Exception:  # noqa: BLE001 - teardown must not sink the trajectory
+                except Exception:  # noqa: BLE001 - preserve trajectory
                     logger.warning("AReaL deep-research environment teardown failed", exc_info=False)
 
     def _run_rescue(
@@ -253,7 +253,7 @@ class ARealDeepResearchHarness:
             self._check_wall(state, started_at)
             try:
                 return context.generate(self.ENGINE, generation_request)
-            except Exception as exc:  # noqa: BLE001 - retry only exposes safe counters
+            except Exception as exc:  # noqa: BLE001 - redact retry failures
                 state.retry_count += 1
                 logger.warning(
                     "AReaL deep-research policy attempt %d/%d failed (%s)",

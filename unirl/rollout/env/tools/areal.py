@@ -291,8 +291,7 @@ class ARealVisitTool(Tool):
                 raw = await self._call_summary(messages, summary_session)
                 parse_attempt += 1
                 if parse_attempt >= _PARSE_REGENERATIONS:
-                    # The pinned AReaL loop issues its final regeneration but
-                    # exits without parsing that response.
+                    # AReaL exits without parsing its final regeneration.
                     raw_object = None
                     break
 

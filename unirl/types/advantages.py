@@ -21,16 +21,7 @@ def token_weighted_global_normalize(
     *,
     eps: float = 1e-5,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Normalize trajectory values over their active-token multiplicities.
-
-    ``token_counts[i]`` is a frequency weight: the result is identical to
-    repeating ``values[i]`` that many times and running one FP64 batch
-    normalization with an unbiased standard deviation. Invalid or zero-token
-    rows receive zero and do not contribute to the statistics.
-
-    Returns ``(normalized_fp32, mean_fp64, std_fp64)``. Empty input statistics
-    are ``(0, 1)``; a single active token also uses standard deviation ``1``.
-    """
+    """Normalize trajectory values by active-token frequency."""
     if values.ndim != 1 or token_counts.ndim != 1 or healthy_mask.ndim != 1:
         raise ValueError("token_weighted_global_normalize expects three 1D tensors")
     if values.shape != token_counts.shape or values.shape != healthy_mask.shape:

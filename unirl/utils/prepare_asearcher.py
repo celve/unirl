@@ -1,13 +1,4 @@
-"""Prepare ASearcher LRM35k deep-research data as deterministic JSONL.
-
-The default source is ASearcher LRM35k. Each row preserves the source question
-and answer value, adds a stable prompt ID, and writes an adjacent conversion
-manifest consumed by the deep-research recipe.
-
-  python -m unirl.utils.prepare_asearcher \
-    --source /path/to/ASearcher-LRM-35k.jsonl \
-    --out-dir data/asearcher
-"""
+"""Convert ASearcher LRM35k into deterministic UniRL JSONL."""
 
 from __future__ import annotations
 

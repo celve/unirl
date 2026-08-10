@@ -1,12 +1,5 @@
 #!/usr/bin/env python
-"""AReaL-compatible deep-research barrier training entry point.
-
-Launch (per node, SPMD; rank 0 owns the driver):
-  QWEN3_PATH=/path/to/Qwen3-1.7B DATA_PATH=data/asearcher/train.jsonl \
-  DEEP_RESEARCH_RUN_DATE=YYYY-MM-DD \
-  SERPER_KEY_ID=... JINA_API_KEYS=... JUDGE_URL=... JUDGE_MODEL=... \
-  python -m unirl.train_areal --config-name=deep_research/deep_research_search_judge
-"""
+"""AReaL deep-research barrier training entry point."""
 
 from __future__ import annotations
 
