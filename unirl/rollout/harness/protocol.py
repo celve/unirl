@@ -11,7 +11,7 @@ trainside unchanged).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Callable, Literal, Mapping, Protocol
+from typing import TYPE_CHECKING, Any, Callable, Literal, Mapping, Protocol
 
 if TYPE_CHECKING:
     from unirl.types.sample import Sample
@@ -32,6 +32,7 @@ class HarnessOutcome:
 
     sample: "Sample"
     status: Literal["completed", "suspended", "failed"]
+    metadata: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -44,6 +45,7 @@ class HarnessContext:
     """
 
     engines: Mapping[str, Callable[["Sample"], "Sample"]] = field(default_factory=dict)
+    prompt_token_counters: Mapping[str, Callable[["Sample"], int]] = field(default_factory=dict)
     suspend: Callable[[], bool] = lambda: False
 
     def generate(self, engine: str, sample: "Sample") -> "Sample":
@@ -64,6 +66,17 @@ class HarnessContext:
         interrupts mid-generation.
         """
         return self.suspend()
+
+    def count_prompt_tokens(self, engine: str, sample: "Sample") -> int:
+        """Count one request using the named engine's actual prompt-building path."""
+        try:
+            counter = self.prompt_token_counters[engine]
+        except KeyError:
+            raise KeyError(
+                f"harness asked for prompt-token counter {engine!r}; "
+                f"this runtime provides {sorted(self.prompt_token_counters)}"
+            ) from None
+        return int(counter(sample))
 
 
 class RolloutHarness(Protocol):

@@ -152,6 +152,7 @@ class SGLangEngineConfig(BaseEngineConfig):
     response_forbidden_tokens: Optional[List[str]] = None
 
     system_instruction: Optional[str] = None
+    prompt_serialization: str = "full"
     chat_template_kwargs: Optional[Dict[str, Any]] = field(default_factory=dict)
 
     engine_kwargs: Optional[Dict[str, Any]] = field(default_factory=dict)
@@ -235,6 +236,15 @@ class SGLangEngineConfig(BaseEngineConfig):
         require(
             self.model_family in valid_families,
             f"SGLangEngineConfig.model_family must be one of {set(valid_families)}; got {self.model_family!r}",
+        )
+        self.prompt_serialization = str(self.prompt_serialization).strip().lower()
+        require(
+            self.prompt_serialization in ("full", "areal"),
+            f"SGLangEngineConfig.prompt_serialization must be 'full' or 'areal'; got {self.prompt_serialization!r}",
+        )
+        require(
+            self.prompt_serialization == "full" or self.model_family == "text",
+            "SGLangEngineConfig.prompt_serialization='areal' is supported only for text models",
         )
 
     def server_intent(

@@ -60,13 +60,20 @@ class AgenticRolloutEngine(BaseRolloutEngine):
             f"env.max_turns ({env_max_turns}) must equal config.max_turns ({self._max_turns})",
         )
         self._stopping = False
-        self._harness: RolloutHarness = ToolAgentHarness(
-            env=self._env,
-            sampling=config.episode_sampling,
-            max_turns=self._max_turns,
-        )
+        if config.harness is None:
+            self._harness: RolloutHarness = ToolAgentHarness(
+                env=self._env,
+                sampling=config.episode_sampling,
+                max_turns=self._max_turns,
+            )
+        else:
+            build_harness = getattr(config.harness, "build", None)
+            require(callable(build_harness), "configured agentic harness must expose build(env=..., sampling=...)")
+            self._harness = build_harness(env=self._env, sampling=config.episode_sampling)
+        prompt_counter = getattr(self._inner, "count_prompt_tokens", None)
         self._harness_ctx = HarnessContext(
             engines={"policy": self._inner.generate},
+            prompt_token_counters={"policy": prompt_counter} if callable(prompt_counter) else {},
             suspend=lambda: self._stopping,
         )
 
@@ -84,7 +91,7 @@ class AgenticRolloutEngine(BaseRolloutEngine):
             outcome = self._harness.run(sample, self._harness_ctx)
             if outcome.status not in ("completed", "suspended", "failed"):
                 raise ValueError(f"unknown harness outcome status: {outcome.status!r}")
-            return self._stamp_outcome(outcome.sample, outcome.status)
+            return self._stamp_outcome(outcome.sample, outcome.status, outcome.metadata)
         except Exception:  # noqa: BLE001 — last-resort net: a harness bug fails one trajectory, not the run
             logger.warning(
                 "AgenticRolloutEngine: harness escaped its own net; marking trajectory failed", exc_info=True
@@ -92,10 +99,17 @@ class AgenticRolloutEngine(BaseRolloutEngine):
             return self._stamp_outcome(sample, "failed")
 
     @staticmethod
-    def _stamp_outcome(sample: Sample, status: str) -> Sample:
+    def _stamp_outcome(sample: Sample, status: str, metadata: Any = None) -> Sample:
         if not sample.parts:
             return sample
-        last = _part_with_field(sample.parts[-1], "harness_status", status)
+        last = sample.parts[-1]
+        if metadata:
+            require(last.batch_size == 1, "harness outcome metadata requires a single-trajectory Sample")
+            rows = list(last.metadata) if last.metadata else [{}]
+            row = dict(rows[0] or {})
+            row["harness"] = dict(metadata)
+            last = _part_with_field(last, "metadata", [row])
+        last = _part_with_field(last, "harness_status", status)
         return sample.with_parts([*sample.parts[:-1], last])
 
     @distributed(dispatch_mode=Dispatch.BROADCAST)

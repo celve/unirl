@@ -6,7 +6,7 @@ import logging
 import re
 import time
 from collections import Counter
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import torch
 from hydra.utils import instantiate
@@ -16,6 +16,7 @@ from unirl.distributed.group.placement import placement, remote
 from unirl.distributed.tensor import hydrate
 from unirl.rollout.manager import RolloutManager
 from unirl.train.stack import TrainStepResult
+from unirl.trainer.areal import ARealTrajectoryError, areal_metadata, build_areal_part
 from unirl.trainer.base import BaseTrainer, build_sampling_dict, prepare_input_sample, unwrap_replicated_int
 from unirl.types.advantages import finite_mean_std
 from unirl.types.primitives import Texts
@@ -62,6 +63,7 @@ class AgenticTrainer(BaseTrainer):
         logging_cfg: Optional[DictConfig] = None,
         stop: Optional[List[str]] = None,
         per_worker_inflight: int = 8,
+        trajectory_format: str = "per_turn",
     ) -> None:
         self._validate_config(
             cfg=cfg,
@@ -71,6 +73,7 @@ class AgenticTrainer(BaseTrainer):
             algorithm_cfg=algorithm_cfg,
             sync_cfg=sync_cfg,
             per_worker_inflight=per_worker_inflight,
+            trajectory_format=trajectory_format,
         )
         super().__init__(cfg=cfg, logging_cfg=logging_cfg)
 
@@ -81,6 +84,7 @@ class AgenticTrainer(BaseTrainer):
             self._group_size = total_samples_per_prompt(self.sampling_params)
             self._stop = ["</tool_call>"] if stop is None else list(stop)
             self._per_worker_inflight = int(per_worker_inflight)
+            self._trajectory_format = str(trajectory_format)
 
             with placement(self.pool, fraction=1.0, shared_workers=True):
                 self.bundle = remote_hydra(bundle_cfg)
@@ -122,11 +126,14 @@ class AgenticTrainer(BaseTrainer):
         algorithm_cfg: DictConfig,
         sync_cfg: Optional[DictConfig],
         per_worker_inflight: int,
+        trajectory_format: str = "per_turn",
     ) -> None:
         if int(batch_size) <= 0:
             raise ValueError(f"batch_size must be positive; got {batch_size}")
         if int(per_worker_inflight) <= 0:
             raise ValueError(f"per_worker_inflight must be positive; got {per_worker_inflight}")
+        if str(trajectory_format) not in {"per_turn", "areal"}:
+            raise ValueError(f"training_trajectory_format must be 'per_turn' or 'areal'; got {trajectory_format!r}")
         # Mirrors the DevicePool default in BaseTrainer; checked here so a bad combination
         # fails before any expensive runtime construction.
         worker_max_concurrency = int(cfg.get("worker_max_concurrency", 1))
@@ -205,12 +212,15 @@ class AgenticTrainer(BaseTrainer):
         requests = self._build_request_sample(inputs, rollout_id)
         groups = self._collect_groups(requests)
         trajectories = [trajectory for group in groups for trajectory in group]
-        rewards = self._score_trajectories(trajectories, rollout_id)
+        areal_parts = self._prepare_areal_parts(trajectories, rollout_id)
+        eligible = None if areal_parts is None else [part is not None for part in areal_parts]
+        rewards = self._score_trajectories(trajectories, rollout_id, eligible=eligible)
         advantages = self._group_advantages(groups, rewards)
         result, mean_reward = self._train_and_log(
             trajectories,
             rewards,
             advantages,
+            areal_parts=areal_parts,
             rollout_id=rollout_id,
             training_progress=training_progress,
             t0=t0,
@@ -218,9 +228,37 @@ class AgenticTrainer(BaseTrainer):
         self._train_version += result.optimizer_updates
         return result, mean_reward
 
-    def _score_trajectories(self, trajectories: List[Sample], rollout_id: int) -> torch.Tensor:
+    def _prepare_areal_parts(self, trajectories: List[Sample], rollout_id: int) -> Optional[List[Optional[Part]]]:
+        if self._trajectory_format != "areal":
+            return None
+
+        prepared: List[Optional[Part]] = []
+        for trajectory in trajectories:
+            if _is_failed(trajectory):
+                prepared.append(None)
+                continue
+            try:
+                prepared.append(build_areal_part(trajectory))
+            except ARealTrajectoryError as exc:
+                logger.warning("Agentic rollout %d: excluded invalid AReaL trajectory (%s)", rollout_id, exc)
+                prepared.append(None)
+        return prepared
+
+    def _score_trajectories(
+        self,
+        trajectories: List[Sample],
+        rollout_id: int,
+        *,
+        eligible: Optional[Sequence[bool]] = None,
+    ) -> torch.Tensor:
         rewards = torch.full((len(trajectories),), float("nan"), dtype=torch.float32)
-        valid_indices = [i for i, trajectory in enumerate(trajectories) if not _is_failed(trajectory)]
+        if eligible is not None and len(eligible) != len(trajectories):
+            raise RuntimeError("trajectory eligibility cardinality mismatch")
+        valid_indices = [
+            i
+            for i, trajectory in enumerate(trajectories)
+            if not _is_failed(trajectory) and (eligible is None or bool(eligible[i]))
+        ]
         if not valid_indices:
             logger.warning("Agentic rollout %d: every trajectory failed", rollout_id)
             return rewards
@@ -234,9 +272,15 @@ class AgenticTrainer(BaseTrainer):
             metadata = root.metadata[0] if root.metadata else {}
             prompt = root.primitives.get("text")
             questions.append(prompt.texts[0] if isinstance(prompt, Texts) and prompt.texts else "")
-            terminal = trajectory.gen_parts()[-1].primitives.get("text")
-            terminal_text = terminal.texts[0] if isinstance(terminal, Texts) and terminal.texts else ""
-            predictions.append(_extract_answer(terminal_text))
+            if self._trajectory_format == "areal":
+                prediction = areal_metadata(trajectory).get("prediction")
+                if not isinstance(prediction, str):
+                    raise RuntimeError("eligible AReaL trajectory has no string prediction")
+                predictions.append(prediction)
+            else:
+                terminal = trajectory.gen_parts()[-1].primitives.get("text")
+                terminal_text = terminal.texts[0] if isinstance(terminal, Texts) and terminal.texts else ""
+                predictions.append(_extract_answer(terminal_text))
             answers.append((metadata or {}).get("answer"))
 
         score_count = len(valid_indices)
@@ -303,6 +347,7 @@ class AgenticTrainer(BaseTrainer):
         rewards: torch.Tensor,
         advantages: torch.Tensor,
         *,
+        areal_parts: Optional[List[Optional[Part]]] = None,
         rollout_id: int,
         training_progress: float,
         t0: float,
@@ -315,7 +360,14 @@ class AgenticTrainer(BaseTrainer):
             if not bool(finite[i]):
                 continue
             advantage = float(advantages[i].item())
-            for generated in trajectory.gen_parts():
+            if areal_parts is None:
+                generated_parts = trajectory.gen_parts()
+            else:
+                generated = areal_parts[i]
+                if generated is None:
+                    raise RuntimeError("finite AReaL trajectory has no prepared training row")
+                generated_parts = [generated]
+            for generated in generated_parts:
                 generated = _part_with_field(
                     generated,
                     "advantages",
@@ -398,6 +450,11 @@ class AgenticTrainer(BaseTrainer):
         source = int(torch.argmin(lengths).item()) if lengths is not None and lengths.numel() else 0
         padding = part.select(torch.full((pad,), source, dtype=torch.long))
         padding = _part_with_field(padding, "advantages", torch.zeros(pad, dtype=torch.float32))
+        if padding.segment is not None and padding.segment.loss_mask is not None:
+            padding.segment.loss_mask = torch.zeros_like(
+                hydrate(padding.segment.loss_mask),
+                dtype=torch.bool,
+            )
         return Part.concat([part, padding])
 
     def train(

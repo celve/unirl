@@ -15,6 +15,7 @@ class AgenticRolloutEngineConfig(BaseEngineConfig):
     inner: Any
     env: Any
 
+    harness: Any = None
     max_turns: int = 8
     episode_sampling: Any = None
 

@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Tuple
 import torch
 
 from unirl.config.require import require
+from unirl.distributed.tensor import hydrate
 from unirl.rollout.engine.sglang.adapters.base import (
     ModelAdapter,
     PreparedInputs,
@@ -27,6 +28,7 @@ from unirl.rollout.engine.sglang.utils import (
     build_text_conversations,
     pack_prompt_condition,
 )
+from unirl.types.conditions import TextTokenCondition
 from unirl.types.primitives import Texts
 from unirl.types.sample import Sample
 from unirl.types.segments.base import SegmentStatus
@@ -57,6 +59,10 @@ class TextLMAdapter(ModelAdapter):
                 f"{type(self).__name__}: response_forbidden_tokens are absent from the tokenizer vocabulary: {unknown}",
             )
             self._response_forbidden_token_ids = tuple(dict.fromkeys(int(vocab[token]) for token in forbidden_tokens))
+        require(
+            getattr(self.cfg, "prompt_serialization", "full") != "areal" or self._has_chat_template(),
+            f"{type(self).__name__}: AReaL prompt serialization requires a tokenizer chat template",
+        )
         if not self._has_chat_template():
             logger.info(
                 "%s: tokenizer has no chat template — raw-text completion rollouts",
@@ -85,9 +91,17 @@ class TextLMAdapter(ModelAdapter):
                 f"resolved n={sampling.n}; conversation grouping and the sampling block "
                 "disagree on the gen branch.",
             )
+            use_areal_serialization = getattr(self.cfg, "prompt_serialization", "full") == "areal"
+            if use_areal_serialization:
+                require(
+                    len(conversations) == 1 and k == 1,
+                    "AReaL prompt serialization requires one trajectory and one generation branch",
+                )
             for messages in conversations:
                 payload = self.base_payload(sampling)
                 ids = self.apply_chat_template(messages)
+                if use_areal_serialization:
+                    ids = self._serialize_areal_prompt(sample, ids)
                 payload["input_ids"] = ids
                 prompt_token_ids.append(list(ids))
                 wire.append(payload)
@@ -149,6 +163,82 @@ class TextLMAdapter(ModelAdapter):
         if ids and isinstance(ids[0], (list, tuple)):  # leading batch dim of 1
             ids = ids[0]
         return [int(t) for t in ids]
+
+    def _serialize_areal_prompt(self, sample: Sample, full_prompt_ids: List[int]) -> List[int]:
+        """Extend the prior wire tokens and take only the newly rendered suffix."""
+        generated = [part for part in sample.parts[:-1] if part.is_gen]
+        if not generated:
+            return full_prompt_ids
+
+        parent = generated[-1]
+        prompt = parent.conditions.get("prompt")
+        require(
+            parent.batch_size == 1
+            and isinstance(prompt, TextTokenCondition)
+            and prompt.input_ids is not None
+            and prompt.attention_mask is not None,
+            "AReaL prompt serialization requires one tokenized parent generation",
+        )
+        input_ids = hydrate(prompt.input_ids).to(dtype=torch.long, device="cpu")
+        attention_mask = hydrate(prompt.attention_mask).to(dtype=torch.bool, device="cpu")
+        require(
+            input_ids.ndim == 2 and input_ids.shape == attention_mask.shape and input_ids.shape[0] == 1,
+            "AReaL parent prompt condition must contain one aligned row",
+        )
+        parent_prompt = input_ids[0][attention_mask[0]].tolist()
+
+        require(
+            isinstance(parent.segment, TextSegment) and parent.segment.tokens is not None,
+            "AReaL prompt serialization requires parent output tokens",
+        )
+        parent_output = hydrate(parent.segment.tokens).to(dtype=torch.long, device="cpu").flatten().tolist()
+        require(parent.status is not None, "AReaL prompt serialization requires parent completion status")
+        statuses = hydrate(parent.status).to(dtype=torch.long, device="cpu").flatten()
+        require(statuses.numel() == 1, "AReaL parent completion status must contain one row")
+        status = SegmentStatus(int(statuses.item()))
+
+        eos_token_id = getattr(self._tokenizer, "eos_token_id", None)
+        require(eos_token_id is not None, "AReaL prompt serialization requires an EOS token")
+        eos_token_id = int(eos_token_id)
+        if status is SegmentStatus.COMPLETED:
+            stop_ids = {eos_token_id}
+            pad_token_id = getattr(self._tokenizer, "pad_token_id", None)
+            if pad_token_id is not None:
+                stop_ids.add(int(pad_token_id))
+            require(
+                bool(parent_output) and parent_output[-1] in stop_ids,
+                "AReaL completed parent output must end with EOS or PAD",
+            )
+            output_without_stop = list(parent_output)
+            while output_without_stop and output_without_stop[-1] in stop_ids:
+                output_without_stop.pop()
+            require(output_without_stop, "AReaL parent output cannot contain only stop tokens")
+        elif status in (SegmentStatus.TRUNCATED, SegmentStatus.ABORTED):
+            output_without_stop = list(parent_output)
+        else:
+            raise ValueError(f"AReaL parent generation has invalid status {status.name}")
+
+        parent_tokens = parent_prompt + output_without_stop + [eos_token_id]
+        eos_count = parent_tokens.count(eos_token_id)
+        seen = 0
+        truncate_at = -1
+        for index, token_id in enumerate(full_prompt_ids):
+            if token_id == eos_token_id:
+                seen += 1
+                if seen == eos_count:
+                    truncate_at = index
+                    break
+        require(
+            truncate_at >= 0 and truncate_at + 1 < len(full_prompt_ids),
+            "AReaL child prompt could not be aligned after the parent EOS boundary",
+        )
+        serialized = parent_tokens + full_prompt_ids[truncate_at + 1 :]
+        expected_prefix = parent_prompt + parent_output
+        require(
+            len(serialized) > len(expected_prefix) and serialized[: len(expected_prefix)] == expected_prefix,
+            "AReaL child prompt is not a strict extension of the parent interaction",
+        )
+        return serialized
 
     def build_response(self, sample: Sample, prepared: PreparedInputs, raw: List[RawResult]) -> Sample:
         """Fill the frontier gen ``Part`` from the seam's per-candidate results.

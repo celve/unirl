@@ -108,12 +108,32 @@ class GRPO(StageAlgorithm):
         if int(segment.tokens.shape[0]) == 0:
             return AlgorithmStepResult(loss=0.0, metrics={}, num_steps_or_tokens=0, has_backward=False)
 
+        active_mask: Optional[torch.Tensor] = None
+        if segment.loss_mask is not None:
+            active_mask = segment.loss_mask.to(dtype=torch.bool)
+            if active_mask.shape != segment.tokens.shape:
+                raise ValueError(
+                    "GRPO loss mask must align with packed tokens; "
+                    f"got mask={tuple(active_mask.shape)} tokens={tuple(segment.tokens.shape)}"
+                )
+            if not bool(active_mask.any()):
+                return AlgorithmStepResult(loss=0.0, metrics={}, num_steps_or_tokens=0, has_backward=False)
+
         typed_conds = typed_conditions(conditions, self.conditions_cls)
         new_logp = self.stage.replay(typed_conds, segment=segment, temperature=self.sampling_temperature)
         old_logp = segment.log_probs.to(dtype=new_logp.dtype, device=new_logp.device)
         adv_per_token = self._expand_advantages_to_tokens(
             advantages, segment.lengths, dtype=new_logp.dtype, device=new_logp.device
         )
+        if active_mask is not None:
+            active_mask = active_mask.to(device=new_logp.device)
+            new_logp_for_loss = new_logp[active_mask]
+            old_logp_for_loss = old_logp[active_mask]
+            adv_for_loss = adv_per_token[active_mask]
+        else:
+            new_logp_for_loss = new_logp
+            old_logp_for_loss = old_logp
+            adv_for_loss = adv_per_token
 
         clip_range = _resolve_clip_range_from_schedule(self.clip_range, self.clip_schedule, training_progress)
         clip_high = (
@@ -122,15 +142,20 @@ class GRPO(StageAlgorithm):
             else _resolve_clip_range_from_schedule(self.clip_range_high, self.clip_schedule, training_progress)
         )
         loss_per_elem, ratio_metrics = _grpo_clip_loss(
-            new_logp=new_logp,
-            old_logp=old_logp,
-            advantages=adv_per_token,
+            new_logp=new_logp_for_loss,
+            old_logp=old_logp_for_loss,
+            advantages=adv_for_loss,
             clip_range=clip_range,
             clip_range_high=clip_high,
         )
 
         if self.loss_agg_mode in ("seq-mean-token-sum-norm", "seq-mean-token-mean") and segment.lengths is not None:
-            parts = torch.split(loss_per_elem, segment.lengths.tolist())
+            if active_mask is None:
+                parts = torch.split(loss_per_elem, segment.lengths.tolist())
+            else:
+                mask_parts = torch.split(active_mask, segment.lengths.tolist())
+                active_lengths = [int(part.sum().item()) for part in mask_parts]
+                parts = tuple(part for part in torch.split(loss_per_elem, active_lengths) if part.numel())
             if self.loss_agg_mode == "seq-mean-token-sum-norm":
                 loss = torch.stack([p.sum() for p in parts]).mean() / float(self.horizon)
             else:  # seq-mean-token-mean — guard 0-length responses (mean of empty = NaN)
@@ -142,13 +167,13 @@ class GRPO(StageAlgorithm):
         metrics: Dict[str, Any] = {
             "policy_loss": float(loss.detach().item()),
             "clip_range": float(clip_range),
-            **rollout_replay_logp_absdiff(new_logp, old_logp),
+            **rollout_replay_logp_absdiff(new_logp_for_loss, old_logp_for_loss),
             **{k: float(v.item()) for k, v in ratio_metrics.items()},
         }
         return AlgorithmStepResult(
             loss=float(loss.detach().item()),
             metrics=metrics,
-            num_steps_or_tokens=int(new_logp.shape[0]),
+            num_steps_or_tokens=int(new_logp_for_loss.shape[0]),
             has_backward=True,
         )
 

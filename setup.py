@@ -20,6 +20,7 @@ setup(
         "sglang[diffusion]==0.5.12.post1",
         "diffusers>=0.37.0",
         "hydra-core>=1.3",
+        "json5==0.14.0",
         "omegaconf>=2.3",
         "transformers>=5.6,<5.7",
         "peft>=0.14.0",

@@ -2,8 +2,9 @@
 # Deep-research agentic RL with service-scored barrier training.
 #
 # AReaL alignment status:
-#   Stage 1: dataset, ordering, model, initial prompt, seeds, and horizon.
-#   Later stages: controller/transcript, tools/judge, objective, and async runtime.
+#   Stages 1-2: dataset/order/model/prompt/horizon plus controller, transcript,
+#               token budgets, rescue paths, and one-row trajectory assembly.
+#   Later stages: tools/judge, objective, and async runtime.
 #
 # Prerequisites:
 #   - QWEN3_PATH          : local Qwen3-1.7B checkpoint dir
@@ -46,6 +47,7 @@ system_instruction: |-
 num_devices: 2 # Barrier/colocated until the Stage 5 topology alignment.
 batch_size: 128
 num_rollouts: 2730 # 10 * floor(35000 / 128)
+training_trajectory_format: areal
 
 worker_max_concurrency: 10
 per_worker_inflight: 4
@@ -57,7 +59,7 @@ sampling:
   temperature: 1.0
   top_p: 1.0
   top_k: 0
-  max_new_tokens: 2048 # Stage 2 aligns per-call and trajectory limits.
+  max_new_tokens: 8192
 
 logging:
   report_to_wandb: false
@@ -116,17 +118,27 @@ rollout:
   _target_: unirl.rollout.engine.agentic.engine.AgenticRolloutEngine
   config:
     _target_: unirl.rollout.engine.agentic.config.AgenticRolloutEngineConfig
-    max_turns: 8 # Stage 2 replaces the generic turn loop with the aligned controller.
+    harness:
+      _target_: unirl.rollout.harness.areal_deep_research.ARealDeepResearchHarnessConfig
+      max_policy_calls: 100 # Calls 1-99 are ordinary; call 100 is reserved for rescue.
+      max_new_tokens_per_call: 8192
+      soft_trajectory_tokens: 27648
+      answer_now_prompt_tokens: 22118 # floor(0.8 * 27648); rescue triggers only above it.
+      hard_context_tokens: 32768
+      max_generation_attempts: 3
+      retry_backoff_seconds: [0.5, 1.0]
+      wall_timeout_seconds: 9000 # 150 minutes.
     inner:
       _target_: unirl.rollout.engine.sglang.config.SGLangEngineConfig
       backend: native
       pretrained_model_ckpt_path: ${oc.env:QWEN3_PATH}
       tp_size: 1
-      max_new_tokens: 2048
+      max_new_tokens: 8192
       temperature: 1.0
       top_p: 1.0
       concurrency: 8
       system_instruction: ${system_instruction}
+      prompt_serialization: areal
       chat_template_kwargs:
         enable_thinking: true
         tools: null # Keep the literal prompt schemas; suppress native tool injection.
@@ -140,8 +152,7 @@ rollout:
         enable_lora: false
         random_seed: ${seed}
     env:
-      _target_: unirl.rollout.env.tool_environment.ToolEnvironment
-      max_turns: 8
+      _target_: unirl.rollout.env.areal_deep_research.ARealDeepResearchEnvironment
       tools:
         - _target_: unirl.rollout.env.tools.search.SearchTool
           top_k: 10

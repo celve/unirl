@@ -194,6 +194,17 @@ class SGLangRolloutEngine(BaseRolloutEngine):
     def _finish_generation(self, sample: Sample, prepared: Any, raw: List[Any]) -> Sample:
         return self._stamp_output_version(self.adapter.build_response(sample, prepared, raw))
 
+    def count_prompt_tokens(self, sample: Sample) -> int:
+        """Count a single request through the same adapter path used by generation."""
+        require(self._is_tp_zero and self.adapter is not None, "prompt-token counting requires the SGLang TP leader")
+        sampling = resolve_sampling(self.cfg, sample)
+        prepared = self.adapter.build_inputs(sample, sampling=sampling)
+        require(
+            len(prepared.prompt_token_ids) == 1 and int(prepared.resolved_n) == 1,
+            "prompt-token counting requires one trajectory with one generation branch",
+        )
+        return len(prepared.prompt_token_ids[0])
+
     @distributed(dispatch_mode=Dispatch.DP_SCATTER)
     def generate(self, sample: Sample) -> Sample:
         """Generate one whole Sample synchronously through the backend seam.
