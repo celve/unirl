@@ -45,8 +45,6 @@ system_instruction: |-
 
 num_devices: 2 # Barrier/colocated until the Stage 5 topology alignment.
 batch_size: 128
-total_train_epochs: 10
-warmup_proportion: 0.001
 num_rollouts: 2730 # 10 * floor(35000 / 128)
 
 worker_max_concurrency: 10
