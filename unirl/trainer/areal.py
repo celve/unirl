@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import time
 from collections import Counter
 from typing import Any, Dict, List, Mapping, Optional, Tuple
@@ -16,7 +17,7 @@ from unirl.distributed.tensor import hydrate
 from unirl.rollout.manager import RolloutManager
 from unirl.train.stack import TrainStepResult
 from unirl.trainer.base import BaseTrainer, build_sampling_dict, prepare_input_sample, unwrap_replicated_int
-from unirl.types.advantages import finite_mean_std
+from unirl.types.advantages import token_weighted_global_normalize
 from unirl.types.conditions import TextTokenCondition
 from unirl.types.primitives import Texts
 from unirl.types.sample import Part, Sample, _part_with_field
@@ -27,6 +28,8 @@ from unirl.utils.hydra import parse_hydra_cfg, remote_hydra
 
 _PROTOCOL = "areal_deep_research/v1"
 _ROLLOUT_SHUTDOWN_TIMEOUT_S = 60.0
+_REWARD_CLIP = 20.0
+_ADVANTAGE_EPS = 1e-5
 
 logger = logging.getLogger(__name__)
 
@@ -159,6 +162,7 @@ class ARealTrainer(BaseTrainer):
         backend_cfg: DictConfig,
         rollout_cfg: DictConfig,
         reward_cfg: DictConfig,
+        reward_transform_cfg: DictConfig,
         algorithm_cfg: DictConfig,
         stack_cfg: DictConfig,
         data_source_cfg: DictConfig,
@@ -173,7 +177,9 @@ class ARealTrainer(BaseTrainer):
             batch_size=batch_size,
             rollout_cfg=rollout_cfg,
             sampling_cfg=sampling_cfg,
+            reward_transform_cfg=reward_transform_cfg,
             algorithm_cfg=algorithm_cfg,
+            stack_cfg=stack_cfg,
             sync_cfg=sync_cfg,
             stop=stop,
             per_worker_inflight=per_worker_inflight,
@@ -186,6 +192,8 @@ class ARealTrainer(BaseTrainer):
             self.sampling_params: Dict[str, BaseSamplingParams] = build_sampling_dict(sampling_cfg)
             self._group_size = total_samples_per_prompt(self.sampling_params)
             self._per_worker_inflight = int(per_worker_inflight)
+            self._reward_bias = float(reward_transform_cfg.bias)
+            self._reward_scale = float(reward_transform_cfg.scale)
 
             with placement(self.pool, fraction=1.0, shared_workers=True):
                 self.bundle = remote_hydra(bundle_cfg)
@@ -224,7 +232,9 @@ class ARealTrainer(BaseTrainer):
         batch_size: int,
         rollout_cfg: DictConfig,
         sampling_cfg: DictConfig,
+        reward_transform_cfg: DictConfig,
         algorithm_cfg: DictConfig,
+        stack_cfg: DictConfig,
         sync_cfg: Optional[DictConfig],
         stop: Optional[List[str]],
         per_worker_inflight: int,
@@ -235,6 +245,15 @@ class ARealTrainer(BaseTrainer):
             raise ValueError(f"per_worker_inflight must be positive; got {per_worker_inflight}")
         if stop:
             raise ValueError("ARealTrainer requires an empty policy stop list")
+        reward_bias = float(reward_transform_cfg.get("bias"))
+        reward_scale = float(reward_transform_cfg.get("scale"))
+        if not math.isfinite(reward_bias):
+            raise ValueError(f"reward_transform.bias must be finite; got {reward_bias}")
+        if not math.isfinite(reward_scale) or reward_scale <= 0.0:
+            raise ValueError(f"reward_transform.scale must be finite and positive; got {reward_scale}")
+        num_updates = int(stack_cfg.get("num_updates_per_batch", 1))
+        if num_updates != 1:
+            raise ValueError(f"ARealTrainer requires stack.num_updates_per_batch=1; got {num_updates}")
 
         worker_max_concurrency = int(cfg.get("worker_max_concurrency", 1))
         required_concurrency = int(per_worker_inflight) + 2
@@ -315,12 +334,19 @@ class ARealTrainer(BaseTrainer):
         train_rows = self._prepare_training_rows(trajectories, rollout_id)
         eligible = [part is not None for part in train_rows]
         rewards = self._score_trajectories(trajectories, rollout_id, eligible=eligible)
-        advantages = self._group_advantages(groups, rewards)
+        advantages, scaled_rewards, token_counts, norm_mean, norm_std = self._areal_advantages(
+            train_rows,
+            rewards,
+        )
         result, mean_reward = self._train_and_log(
             trajectories,
             train_rows,
             rewards,
+            scaled_rewards,
+            token_counts,
             advantages,
+            norm_mean=norm_mean,
+            norm_std=norm_std,
             rollout_id=rollout_id,
             training_progress=training_progress,
             t0=t0,
@@ -420,40 +446,59 @@ class ARealTrainer(BaseTrainer):
             )
         return rewards
 
-    def _group_advantages(self, groups: List[List[Sample]], rewards: torch.Tensor) -> torch.Tensor:
-        advantages = torch.zeros_like(rewards, dtype=torch.float32)
-        offset = 0
-        for group in groups:
-            end = offset + len(group)
-            group_rewards = rewards[offset:end]
-            finite = torch.isfinite(group_rewards)
-            mean, std = finite_mean_std(group_rewards)
-            normalized = (group_rewards - mean) / (std + 1e-8)
-            advantages[offset:end] = torch.where(finite, normalized, torch.zeros_like(normalized))
-            offset = end
-        if offset != rewards.numel():
-            raise RuntimeError("rollout group/reward cardinality mismatch")
-        return advantages
+    def _areal_advantages(
+        self,
+        train_rows: List[Optional[Part]],
+        rewards: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, float, float]:
+        if len(train_rows) != rewards.numel():
+            raise RuntimeError("AReaL training-row/reward cardinality mismatch")
+
+        token_counts = torch.zeros(rewards.shape, dtype=torch.long)
+        healthy = torch.zeros(rewards.shape, dtype=torch.bool)
+        for i, row in enumerate(train_rows):
+            if row is None:
+                continue
+            if row.segment is None or row.segment.loss_mask is None:
+                raise RuntimeError("prepared AReaL row has no trajectory loss mask")
+            token_counts[i] = int(hydrate(row.segment.loss_mask).to(dtype=torch.bool).count_nonzero().item())
+            healthy[i] = bool(torch.isfinite(rewards[i])) and int(token_counts[i]) > 0
+
+        scaled_rewards = ((rewards + self._reward_bias) * self._reward_scale).clamp(
+            min=-_REWARD_CLIP,
+            max=_REWARD_CLIP,
+        )
+        advantages, mean, std = token_weighted_global_normalize(
+            scaled_rewards,
+            token_counts,
+            healthy,
+            eps=_ADVANTAGE_EPS,
+        )
+        return advantages, scaled_rewards, token_counts, float(mean), float(std)
 
     def _train_and_log(
         self,
         trajectories: List[Sample],
         train_rows: List[Optional[Part]],
         rewards: torch.Tensor,
+        scaled_rewards: torch.Tensor,
+        token_counts: torch.Tensor,
         advantages: torch.Tensor,
         *,
+        norm_mean: float,
+        norm_std: float,
         rollout_id: int,
         training_progress: float,
         t0: float,
     ) -> Tuple[TrainStepResult, float]:
         if len(train_rows) != len(trajectories):
             raise RuntimeError("trajectory/training-row cardinality mismatch")
-        finite = torch.isfinite(rewards)
-        mean_reward = float(rewards[finite].mean().item()) if bool(finite.any()) else 0.0
+        healthy = torch.isfinite(rewards) & (token_counts > 0)
+        mean_reward = float(rewards[healthy].mean().item()) if bool(healthy.any()) else 0.0
 
         prepared: List[Part] = []
         for i, generated in enumerate(train_rows):
-            if not bool(finite[i]):
+            if not bool(healthy[i]):
                 continue
             if generated is None:
                 raise RuntimeError("finite AReaL trajectory has no prepared training row")
@@ -487,7 +532,16 @@ class ARealTrainer(BaseTrainer):
             result = TrainStepResult(0.0, 0.0, 0.0, False, [], {}, optimizer_updates=0)
             train_rows_count = 0
 
-        log_sample = self._build_log_sample(trajectories, rewards, advantages, rollout_id)
+        log_sample = self._build_log_sample(
+            trajectories,
+            rewards,
+            scaled_rewards,
+            token_counts,
+            advantages,
+            healthy,
+            rollout_id,
+        )
+        scaled_reward_mean = float(scaled_rewards[healthy].mean().item()) if bool(healthy.any()) else 0.0
         self.wandb_logger.log_rollout_step(
             rollout_id,
             result,
@@ -496,8 +550,13 @@ class ARealTrainer(BaseTrainer):
             extra_metrics={
                 "agent/mean_turns": (sum(depths) / len(depths)) if depths else 0.0,
                 "agent/max_turns": max(depths) if depths else 0,
-                "agent/failed_trajectories": int((~finite).sum().item()),
+                "agent/failed_trajectories": int((~healthy).sum().item()),
                 "agent/train_rows": train_rows_count,
+                "objective/scaled_reward_mean": scaled_reward_mean,
+                "objective/scaled_reward_token_mean": norm_mean,
+                "objective/scaled_reward_token_std": norm_std,
+                "objective/active_tokens": int(token_counts[healthy].sum().item()),
+                "objective/healthy_trajectories": int(healthy.sum().item()),
             },
         )
         return result, mean_reward
@@ -506,19 +565,30 @@ class ARealTrainer(BaseTrainer):
         self,
         trajectories: List[Sample],
         rewards: torch.Tensor,
+        scaled_rewards: torch.Tensor,
+        token_counts: torch.Tensor,
         advantages: torch.Tensor,
+        healthy: torch.Tensor,
         rollout_id: int,
     ) -> Sample:
-        if len(trajectories) != rewards.numel() or rewards.numel() != advantages.numel():
-            raise RuntimeError("trajectory/reward/advantage cardinality mismatch")
-        finite = torch.isfinite(rewards)
-        count = int(finite.sum().item())
+        size = rewards.numel()
+        if not (
+            len(trajectories)
+            == size
+            == scaled_rewards.numel()
+            == token_counts.numel()
+            == advantages.numel()
+            == healthy.numel()
+        ):
+            raise RuntimeError("AReaL objective logging tensors are not aligned")
+        indices = healthy.nonzero(as_tuple=False).flatten().tolist()
+        count = len(indices)
         if count == 0:
             return Sample(parts=[])
 
         ar_sampling = self.sampling_params.get("ar")
         root = Part.input(
-            [f"log{rollout_id}:{i}" for i in range(count)],
+            [f"log{rollout_id}:{i}" for i in indices],
             primitives={"text": Texts(texts=[""] * count)},
         )
         sample = (
@@ -526,8 +596,21 @@ class ARealTrainer(BaseTrainer):
             .fork(1, sampling_params=ar_sampling)
             .with_filled_frontier(primitives={"text": Texts(texts=[""] * count)})
         )
-        frontier = _part_with_field(sample.parts[-1], "rewards", rewards[finite].to(torch.float32))
-        frontier = _part_with_field(frontier, "advantages", advantages[finite].to(torch.float32))
+        frontier = _part_with_field(sample.parts[-1], "rewards", rewards[healthy].to(torch.float32))
+        frontier = _part_with_field(frontier, "advantages", advantages[healthy].to(torch.float32))
+        frontier = _part_with_field(
+            frontier,
+            "metadata",
+            [
+                {
+                    "areal_objective": {
+                        "scaled_reward": float(scaled_rewards[i]),
+                        "active_tokens": int(token_counts[i]),
+                    }
+                }
+                for i in indices
+            ],
+        )
         return sample.with_parts([*sample.parts[:-1], frontier])
 
     def _pad_to_dp_multiple(self, part: Part) -> Part:

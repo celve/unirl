@@ -5,6 +5,7 @@ Public surface for the ``models`` training contract.
 
 from __future__ import annotations
 
+from .areal import ARealPPO, ARealPPOConfig
 from .bagel_flow_unigrpo import BagelFlowUniGRPO
 from .base import AlgorithmStepResult, StageAlgorithm
 from .cppo import CPPO, CPPOConfig
@@ -22,6 +23,8 @@ from .sft import SFT, FlowMatchSFT
 __all__ = [
     "SFT",
     "FlowMatchSFT",
+    "ARealPPO",
+    "ARealPPOConfig",
     "GRPO",
     "GRPOConfig",
     "GSPO",

@@ -13,6 +13,60 @@ from typing import Optional, Tuple
 import torch
 
 
+@torch.no_grad()
+def token_weighted_global_normalize(
+    values: torch.Tensor,
+    token_counts: torch.Tensor,
+    healthy_mask: torch.Tensor,
+    *,
+    eps: float = 1e-5,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Normalize trajectory values over their active-token multiplicities.
+
+    ``token_counts[i]`` is a frequency weight: the result is identical to
+    repeating ``values[i]`` that many times and running one FP64 batch
+    normalization with an unbiased standard deviation. Invalid or zero-token
+    rows receive zero and do not contribute to the statistics.
+
+    Returns ``(normalized_fp32, mean_fp64, std_fp64)``. Empty input statistics
+    are ``(0, 1)``; a single active token also uses standard deviation ``1``.
+    """
+    if values.ndim != 1 or token_counts.ndim != 1 or healthy_mask.ndim != 1:
+        raise ValueError("token_weighted_global_normalize expects three 1D tensors")
+    if values.shape != token_counts.shape or values.shape != healthy_mask.shape:
+        raise ValueError(
+            "token_weighted_global_normalize requires aligned values/counts/mask; "
+            f"got {tuple(values.shape)}, {tuple(token_counts.shape)}, {tuple(healthy_mask.shape)}"
+        )
+    if float(eps) < 0.0:
+        raise ValueError(f"token_weighted_global_normalize eps must be non-negative; got {eps}")
+    if bool((token_counts < 0).any()):
+        raise ValueError("token_weighted_global_normalize token counts must be non-negative")
+
+    device = values.device
+    normalized = torch.zeros(values.shape, dtype=torch.float32, device=device)
+    valid = healthy_mask.to(device=device, dtype=torch.bool)
+    valid = valid & torch.isfinite(values) & (token_counts.to(device=device) > 0)
+    if not bool(valid.any()):
+        return (
+            normalized,
+            torch.zeros((), dtype=torch.float64, device=device),
+            torch.ones((), dtype=torch.float64, device=device),
+        )
+
+    selected = values[valid].to(dtype=torch.float64)
+    weights = token_counts.to(device=device, dtype=torch.float64)[valid]
+    total = weights.sum()
+    mean = (selected * weights).sum() / total
+    if float(total) <= 1.0:
+        std = torch.ones((), dtype=torch.float64, device=device)
+    else:
+        variance = (weights * (selected - mean).square()).sum() / (total - 1.0)
+        std = variance.clamp_min(0.0).sqrt()
+    normalized[valid] = ((selected - mean) / (std + float(eps))).to(torch.float32)
+    return normalized, mean, std
+
+
 def finite_mean_std(values: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     """Population mean/std over finite entries of ``values``.
 
