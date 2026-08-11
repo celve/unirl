@@ -15,14 +15,16 @@ from unirl.rollout.env.tools.base import Tool
 
 _T = TypeVar("_T")
 
-_SERPER_URL = "https://google.serper.dev/search"
+_POLARIS_URL = "http://trpc-gpt-eval.production.polaris:8080"
+_POLARIS_TIMEOUT_SECONDS = 60
+_SERPER_URL = f"{_POLARIS_URL}/search"
 _SEARCH_MAX_ATTEMPTS = 5
 _SEARCH_RETRY_BACKOFF_SECONDS = 0.5
 _SEARCH_CONNECT_TIMEOUT_SECONDS = 10.0
 _SEARCH_READ_TIMEOUT_SECONDS = 30.0
 _SEARCH_TOTAL_TIMEOUT_SECONDS = 45.0
 
-_JINA_URL = "https://r.jina.ai/"
+_JINA_URL = f"{_POLARIS_URL}/"
 _JINA_ATTEMPTS = 3
 _JINA_TIMEOUT_SECONDS = 50.0
 _CONTENT_VALIDITY_ATTEMPTS = 8
@@ -66,6 +68,15 @@ def _run_sync(factory: Callable[[], Awaitable[_T]]) -> _T:
     except RuntimeError:
         return asyncio.run(factory())
     raise RuntimeError("AReaL tools require synchronous Tool.execute dispatch")
+
+
+def _polaris_headers(provider: str) -> dict[str, str]:
+    app_id = os.environ.get("POLARIS_APP_ID", "")
+    app_key = os.environ.get("POLARIS_APP_KEY", "")
+    if not app_id or not app_key:
+        raise RuntimeError("tool proxy credentials are not configured")
+    authorization = f"Bearer {app_id}:{app_key}?provider={provider}&timeout={_POLARIS_TIMEOUT_SECONDS}"
+    return {"Authorization": authorization, "Content-Type": "application/json"}
 
 
 class ARealSearchTool(Tool):
@@ -127,14 +138,14 @@ class ARealSearchTool(Tool):
             if any("\u4e00" <= char <= "\u9fff" for char in query)
             else {"q": query, "location": "United States", "gl": "us", "hl": "en"}
         )
-        headers = {
-            "X-API-KEY": os.environ.get("SERPER_KEY_ID", ""),
-            "Content-Type": "application/json",
-        }
         async with aiohttp.ClientSession(timeout=self._timeout) as session:
             for attempt in range(_SEARCH_MAX_ATTEMPTS):
                 try:
-                    async with session.post(_SERPER_URL, json=payload, headers=headers) as response:
+                    async with session.post(
+                        _SERPER_URL,
+                        json=payload,
+                        headers=_polaris_headers("serper"),
+                    ) as response:
                         text = await response.text()
                         if response.status < 200 or response.status >= 300:
                             raise RuntimeError("search service returned a non-success status")
@@ -346,13 +357,20 @@ class ARealVisitTool(Tool):
 
     async def _jina_readpage(self, url: str) -> str:
         timeout = aiohttp.ClientTimeout(total=_JINA_TIMEOUT_SECONDS)
-        headers = {"Authorization": f"Bearer {os.environ.get('JINA_API_KEYS', '')}"}
         async with aiohttp.ClientSession(timeout=timeout) as session:
             for attempt in range(_JINA_ATTEMPTS):
                 try:
-                    async with session.get(f"{_JINA_URL}{url}", headers=headers) as response:
+                    async with session.post(
+                        _JINA_URL,
+                        json={"url": url},
+                        headers=_polaris_headers("jina_ai"),
+                    ) as response:
                         if response.status == 200:
-                            return await response.text()
+                            body = await response.json(content_type=None)
+                            content = body["data"]["content"]
+                            if not isinstance(content, str):
+                                raise TypeError("page reader content must be text")
+                            return content
                         await response.read()
                         raise RuntimeError("page reader returned a non-success status")
                 except Exception:
