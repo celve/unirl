@@ -1,9 +1,12 @@
-"""AReaL-specific barrier training and concatenated trajectory assembly."""
+"""AReaL-specific colocated training and concatenated trajectory assembly."""
 
 from __future__ import annotations
 
+import json
 import logging
 import math
+import os
+import random
 import time
 from collections import Counter
 from typing import Any, Dict, List, Mapping, Optional, Tuple
@@ -29,6 +32,7 @@ from unirl.utils.hydra import parse_hydra_cfg, remote_hydra
 
 _PROTOCOL = "areal_deep_research/v1"
 _ROLLOUT_SHUTDOWN_TIMEOUT_S = 60.0
+_DATA_STATE_FILENAME = "areal_data_state.json"
 _REWARD_CLIP = 20.0
 _ADVANTAGE_EPS = 1e-5
 
@@ -151,7 +155,7 @@ def build_areal_part(trajectory: Sample) -> Part:
 
 
 class ARealTrainer(BaseTrainer):
-    """AReaL trajectory-level barrier trainer for deep-research text RL."""
+    """AReaL trajectory trainer with a colocated rolling rollout window."""
 
     def __init__(
         self,
@@ -171,6 +175,7 @@ class ARealTrainer(BaseTrainer):
         sync_cfg: DictConfig,
         logging_cfg: Optional[DictConfig] = None,
         stop: Optional[List[str]] = None,
+        max_concurrent_rollouts: Optional[int] = None,
         per_worker_inflight: int = 8,
         trajectory_dump_dir: str = "",
     ) -> None:
@@ -184,6 +189,7 @@ class ARealTrainer(BaseTrainer):
             stack_cfg=stack_cfg,
             sync_cfg=sync_cfg,
             stop=stop,
+            max_concurrent_rollouts=max_concurrent_rollouts,
             per_worker_inflight=per_worker_inflight,
         )
         self._trajectory_dumper = ARealTrajectoryDumper(trajectory_dump_dir)
@@ -194,11 +200,15 @@ class ARealTrainer(BaseTrainer):
             self.data_source = instantiate(data_source_cfg)
             self.sampling_params: Dict[str, BaseSamplingParams] = build_sampling_dict(sampling_cfg)
             self._group_size = total_samples_per_prompt(self.sampling_params)
+            self._max_concurrent_rollouts = int(
+                batch_size if max_concurrent_rollouts is None else max_concurrent_rollouts
+            )
             self._per_worker_inflight = int(per_worker_inflight)
             self._reward_bias = float(reward_transform_cfg.bias)
             self._reward_scale = float(reward_transform_cfg.scale)
             self._rollout_seed = int(cfg.get("seed", 0))
             self._sampling_seed_stride = int(rollout_cfg.config.harness.max_policy_calls) + 1
+            self._carried_rollouts: List[Sample] = []
 
             with placement(self.pool, fraction=1.0, shared_workers=True):
                 self.bundle = remote_hydra(bundle_cfg)
@@ -242,10 +252,14 @@ class ARealTrainer(BaseTrainer):
         stack_cfg: DictConfig,
         sync_cfg: Optional[DictConfig],
         stop: Optional[List[str]],
+        max_concurrent_rollouts: Optional[int],
         per_worker_inflight: int,
     ) -> None:
         if int(batch_size) <= 0:
             raise ValueError(f"batch_size must be positive; got {batch_size}")
+        concurrent = int(batch_size if max_concurrent_rollouts is None else max_concurrent_rollouts)
+        if concurrent < int(batch_size):
+            raise ValueError(f"max_concurrent_rollouts must be >= batch_size; got {concurrent} < {batch_size}")
         if int(per_worker_inflight) <= 0:
             raise ValueError(f"per_worker_inflight must be positive; got {per_worker_inflight}")
         if stop:
@@ -316,10 +330,12 @@ class ARealTrainer(BaseTrainer):
         self.backend.offload()
 
         tasks = self._build_trajectory_tasks(requests, rollout_id)
-        self._rollout_manager.submit(tasks)
+        carried = self._carried_rollouts
+        self._carried_rollouts = []
+        self._rollout_manager.submit([*carried, *tasks])
         groups = self._rollout_manager.collect(self.batch_size, current_version=self._train_version)
-        if not self._rollout_manager.empty:
-            raise RuntimeError("AReaL barrier rollout must leave RolloutManager empty")
+        self._carried_rollouts = self._rollout_manager.quiesce(current_version=self._train_version)
+        random.shuffle(groups)
 
         self.rollout.sleep()
         self.backend.onload()
@@ -327,7 +343,7 @@ class ARealTrainer(BaseTrainer):
 
     def _build_trajectory_tasks(self, requests: Sample, rollout_id: int) -> List[Sample]:
         tasks = []
-        stride = self.batch_size * self._group_size
+        stride = self._max_concurrent_rollouts * self._group_size
         for group_index, prompt in enumerate(requests.split()):
             for sibling_index in range(self._group_size):
                 trajectory_index = rollout_id * stride + group_index * self._group_size + sibling_index
@@ -660,6 +676,46 @@ class ARealTrainer(BaseTrainer):
             )
         return Part.concat([part, padding])
 
+    def _save_data_state(
+        self,
+        rollout_id: int,
+        num_rollouts: int,
+        *,
+        save_interval: int,
+        save_dir: Optional[str],
+    ) -> None:
+        if save_interval <= 0:
+            return
+        step = rollout_id + 1
+        if step % save_interval != 0 and step < num_rollouts:
+            return
+        base_dir = os.path.abspath(save_dir) if save_dir else os.path.join(os.getcwd(), "checkpoints")
+        path = os.path.join(base_dir, f"checkpoint-{step}", _DATA_STATE_FILENAME)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = f"{path}.tmp.{os.getpid()}"
+        try:
+            with open(tmp, "w") as handle:
+                json.dump(self.data_source.state_dict(), handle)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp, path)
+        finally:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+
+    def _load_data_state(self, load_dir: Optional[str], start_rollout: int) -> None:
+        if not load_dir:
+            return
+        path = os.path.join(os.path.abspath(load_dir), _DATA_STATE_FILENAME)
+        if os.path.exists(path):
+            with open(path) as handle:
+                self.data_source.load_state_dict(json.load(handle))
+            logger.info("Restored AReaL dataset cursor from %s", path)
+            return
+        logger.warning("No %s beside the checkpoint; fast-forwarding %d batches", _DATA_STATE_FILENAME, start_rollout)
+        for _ in range(start_rollout):
+            self.data_source.get_samples(self.batch_size)
+
     def train(
         self,
         *,
@@ -675,12 +731,18 @@ class ARealTrainer(BaseTrainer):
                 self.backend.get_optimizer_step_count(),
                 name="backend optimizer step count",
             )
-            for _ in range(start_rollout):
-                self.data_source.get_samples(self.batch_size)
-            self._init_wandb(num_rollouts=num_rollouts, extra={"areal_execution": "barrier"})
+            self._load_data_state(load_dir, start_rollout)
+            self._init_wandb(
+                num_rollouts=num_rollouts,
+                extra={
+                    "areal_execution": "colocated_window",
+                    "max_concurrent_rollouts": self._max_concurrent_rollouts,
+                },
+            )
 
             for rollout_id in range(start_rollout, num_rollouts):
-                inputs = self.data_source.get_samples(self.batch_size)
+                root_count = self._max_concurrent_rollouts if rollout_id == start_rollout else self.batch_size
+                inputs = self.data_source.get_samples(root_count)
                 training_progress = rollout_id / max(1, num_rollouts - 1)
                 result, mean_reward = self.train_step(
                     inputs,
@@ -694,6 +756,12 @@ class ARealTrainer(BaseTrainer):
                     save_interval=save_interval,
                     save_dir=save_dir,
                     save_mode=save_mode,
+                )
+                self._save_data_state(
+                    rollout_id,
+                    num_rollouts,
+                    save_interval=save_interval,
+                    save_dir=save_dir,
                 )
         finally:
             try:

@@ -31,8 +31,9 @@ system_instruction: |-
 
   Current date: ${run_date}
 
-num_devices: 2 # Colocated barrier mode.
+num_devices: 2 # Colocated rolling-window mode.
 batch_size: 128
+max_concurrent_rollouts: 160
 num_rollouts: 2730 # 10 * floor(35000 / 128)
 trajectory_dump_dir: ${oc.env:TRAJECTORY_DUMP_DIR,outputs/deep_research/trajectories}
 

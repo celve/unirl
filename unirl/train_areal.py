@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""AReaL deep-research barrier training entry point."""
+"""AReaL deep-research colocated training entry point."""
 
 from __future__ import annotations
 
@@ -49,6 +49,7 @@ def main(cfg: DictConfig) -> None:
             sync_cfg=cfg.sync,
             logging_cfg=cfg.get("logging"),
             stop=cfg.get("stop"),
+            max_concurrent_rollouts=cfg.get("max_concurrent_rollouts", cfg.batch_size),
             per_worker_inflight=cfg.get("per_worker_inflight", 8),
             trajectory_dump_dir=cfg.trajectory_dump_dir,
         )
