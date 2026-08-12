@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import re
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, Mapping, Optional, Sequence
@@ -11,6 +12,7 @@ from typing import TYPE_CHECKING, Any, Literal, Mapping, Optional, Sequence
 from unirl.rollout.env.areal_deep_research import extract_first_answer
 from unirl.rollout.harness.protocol import BaseHarnessConfig, HarnessContext, HarnessOutcome
 from unirl.types.primitives import Texts
+from unirl.types.sample import _part_with_field
 from unirl.types.sampling import ARSamplingParams
 
 if TYPE_CHECKING:
@@ -52,6 +54,8 @@ class _ControllerState:
     tool_calls: int = 0
     search_calls: int = 0
     visit_calls: int = 0
+    controller_error_type: Optional[str] = None
+    controller_error_message: Optional[str] = None
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "_ControllerState":
@@ -185,6 +189,8 @@ class ARealDeepResearchHarness:
             )
         except Exception as exc:  # noqa: BLE001 - isolate controller failure
             logger.warning("AReaL deep-research controller failed (%s)", type(exc).__name__, exc_info=False)
+            state.controller_error_type = type(exc).__name__
+            state.controller_error_message = _safe_error_message(exc)
             return self._outcome(
                 sample,
                 state,
@@ -248,7 +254,7 @@ class ARealDeepResearchHarness:
         context: HarnessContext,
         started_at: float,
     ) -> "Sample":
-        generation_request = sample.fork(1, sampling_params=sampling)
+        generation_request = self._with_sampling_seed(sample, state).fork(1, sampling_params=sampling)
         for attempt in range(self.config.max_generation_attempts):
             self._check_wall(state, started_at)
             try:
@@ -269,6 +275,19 @@ class ARealDeepResearchHarness:
                     raise _InfrastructureFailure("wall_timeout") from None
                 time.sleep(delay)
         raise _InfrastructureFailure("generation_retry_exhausted")
+
+    @staticmethod
+    def _with_sampling_seed(sample: "Sample", state: _ControllerState) -> "Sample":
+        root = sample.parts[0]
+        control = dict(root.control)
+        ar_control = dict(control.get("ar") or {})
+        seed_base = ar_control.get("sampling_seed_base")
+        if seed_base is None:
+            return sample
+        ar_control["sampling_seed"] = (int(seed_base) + int(state.policy_call_count)) % ((1 << 63) - 1)
+        control["ar"] = ar_control
+        seeded_root = _part_with_field(root, "control", control)
+        return sample.with_parts([seeded_root, *sample.parts[1:]])
 
     def _check_boundary(self, context: HarnessContext, state: _ControllerState, started_at: float) -> None:
         self._check_wall(state, started_at)
@@ -342,12 +361,20 @@ class ARealDeepResearchHarness:
             "visit_calls": state.visit_calls,
             "retry_count": state.retry_count,
             "elapsed_seconds": state.elapsed_seconds,
+            "controller_error_type": state.controller_error_type,
+            "controller_error_message": state.controller_error_message,
         }
         if prediction is not None:
             metadata["prediction"] = prediction
         if controller_state is not None:
             metadata["controller_state"] = dict(controller_state)
         return HarnessOutcome(sample=sample, status=status, metadata=metadata)
+
+
+def _safe_error_message(exc: BaseException) -> str:
+    message = " ".join(str(exc).split())[:500]
+    message = re.sub(r"Bearer\s+[^\s,;]+", "Bearer <redacted>", message, flags=re.IGNORECASE)
+    return re.sub(r"(?i)(api[_-]?key|app[_-]?key)(\s*[=:]\s*)[^\s,;]+", r"\1\2<redacted>", message)
 
 
 __all__ = ["ARealDeepResearchHarness", "ARealDeepResearchHarnessConfig"]

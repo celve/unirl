@@ -16,6 +16,7 @@ from unirl.distributed.group.placement import placement, remote
 from unirl.distributed.tensor import hydrate
 from unirl.rollout.manager import RolloutManager
 from unirl.train.stack import TrainStepResult
+from unirl.trainer.areal_dump import ARealTrajectoryDumper
 from unirl.trainer.base import BaseTrainer, build_sampling_dict, prepare_input_sample, unwrap_replicated_int
 from unirl.types.advantages import token_weighted_global_normalize
 from unirl.types.conditions import TextTokenCondition
@@ -171,6 +172,7 @@ class ARealTrainer(BaseTrainer):
         logging_cfg: Optional[DictConfig] = None,
         stop: Optional[List[str]] = None,
         per_worker_inflight: int = 8,
+        trajectory_dump_dir: str = "",
     ) -> None:
         self._validate_config(
             cfg=cfg,
@@ -184,6 +186,7 @@ class ARealTrainer(BaseTrainer):
             stop=stop,
             per_worker_inflight=per_worker_inflight,
         )
+        self._trajectory_dumper = ARealTrajectoryDumper(trajectory_dump_dir)
         super().__init__(cfg=cfg, logging_cfg=logging_cfg)
 
         try:
@@ -194,6 +197,8 @@ class ARealTrainer(BaseTrainer):
             self._per_worker_inflight = int(per_worker_inflight)
             self._reward_bias = float(reward_transform_cfg.bias)
             self._reward_scale = float(reward_transform_cfg.scale)
+            self._rollout_seed = int(cfg.get("seed", 0))
+            self._sampling_seed_stride = int(rollout_cfg.config.harness.max_policy_calls) + 1
 
             with placement(self.pool, fraction=1.0, shared_workers=True):
                 self.bundle = remote_hydra(bundle_cfg)
@@ -305,12 +310,12 @@ class ARealTrainer(BaseTrainer):
             root_control={"ar": {"stop": []}},
         )
 
-    def _collect_groups(self, requests: Sample) -> List[List[Sample]]:
+    def _collect_groups(self, requests: Sample, rollout_id: int) -> List[List[Sample]]:
         self.rollout.wake_up()
         self._rollout_manager.sync_weights(self.weight_sync, output_version=self._train_version)
         self.backend.offload()
 
-        tasks = [prompt for prompt in requests.split() for _ in range(self._group_size)]
+        tasks = self._build_trajectory_tasks(requests, rollout_id)
         self._rollout_manager.submit(tasks)
         groups = self._rollout_manager.collect(self.batch_size, current_version=self._train_version)
         if not self._rollout_manager.empty:
@@ -319,6 +324,25 @@ class ARealTrainer(BaseTrainer):
         self.rollout.sleep()
         self.backend.onload()
         return groups
+
+    def _build_trajectory_tasks(self, requests: Sample, rollout_id: int) -> List[Sample]:
+        tasks = []
+        stride = self.batch_size * self._group_size
+        for group_index, prompt in enumerate(requests.split()):
+            for sibling_index in range(self._group_size):
+                trajectory_index = rollout_id * stride + group_index * self._group_size + sibling_index
+                seed_base = (self._rollout_seed + trajectory_index * self._sampling_seed_stride) % ((1 << 63) - 1)
+                root = prompt.parts[0]
+                control = dict(root.control)
+                ar_control = dict(control.get("ar") or {})
+                ar_control["sampling_seed_base"] = seed_base
+                control["ar"] = ar_control
+                metadata = dict(root.metadata[0] or {}) if root.metadata else {}
+                metadata.update({"sibling_index": sibling_index, "sampling_seed_base": seed_base})
+                seeded_root = _part_with_field(root, "control", control)
+                seeded_root = _part_with_field(seeded_root, "metadata", [metadata])
+                tasks.append(prompt.with_parts([seeded_root, *prompt.parts[1:]]))
+        return tasks
 
     def train_step(
         self,
@@ -329,11 +353,18 @@ class ARealTrainer(BaseTrainer):
     ) -> Tuple[TrainStepResult, float]:
         t0 = time.perf_counter()
         requests = self._build_request_sample(inputs, rollout_id)
-        groups = self._collect_groups(requests)
+        groups = self._collect_groups(requests, rollout_id)
         trajectories = [trajectory for group in groups for trajectory in group]
         train_rows = self._prepare_training_rows(trajectories, rollout_id)
         eligible = [part is not None for part in train_rows]
         rewards = self._score_trajectories(trajectories, rollout_id, eligible=eligible)
+        dump_summary = self._trajectory_dumper.dump(groups, rewards, rollout_id=rollout_id)
+        logger.info(
+            "rollout %d dumped %d trajectories with %d identical sibling groups",
+            rollout_id,
+            dump_summary["trajectories"],
+            dump_summary["fully_identical_assistant_groups"],
+        )
         advantages, scaled_rewards, token_counts, norm_mean, norm_std = self._areal_advantages(
             train_rows,
             rewards,

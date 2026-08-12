@@ -34,6 +34,7 @@ system_instruction: |-
 num_devices: 2 # Colocated barrier mode.
 batch_size: 128
 num_rollouts: 2730 # 10 * floor(35000 / 128)
+trajectory_dump_dir: ${oc.env:TRAJECTORY_DUMP_DIR,outputs/deep_research/trajectories}
 
 worker_max_concurrency: 10
 per_worker_inflight: 4
@@ -79,6 +80,7 @@ backend:
   fsdp_cfg:
     _target_: unirl.train.configs.FSDPConfig
     param_dtype: bf16
+    master_dtype: fp32
     cpu_offload: false
     mixed_precision: true
     fsdp_mode: full

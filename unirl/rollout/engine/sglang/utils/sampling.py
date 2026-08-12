@@ -67,7 +67,7 @@ def resolve_sampling(config: Any, sample: Sample) -> ResolvedSampling:
         "top_k": raw_top_k if raw_top_k > 0 else -1,
         "n": n,
     }
-    for key in ("stop", "stop_token_ids", "skip_special_tokens"):
+    for key in ("stop", "stop_token_ids", "skip_special_tokens", "sampling_seed"):
         if key in control_ar:
             block[key] = control_ar[key]
 

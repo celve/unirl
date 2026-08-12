@@ -50,6 +50,7 @@ def main(cfg: DictConfig) -> None:
             logging_cfg=cfg.get("logging"),
             stop=cfg.get("stop"),
             per_worker_inflight=cfg.get("per_worker_inflight", 8),
+            trajectory_dump_dir=cfg.trajectory_dump_dir,
         )
         guard.claim_signals()
         trainer.train(
