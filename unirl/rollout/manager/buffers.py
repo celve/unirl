@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import time
 from collections import Counter, defaultdict, deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Callable, Deque, Dict, List, Optional
 
 if TYPE_CHECKING:
@@ -47,6 +48,10 @@ class PendingGroups:
     def discard(self, root: str) -> int:
         return len(self._by_root.pop(root, []))
 
+    @property
+    def group_size(self) -> int:
+        return self._group_size
+
     def __len__(self) -> int:
         return len(self._by_root)
 
@@ -55,6 +60,7 @@ class PendingGroups:
 class _CompleteChunk:
     group_count: int
     samples: List["Sample"]
+    completed_at: float = field(default_factory=time.monotonic)
 
 
 class CompleteGroups:
@@ -101,7 +107,7 @@ class CompleteGroups:
             chunk_positions = positions[chunk_index]
             if chunk_positions != list(range(chunk_positions[0], chunk_positions[0] + len(chunk_positions))):
                 raise RuntimeError("rollout filter cannot interleave Samples from different logical roots")
-            filtered.append(_CompleteChunk(chunk.group_count, chunk_samples))
+            filtered.append(_CompleteChunk(chunk.group_count, chunk_samples, chunk.completed_at))
         self._chunks = filtered
 
     def take(self, group_count: int) -> Optional[List[List["Sample"]]]:
@@ -126,6 +132,13 @@ class CompleteGroups:
     def group_count(self) -> int:
         return sum(chunk.group_count for chunk in self._chunks)
 
+    @property
+    def oldest_age_seconds(self) -> float:
+        """Seconds the earliest ready group has waited for a consumer."""
+        if not self._chunks:
+            return 0.0
+        return max(0.0, time.monotonic() - self._chunks[0].completed_at)
+
     def __len__(self) -> int:
         return len(self._chunks)
 
@@ -139,7 +152,7 @@ class CompleteGroups:
             raise RuntimeError(
                 f"batch chunk reported {chunk.group_count} roots but Sample.split produced {len(groups)}"
             )
-        self._chunks.extendleft(_CompleteChunk(1, [sample]) for sample in reversed(groups))
+        self._chunks.extendleft(_CompleteChunk(1, [sample], chunk.completed_at) for sample in reversed(groups))
 
 
 __all__ = ["CompleteGroups", "PendingGroups", "roots_of"]

@@ -1,4 +1,4 @@
-"""AReaL-specific colocated training and concatenated trajectory assembly."""
+"""AReaL-specific asynchronous training and concatenated trajectory assembly."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from omegaconf import DictConfig
 
 from unirl.distributed.group.placement import placement, remote
 from unirl.distributed.tensor import hydrate
-from unirl.rollout.manager import RolloutManager
+from unirl.rollout.manager import AdmissionPolicy, RolloutManager, keep_within_lag
 from unirl.train.stack import TrainStepResult
 from unirl.trainer.areal_dump import ARealTrajectoryDumper
 from unirl.trainer.base import BaseTrainer, build_sampling_dict, prepare_input_sample, unwrap_replicated_int
@@ -32,6 +32,7 @@ from unirl.utils.hydra import parse_hydra_cfg, remote_hydra
 
 _PROTOCOL = "areal_deep_research/v1"
 _ROLLOUT_SHUTDOWN_TIMEOUT_S = 60.0
+_ROLLOUT_DRAIN_TIMEOUT_S = 120.0
 _DATA_STATE_FILENAME = "areal_data_state.json"
 _REWARD_CLIP = 20.0
 _ADVANTAGE_EPS = 1e-5
@@ -155,7 +156,16 @@ def build_areal_part(trajectory: Sample) -> Part:
 
 
 class ARealTrainer(BaseTrainer):
-    """AReaL trajectory trainer with a colocated rolling rollout window."""
+    """AReaL trajectory trainer with bounded-staleness asynchronous rollout and training.
+
+    Rollout and training hold disjoint GPU slabs, so generation keeps running while the
+    consumer scores and takes an optimizer step. A :class:`AdmissionPolicy` bounds how far
+    the producer may run ahead: at most ``max_concurrent_rollouts`` grouped workflows are
+    in flight, and the producer may lead the consumer by ``(max_staleness + 1) * batch_size``
+    prompt roots. Each optimizer step publishes full weights and stamps the next policy
+    version; roots whose earliest turn is more than ``max_staleness`` versions behind are
+    rejected rather than trained on.
+    """
 
     def __init__(
         self,
@@ -177,6 +187,8 @@ class ARealTrainer(BaseTrainer):
         stop: Optional[List[str]] = None,
         max_concurrent_rollouts: Optional[int] = None,
         per_worker_inflight: int = 8,
+        max_staleness: int = 4,
+        train_fraction: float = 0.5,
         trajectory_dump_dir: str = "",
     ) -> None:
         self._validate_config(
@@ -191,6 +203,8 @@ class ARealTrainer(BaseTrainer):
             stop=stop,
             max_concurrent_rollouts=max_concurrent_rollouts,
             per_worker_inflight=per_worker_inflight,
+            max_staleness=max_staleness,
+            train_fraction=train_fraction,
         )
         self._trajectory_dumper = ARealTrajectoryDumper(trajectory_dump_dir)
         super().__init__(cfg=cfg, logging_cfg=logging_cfg)
@@ -208,16 +222,27 @@ class ARealTrainer(BaseTrainer):
             self._reward_scale = float(reward_transform_cfg.scale)
             self._rollout_seed = int(cfg.get("seed", 0))
             self._sampling_seed_stride = int(rollout_cfg.config.harness.max_policy_calls) + 1
-            self._carried_rollouts: List[Sample] = []
+            self._train_fraction = float(train_fraction)
+            self._policy = AdmissionPolicy(
+                max_concurrent_roots=self._max_concurrent_rollouts,
+                max_staleness=int(max_staleness),
+                consumer_batch=self.batch_size,
+            )
+            self._root_ordinal = 0
+            self._validate_slabs(rollout_cfg)
 
-            with placement(self.pool, fraction=1.0, shared_workers=True):
+            rollout_parsed = parse_hydra_cfg(rollout_cfg)
+            with placement(self.pool, fraction=self._train_fraction, shared_workers=True):
                 self.bundle = remote_hydra(bundle_cfg)
                 self.pipeline = remote_hydra(pipeline_cfg, bundle=self.bundle)
                 self.backend = remote_hydra(backend_cfg, bundle=self.bundle)
                 self.reward = remote_hydra(reward_cfg)
                 self.algorithm = remote_hydra(algorithm_cfg, pipeline=self.pipeline)
                 self.stack = remote_hydra(stack_cfg, fsdp_backend=self.backend, algorithm=self.algorithm)
-                self._build_colocated_rollout(rollout_cfg, sync_cfg)
+                self.weight_sync = remote_hydra(sync_cfg, backend=self.backend)
+            with placement(self.pool, fraction=1.0 - self._train_fraction, shared_workers=True):
+                self.rollout = remote(**rollout_parsed)
+            self._connect_weight_sync()
 
             indices = [
                 index
@@ -231,6 +256,8 @@ class ARealTrainer(BaseTrainer):
                 launchers=launchers,
                 capacities=[self._per_worker_inflight] * len(launchers),
                 group_size=self._group_size,
+                filter_fn=keep_within_lag(self._policy.max_staleness),
+                policy=self._policy,
             )
             self._train_version = unwrap_replicated_int(
                 self.backend.get_optimizer_step_count(),
@@ -254,6 +281,8 @@ class ARealTrainer(BaseTrainer):
         stop: Optional[List[str]],
         max_concurrent_rollouts: Optional[int],
         per_worker_inflight: int,
+        max_staleness: int,
+        train_fraction: float,
     ) -> None:
         if int(batch_size) <= 0:
             raise ValueError(f"batch_size must be positive; got {batch_size}")
@@ -262,6 +291,10 @@ class ARealTrainer(BaseTrainer):
             raise ValueError(f"max_concurrent_rollouts must be >= batch_size; got {concurrent} < {batch_size}")
         if int(per_worker_inflight) <= 0:
             raise ValueError(f"per_worker_inflight must be positive; got {per_worker_inflight}")
+        if int(max_staleness) < 0:
+            raise ValueError(f"max_staleness must be non-negative; got {max_staleness}")
+        if not 0.0 < float(train_fraction) < 1.0:
+            raise ValueError(f"train_fraction must leave a non-empty rollout slab; got {train_fraction}")
         if stop:
             raise ValueError("ARealTrainer requires an empty policy stop list")
         reward_bias = float(reward_transform_cfg.get("bias"))
@@ -284,10 +317,13 @@ class ARealTrainer(BaseTrainer):
                 "per_worker_inflight"
             )
         if sync_cfg is None:
-            raise ValueError("ARealTrainer requires colocated TensorWeightSync")
+            raise ValueError("ARealTrainer requires a cross-slab NCCLWeightSync; add a `sync:` block")
         sync_target = str(sync_cfg.get("_target_", ""))
-        if not sync_target.endswith("TensorWeightSync"):
-            raise ValueError(f"ARealTrainer requires colocated TensorWeightSync; got {sync_target!r}")
+        if not sync_target.endswith("NCCLWeightSync"):
+            raise ValueError(
+                f"ARealTrainer runs disjoint rollout and training slabs and requires NCCLWeightSync; "
+                f"got sync._target_={sync_target!r}"
+            )
 
         episode = rollout_cfg.get("config", {}).get("episode_sampling")
         if episode is None:
@@ -305,15 +341,37 @@ class ARealTrainer(BaseTrainer):
             raise ValueError("sampling.temperature must equal rollout episode temperature")
         if abs(sampling_temperature - algorithm_temperature) > 1e-9:
             raise ValueError("sampling.temperature must equal algorithm.sampling_temperature")
-        if (int(batch_size) * group_size) % int(cfg.num_devices) != 0:
-            raise ValueError("batch_size*samples_per_prompt must be divisible by num_devices")
 
-    def _build_colocated_rollout(self, rollout_cfg: DictConfig, sync_cfg: DictConfig) -> None:
-        self.backend.offload()
-        self.rollout = remote(**parse_hydra_cfg(rollout_cfg))
-        self.weight_sync = remote_hydra(sync_cfg, backend=self.backend, rollout=self.rollout)
-        self.rollout.sleep()
-        self.backend.onload()
+    def _validate_slabs(self, rollout_cfg: DictConfig) -> None:
+        self._train_devices = int(round(self.num_devices * self._train_fraction))
+        self._rollout_devices = self.num_devices - self._train_devices
+        if self._train_devices <= 0 or self._rollout_devices <= 0:
+            raise ValueError(
+                f"train_fraction={self._train_fraction} splits {self.num_devices} devices into "
+                f"{self._train_devices} train / {self._rollout_devices} rollout; both slabs must be non-empty"
+            )
+        rows = self.batch_size * self._group_size
+        if rows % self._train_devices != 0:
+            raise ValueError(
+                f"batch_size * samples_per_prompt = {rows} is not divisible by the train slab size "
+                f"{self._train_devices}; adjust batch_size / samples_per_prompt / train_fraction"
+            )
+        tp_size = int(rollout_cfg.get("config", {}).get("inner", {}).get("tp_size", 1))
+        if self._rollout_devices % tp_size != 0:
+            raise ValueError(f"rollout slab of {self._rollout_devices} devices is not divisible by tp_size={tp_size}")
+
+    def _connect_weight_sync(self) -> None:
+        """One-time cross-slab NCCL handshake; the rollout slab stays resident afterwards."""
+        addr, port = self.weight_sync.pick_master()[0]
+        targets = self.rollout.tp_zero_workers
+        self.weight_sync.set_rollout_targets(targets, self.rollout.role_name)
+        self.weight_sync.connect(
+            master_addr=addr,
+            master_port=port,
+            num_rollout_gpus=len(targets) * self.rollout.tp_size,
+            tp_size=self.rollout.tp_size,
+            pp_size=self.rollout.pp_size,
+        )
 
     def _build_request_sample(self, inputs: Sample, rollout_id: int) -> Sample:
         return prepare_input_sample(
@@ -324,29 +382,49 @@ class ARealTrainer(BaseTrainer):
             root_control={"ar": {"stop": []}},
         )
 
-    def _collect_groups(self, requests: Sample, rollout_id: int) -> List[List[Sample]]:
-        self.rollout.wake_up()
+    def _collect_groups(self, rollout_id: int) -> Tuple[List[List[Sample]], Dict[str, float]]:
+        publish_start = time.perf_counter()
         self._rollout_manager.sync_weights(self.weight_sync, output_version=self._train_version)
-        self.backend.offload()
+        publish_seconds = time.perf_counter() - publish_start
 
-        tasks = self._build_trajectory_tasks(requests, rollout_id)
-        carried = self._carried_rollouts
-        self._carried_rollouts = []
-        self._rollout_manager.submit([*carried, *tasks])
+        submitted = self._top_up(rollout_id)
+        collect_start = time.perf_counter()
         groups = self._rollout_manager.collect(self.batch_size, current_version=self._train_version)
-        self._carried_rollouts = self._rollout_manager.quiesce(current_version=self._train_version)
-        random.shuffle(groups)
+        collect_seconds = time.perf_counter() - collect_start
 
-        self.rollout.sleep()
-        self.backend.onload()
-        return groups
+        stats = self._rollout_manager.stats
+        random.Random(self._rollout_seed + rollout_id).shuffle(groups)
+        metrics = {
+            "runtime/publish_seconds": publish_seconds,
+            "runtime/collect_seconds": collect_seconds,
+            "runtime/submitted_roots": float(submitted),
+            "runtime/pending_roots": float(stats.pending_roots),
+            "runtime/running_roots": float(stats.active_roots),
+            "runtime/carried_groups": float(stats.ready_groups),
+            "runtime/carry_age_seconds": stats.ready_age_seconds,
+            "runtime/oldest_running_age_seconds": stats.oldest_active_age_seconds,
+            "runtime/accepted_roots": float(stats.accepted),
+            "runtime/stale_rejected_roots": float(stats.rejected),
+            "runtime/producer_lead_roots": float(stats.lead),
+        }
+        return groups, metrics
 
-    def _build_trajectory_tasks(self, requests: Sample, rollout_id: int) -> List[Sample]:
+    def _top_up(self, rollout_id: int) -> int:
+        """Refill the pending queue to the staleness window so admission never starves."""
+        capacity = self._rollout_manager.pending_capacity
+        if capacity <= 0:
+            return 0
+        requests = self._build_request_sample(self.data_source.get_samples(capacity), rollout_id)
+        self._rollout_manager.submit(self._build_trajectory_tasks(requests))
+        return capacity
+
+    def _build_trajectory_tasks(self, requests: Sample) -> List[Sample]:
         tasks = []
-        stride = self._max_concurrent_rollouts * self._group_size
-        for group_index, prompt in enumerate(requests.split()):
+        for prompt in requests.split():
+            root_ordinal = self._root_ordinal
+            self._root_ordinal += 1
             for sibling_index in range(self._group_size):
-                trajectory_index = rollout_id * stride + group_index * self._group_size + sibling_index
+                trajectory_index = root_ordinal * self._group_size + sibling_index
                 seed_base = (self._rollout_seed + trajectory_index * self._sampling_seed_stride) % ((1 << 63) - 1)
                 root = prompt.parts[0]
                 control = dict(root.control)
@@ -362,18 +440,19 @@ class ARealTrainer(BaseTrainer):
 
     def train_step(
         self,
-        inputs: Sample,
         *,
         training_progress: float = 0.0,
         rollout_id: int = 0,
     ) -> Tuple[TrainStepResult, float]:
         t0 = time.perf_counter()
-        requests = self._build_request_sample(inputs, rollout_id)
-        groups = self._collect_groups(requests, rollout_id)
+        groups, runtime_metrics = self._collect_groups(rollout_id)
         trajectories = [trajectory for group in groups for trajectory in group]
         train_rows = self._prepare_training_rows(trajectories, rollout_id)
         eligible = [part is not None for part in train_rows]
+        judge_start = time.perf_counter()
         rewards = self._score_trajectories(trajectories, rollout_id, eligible=eligible)
+        runtime_metrics["runtime/judge_seconds"] = time.perf_counter() - judge_start
+        runtime_metrics.update(self._trajectory_metrics(trajectories))
         dump_summary = self._trajectory_dumper.dump(groups, rewards, rollout_id=rollout_id)
         logger.info(
             "rollout %d dumped %d trajectories with %d identical sibling groups",
@@ -397,9 +476,32 @@ class ARealTrainer(BaseTrainer):
             rollout_id=rollout_id,
             training_progress=training_progress,
             t0=t0,
+            runtime_metrics=runtime_metrics,
         )
         self._train_version += result.optimizer_updates
         return result, mean_reward
+
+    def _trajectory_metrics(self, trajectories: List[Sample]) -> Dict[str, float]:
+        """Per-phase wall time from the harness plus the policy-version spread of the batch."""
+        policy_seconds = []
+        tool_seconds = []
+        versions = []
+        for trajectory in trajectories:
+            for part in trajectory.gen_parts():
+                if part.output_version is not None:
+                    versions.append(int(part.output_version))
+            metadata = trajectory.parts[-1].metadata if trajectory.parts else None
+            harness = (metadata[0] or {}).get("harness") if metadata else None
+            if isinstance(harness, Mapping):
+                policy_seconds.append(float(harness.get("policy_seconds") or 0.0))
+                tool_seconds.append(float(harness.get("tool_seconds") or 0.0))
+        return {
+            "runtime/policy_seconds_mean": (sum(policy_seconds) / len(policy_seconds)) if policy_seconds else 0.0,
+            "runtime/tool_seconds_mean": (sum(tool_seconds) / len(tool_seconds)) if tool_seconds else 0.0,
+            "runtime/tool_seconds_max": max(tool_seconds, default=0.0),
+            "runtime/version_span": float(max(versions) - min(versions)) if versions else 0.0,
+            "runtime/version_lag_max": float(self._train_version - min(versions)) if versions else 0.0,
+        }
 
     def _prepare_training_rows(
         self,
@@ -537,6 +639,7 @@ class ARealTrainer(BaseTrainer):
         rollout_id: int,
         training_progress: float,
         t0: float,
+        runtime_metrics: Dict[str, float],
     ) -> Tuple[TrainStepResult, float]:
         if len(train_rows) != len(trajectories):
             raise RuntimeError("trajectory/training-row cardinality mismatch")
@@ -571,6 +674,7 @@ class ARealTrainer(BaseTrainer):
             max(depths, default=0),
             dict(sorted(Counter(depths).items())),
         )
+        update_start = time.perf_counter()
         if prepared:
             train_part = self._pad_to_dp_multiple(Part.concat(prepared))
             result = self.stack.train_track(train_part, training_progress=float(training_progress))
@@ -578,6 +682,11 @@ class ARealTrainer(BaseTrainer):
         else:
             result = TrainStepResult(0.0, 0.0, 0.0, False, [], {}, optimizer_updates=0)
             train_rows_count = 0
+        runtime_metrics["runtime/update_seconds"] = time.perf_counter() - update_start
+        step_seconds = time.perf_counter() - t0
+        runtime_metrics["runtime/roots_per_minute"] = (
+            (len(trajectories) / self._group_size) * 60.0 / max(step_seconds, 1e-9)
+        )
 
         log_sample = self._build_log_sample(
             trajectories,
@@ -593,7 +702,7 @@ class ARealTrainer(BaseTrainer):
             rollout_id,
             result,
             log_sample,
-            step_time_s=time.perf_counter() - t0,
+            step_time_s=step_seconds,
             extra_metrics={
                 "agent/mean_turns": (sum(depths) / len(depths)) if depths else 0.0,
                 "agent/max_turns": max(depths) if depths else 0,
@@ -604,6 +713,7 @@ class ARealTrainer(BaseTrainer):
                 "objective/scaled_reward_token_std": norm_std,
                 "objective/active_tokens": int(token_counts[healthy].sum().item()),
                 "objective/healthy_trajectories": int(healthy.sum().item()),
+                **runtime_metrics,
             },
         )
         return result, mean_reward
@@ -735,17 +845,18 @@ class ARealTrainer(BaseTrainer):
             self._init_wandb(
                 num_rollouts=num_rollouts,
                 extra={
-                    "areal_execution": "colocated_window",
+                    "areal_execution": "async_bounded_staleness",
                     "max_concurrent_rollouts": self._max_concurrent_rollouts,
+                    "max_staleness": self._policy.max_staleness,
+                    "pending_window_roots": self._policy.window,
+                    "train_devices": self._train_devices,
+                    "rollout_devices": self._rollout_devices,
                 },
             )
 
             for rollout_id in range(start_rollout, num_rollouts):
-                root_count = self._max_concurrent_rollouts if rollout_id == start_rollout else self.batch_size
-                inputs = self.data_source.get_samples(root_count)
                 training_progress = rollout_id / max(1, num_rollouts - 1)
                 result, mean_reward = self.train_step(
-                    inputs,
                     training_progress=training_progress,
                     rollout_id=rollout_id,
                 )
@@ -782,8 +893,13 @@ class ARealTrainer(BaseTrainer):
         shutdown = getattr(rollout, "shutdown", None)
         pool = getattr(self, "pool", None)
         try:
+            # Draining waits on in-flight tool calls; abandon it rather than hold the GPUs.
             if manager is not None:
-                manager.close()
+                run_with_timeout(
+                    manager.close,
+                    timeout=_ROLLOUT_DRAIN_TIMEOUT_S,
+                    what="AReaL rollout drain",
+                )
         finally:
             try:
                 if callable(shutdown):

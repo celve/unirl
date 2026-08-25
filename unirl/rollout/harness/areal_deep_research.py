@@ -54,6 +54,8 @@ class _ControllerState:
     tool_calls: int = 0
     search_calls: int = 0
     visit_calls: int = 0
+    policy_seconds: float = 0.0
+    tool_seconds: float = 0.0
     controller_error_type: Optional[str] = None
     controller_error_message: Optional[str] = None
 
@@ -144,7 +146,9 @@ class ARealDeepResearchHarness:
                 sample = self._generate(sample, self.sampling, state, context, started_at)
                 state.policy_call_count += 1
 
+                step_started_at = time.monotonic()
                 observation, done, info = self.env.step(sample)
+                state.tool_seconds += time.monotonic() - step_started_at
                 self._record_tool_call(state, info)
                 if observation is not None:
                     sample = sample.observe(observation, role="user")
@@ -257,8 +261,12 @@ class ARealDeepResearchHarness:
         generation_request = self._with_sampling_seed(sample, state).fork(1, sampling_params=sampling)
         for attempt in range(self.config.max_generation_attempts):
             self._check_wall(state, started_at)
+            generate_started_at = time.monotonic()
             try:
-                return context.generate(self.ENGINE, generation_request)
+                try:
+                    return context.generate(self.ENGINE, generation_request)
+                finally:
+                    state.policy_seconds += time.monotonic() - generate_started_at
             except Exception as exc:  # noqa: BLE001 - redact retry failures
                 state.retry_count += 1
                 logger.warning(
@@ -361,6 +369,8 @@ class ARealDeepResearchHarness:
             "visit_calls": state.visit_calls,
             "retry_count": state.retry_count,
             "elapsed_seconds": state.elapsed_seconds,
+            "policy_seconds": state.policy_seconds,
+            "tool_seconds": state.tool_seconds,
             "controller_error_type": state.controller_error_type,
             "controller_error_message": state.controller_error_message,
         }
