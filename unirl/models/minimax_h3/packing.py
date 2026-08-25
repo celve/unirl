@@ -30,14 +30,18 @@ from .config import (
 )
 from .vendor import (
     MINIMAX_H3_AUDIO_CHANNELS,
+    MINIMAX_H3_CANVAS_MULTIPLE,
     MINIMAX_H3_FPS,
+    MINIMAX_H3_MAX_ASPECT_RATIO,
+    MINIMAX_H3_MAX_PIXELS,
+    MINIMAX_H3_MIN_ASPECT_RATIO,
+    MINIMAX_H3_SHORT_EDGE,
     MINIMAX_H3_TEXT_TAG,
     MiniMaxH3PackedSequence,
     align_num_frames,
     audio_latent_num_frames,
     build_packed_sequence,
     build_row_timesteps,
-    resolve_canvas_size,
     video_latent_num_frames,
 )
 
@@ -93,27 +97,50 @@ class MiniMaxH3Geometry:
     def resolve(cls, *, height: int, width: int, num_frames: int) -> "MiniMaxH3Geometry":
         """Validate a requested ``(height, width, num_frames)`` against H3.
 
-        MiniMax-H3 does NOT accept an arbitrary canvas. It was released for a
-        768 pixel SHORT EDGE only, both axes a multiple of 32, area soft-capped
-        at 768x1344 -- so the canvas is a function of the aspect ratio alone.
-        Frame count is likewise snapped: the video VAE encodes 17 pixel frames
-        per chunk and drops 3 trailing latent frames, so only ``17n + 5`` counts
-        round-trip, and duration is clamped to [5, 15]s at a fixed 24 fps.
+        The canvas constraints are STRUCTURAL, and there are only three: both
+        axes a multiple of 32, aspect ratio within 1:4..4:1, and area no larger
+        than ``768*1344``. The multiple of 32 is the load-bearing one -- it is
+        what makes ``height/16`` (VAE) divisible by the transformer's patch of 2,
+        so a violation misaligns the packed rows rather than merely degrading
+        quality.
 
-        This raises rather than silently re-resolving. A recipe asking for
-        512x768 is not a slightly-off request that should be rounded -- it is
-        outside what the checkpoint can do, and quietly training at a different
-        resolution than the recipe states is exactly the kind of drift that is
-        impossible to spot later. The error carries the nearest legal values.
+        The 768 pixel short edge is NOT one of them. ``resolve_canvas_size`` is
+        a DEFAULTS helper -- it answers "given only an aspect ratio, what canvas
+        should I use?" and starts the short edge at 768 as its choice. Reading it
+        as a validator (which this method used to do) turned a default into a
+        floor and rejected every canvas below 768, forcing ~21.5k packed rows on
+        every run. verl-omni's H3 recipe trains at 256x384 -- 3.9k rows, a 5.5x
+        shorter sequence -- so the floor was never real. Area is a cap, and a
+        cap only bites from above.
+
+        Frame count is a genuine snap: the video VAE encodes 17 pixel frames per
+        chunk and drops 3 trailing latent frames, so only ``17n + 5`` counts
+        round-trip. This still raises rather than silently re-resolving, because
+        training at a different geometry than the recipe states is the kind of
+        drift that is impossible to spot later. The error carries the nearest
+        legal value.
         """
-        canvas_height, canvas_width = resolve_canvas_size(float(width), float(height))
-        if (int(height), int(width)) != (canvas_height, canvas_width):
+        h, w = int(height), int(width)
+        multiple = MINIMAX_H3_CANVAS_MULTIPLE
+        if h % multiple or w % multiple:
             raise ValueError(
-                f"MiniMaxH3Geometry: height={height} width={width} is not a MiniMax-H3 canvas. The model was "
-                f"released for a 768 pixel short edge with both axes a multiple of 32; for this aspect ratio the "
-                f"only legal canvas is height={canvas_height} width={canvas_width}. There is no smaller setting "
-                f"for a cheaper run -- 768x768 for 5s (~22k packed rows) is the floor."
+                f"MiniMaxH3Geometry: height={h} width={w} must both be multiples of {multiple}. That is what keeps "
+                f"the latent dims (axis/{MINIMAX_H3_SPATIAL_COMPRESSION}) divisible by the transformer patch of 2; "
+                f"nearest legal canvas is height={max(multiple, round(h / multiple) * multiple)} "
+                f"width={max(multiple, round(w / multiple) * multiple)}."
             )
+        ratio = w / h
+        if not MINIMAX_H3_MIN_ASPECT_RATIO <= ratio <= MINIMAX_H3_MAX_ASPECT_RATIO:
+            raise ValueError(
+                f"MiniMaxH3Geometry: aspect ratio {w}:{h} ({ratio:g}) is outside the 1:4..4:1 range MiniMax-H3 "
+                f"supports."
+            )
+        if h * w > MINIMAX_H3_MAX_PIXELS:
+            raise ValueError(
+                f"MiniMaxH3Geometry: height={h} width={w} is {h * w} pixels, above H3's {MINIMAX_H3_MAX_PIXELS} "
+                f"area cap ({MINIMAX_H3_SHORT_EDGE}x1344). Reduce either axis; the cap is an upper bound only."
+            )
+        canvas_height, canvas_width = h, w
         aligned = align_num_frames(int(num_frames))
         if aligned != int(num_frames):
             raise ValueError(

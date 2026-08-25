@@ -81,12 +81,14 @@ class MiniMaxH3PipelineConfig:
     # with ODE (``eta=0``, no log-prob) so only video carries policy signal.
     audio_joint_sde: bool = True
 
-    # Generation defaults. MiniMax-H3 was released for a 768 pixel SHORT EDGE
-    # only, with a soft area cap of 768x1344 and both axes rounded to a multiple
-    # of 32, so height/width are resolved from an aspect ratio rather than set
-    # freely (``vendor.resolve_canvas_size``). Duration is clamped to [5, 15]s
-    # at a fixed 24 fps. There is no "make it small for a cheap RL run" setting:
-    # 768x768 for 5s is the floor, ~22k packed rows.
+    # Generation defaults, used only when a recipe pins no height/width of its
+    # own: ``vendor.resolve_canvas_size`` turns an aspect ratio into a canvas by
+    # starting the short edge at 768. That 768 is this helper's DEFAULT, not a
+    # limit -- the checkpoint's actual canvas constraints are both axes a
+    # multiple of 32, aspect within 1:4..4:1, and area at most 768x1344 (a cap,
+    # so it only bites from above). A recipe is free to pin a smaller canvas;
+    # 256x384 is ~3.9k packed rows against ~21.5k at 768x768. Duration is
+    # clamped to [5, 15]s at a fixed 24 fps.
     default_aspect_width: float = 1.0
     default_aspect_height: float = 1.0
     default_duration_seconds: float = 5.0

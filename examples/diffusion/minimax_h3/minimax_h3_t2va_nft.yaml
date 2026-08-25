@@ -1,0 +1,309 @@
+# @package _global_
+# MiniMax-H3 t2va (text -> video + stereo audio) DiffusionNFT — trainside FSDP.
+#
+# This recipe is a deliberate port of verl-omni's
+# `examples/diffusionnft_trainer/minimax_h3/run_minimax_h3_t2va_lora.sh`, the
+# only H3 RL setup known to produce a rising reward curve. Every hyperparameter
+# below is that script's value; where UniRL has no counterpart it is called out
+# as a DEVIATION rather than silently re-chosen. The sibling
+# `minimax_h3_t2va_trainside.yaml` (Flow-GRPO, 768x768) is the setup whose curve
+# was flat.
+#
+# FOUR THINGS DIFFER FROM THE FLOW-GRPO RECIPE, and they compound:
+#
+#   1. FORWARD PROCESS, NOT REVERSE. DiffusionNFT never walks the SDE. It picks
+#      a noise level, jumps there, and takes an MSE against the rollout's clean
+#      latent. So there is no log-prob, no importance ratio, and no reason to
+#      replay a subset of steps: `training_timestep_fraction: 1.0` trains on all
+#      10. Flow-GRPO could only afford 4 of 10 (`sde_indices`) because replay
+#      builds one autograd graph across every replayed step.
+#   2. 256x384, NOT 768x768. ~3.9k packed rows against ~21.5k — a 5.4x shorter
+#      sequence. The old recipe believed 768 was a hard floor; it is the default
+#      of an aspect-ratio helper, not a checkpoint limit. See
+#      `MiniMaxH3Geometry.resolve`.
+#   3. 512 SAMPLES PER STEP, NOT 64. 32 prompts x group 16. The shorter sequence
+#      is what pays for it.
+#   4. IMAGEBIND, NOT VIDEOPICKSCORE. videopickscore scores ONE frame, so
+#      neither motion nor audio/video sync is in the objective at all. ImageBind
+#      scores 5 temporal segments against 3 audio clips, which is what makes A/V
+#      agreement trainable. NonCommercial licence — opt-in by using this recipe.
+#
+# Together: 512 samples x 10 timesteps = 5120 gradient terms per step against
+# Flow-GRPO's 64 x 4 = 256, at 1/5.4 the sequence length.
+#
+# Launch (1 node x 8 GPUs):
+#   bash examples/run_experiment_multinode_taiji.sh diffusion/minimax_h3/minimax_h3_t2va_nft
+
+num_devices: 8
+# verl-omni data.train_batch_size=32. Prompts per rollout; total samples per
+# step is this x sampling.samples_per_prompt = 512.
+batch_size: 32
+# verl-omni algorithm.global_std defaults True: one batch-wide std, not per-group.
+adv_use_global_std: true
+# verl-omni trainer.total_training_steps=1000.
+num_rollouts: 1000
+
+logging:
+  report_to_wandb: true
+  project_name: ${oc.env:WANDB_PROJECT,unirl-minimax-h3-t2va}
+  run_name: ${oc.env:WANDB_RUN_NAME,minimax_h3_t2va_nft}
+  entity: ${oc.env:WANDB_ENTITY,null}
+  tags: [minimax-h3, t2va, diffusionnft, trainside, audio, stereo, verl-omni-aligned]
+  log_media: true
+  media_max_items: 2
+  media_log_interval: 100
+
+bundle:
+  _target_: unirl.models.minimax_h3.bundle.MiniMaxH3Bundle.from_config
+  config:
+    _target_: unirl.models.minimax_h3.config.MiniMaxH3PipelineConfig
+    pretrained_model_ckpt_path: ${oc.env:PRETRAINED_MODEL,MiniMaxAI/MiniMax-H3}
+    model_precision: bf16
+    # Both VAEs are fp32 by checkpoint contract. The AUDIO VAE especially:
+    # the reference reports bf16 output ~20 dB too quiet.
+    vae_dtype: fp32
+    audio_vae_dtype: fp32
+    autocast_precision: bf16
+    trajectory_precision: fp16
+    logprob_precision: fp32
+    # verl-omni rollout.pipeline.video_flow_shift=12.0; audio_shift is H3's own
+    # default. Both are ROLLOUT-only under NFT — the forward process jumps to a
+    # noise level rather than walking either grid.
+    video_shift: 12.0
+    audio_shift: 3.0
+    text_encoder_hidden_layer: 50
+    # Inert under NFT (no SDE, so no per-step log-prob to combine), left true so
+    # the value means the same thing if this bundle is reused by a GRPO recipe.
+    audio_joint_sde: true
+    # The Qwen3-VL conditioner is 32B (~64 GB bf16) — larger than the trainable
+    # DiT's per-rank shard. Parking it on CPU is what makes 8x96GB fit.
+    aux_components_on_cpu: true
+    # 256x384x124 decodes fast enough on GPU; on CPU it would dominate a rollout
+    # that now spends far less time denoising than the 768x768 recipe did.
+    vae_components_on_cpu: false
+    # 33B eager-loads ~66 GB per rank. Meta-init defers materialization until
+    # after sharding; the bundle hands the fp32 pin list through so the
+    # mixed-dtype layout survives `to_empty`.
+    meta_init_transformer: true
+
+pipeline:
+  _target_: unirl.models.minimax_h3.pipeline.MiniMaxH3Pipeline.from_bundle
+  config: ${bundle.config}
+  strategy:
+    # INERT AT eta=0. Every SDE kernel collapses to the same deterministic Euler
+    # step when no noise is injected, which is the ODE rollout verl-omni does
+    # (`rollout.calculate_log_probs=False`). Kept as CPS so that raising eta for
+    # a diagnostic gives the kernel the GRPO recipe measured as the safe one.
+    _target_: unirl.sde.kernels.CPSSDEStrategy
+
+backend:
+  _target_: unirl.train.backend.fsdp.FSDPBackend
+  # BOTH block classes, matching verl-omni's
+  # `transformer_layer_cls_to_wrap=[MiniMaxH3TransformerBlock,MiniMaxH3TokenRefinerBlock]`.
+  # This is what lets the LoRA target list stay unscoped: the refiner's
+  # `attn.to_q` / `ff.net.*` share suffixes with the denoising stack, and the
+  # GRPO recipe had to add `module_prefix: transformer_blocks` to keep adapters
+  # out of it — otherwise 24 LoRA params land outside every fully_shard group
+  # and no collective DP-syncs their grads. `EmaLoraConfig` has no
+  # `module_prefix`, so wrapping the refiner is both the aligned answer and the
+  # only one available here.
+  block_class_names: ["MiniMaxH3TransformerBlock", "MiniMaxH3TokenRefinerBlock"]
+  trainable_attr: transformer
+  fsdp_cfg:
+    _target_: unirl.train.configs.FSDPConfig
+    param_dtype: bf16
+    cpu_offload: false
+    mixed_precision: true
+    fsdp_mode: full
+    reshard_after_forward: true
+    # verl-omni model.enable_gradient_checkpointing=True.
+    activation_checkpointing: true
+    use_torch_compile: false
+    # LOAD-BEARING. With root_wrap false the fp32-pinned leftovers (proj_in,
+    # audio_proj_in, time_embedder, proj_out, audio_proj_out, rope) sit outside
+    # every fully_shard group, so MixedPrecisionPolicy never all-gathers a bf16
+    # compute copy of them and they keep the precision the checkpoint stores.
+    # Flipping this to true silently runs the timestep MLP in bf16 — and since
+    # H3 conditions on t = 1 - sigma, bf16 near 1.0 has ~0.008 spacing.
+    root_wrap: false
+  optimizer_cfg:
+    _target_: unirl.train.backend.base.OptimizerConfig
+    # verl-omni actor.optim: lr 3e-4, weight_decay 1e-4, betas [0.9,0.999],
+    # override_optimizer_config={eps: 1e-8}.
+    #
+    # NOTE the epsilon: the Flow-GRPO recipe runs 1e-12 because its measured
+    # grad_norm was ~5e-5, small enough that a 1e-8 eps dominated Adam's
+    # denominator and degraded it toward SGD. That measurement was taken with
+    # 256 gradient terms at 22k rows under a clipped-ratio objective. NFT's MSE
+    # produces gradients of an entirely different scale, and verl-omni's own
+    # runs rise at 1e-8, so 1e-8 is what alignment means here. If grad_norm
+    # again logs ~1e-5, revisit this line first.
+    learning_rate: 3.0e-4
+    adam_beta1: 0.9
+    adam_beta2: 0.999
+    adam_epsilon: 1.0e-8
+    weight_decay: 1.0e-4
+  scheduler_cfg:
+    _target_: unirl.train.backend.base.LrSchedulerConfig
+    type: constant
+    warmup_steps: 0
+    total_steps: 1000
+  # The dual-adapter EMA DiffusionNFT needs: "default" trains, "old" is the
+  # frozen reference the loss blends against and the rollout samples under
+  # (verl-omni model.policy_state_adapters=["default","old"],
+  # rollout.rollout_adapter=old).
+  ema_lora_cfg:
+    _target_: unirl.train.configs.EmaLoraConfig
+    # verl-omni model.lora_rank=64 / lora_alpha=128.
+    rank: 64
+    alpha: 128
+    dropout: 0.0
+    bias: none
+    task_type: FEATURE_EXTRACTION
+    shadow_adapter: old
+    # verl-omni old_policy_decay_schedule=delayed_linear_to_0_999, which is
+    # (warmup 75, rate 0.0075, cap 0.999) applied as
+    # `old <- decay*old + (1-decay)*new`. UniRL's "warmup" decay type is the
+    # same function of the same three numbers, and its update is the same
+    # direction, so this is an exact port rather than an approximation.
+    ema_decay_type: warmup
+    ema_flat_steps: 75
+    ema_uprate: 0.0075
+    ema_uphold: 0.999
+    # DEVIATION: verl-omni refreshes the shadow every
+    # `old_policy_update_interval=2` steps; UniRL's EMA has no interval knob and
+    # refreshes at every rollout end (i.e. interval 1). For the first 75 steps
+    # the decay is 0, so both are a hard copy on every refresh and the two agree
+    # exactly; they only diverge once the ramp starts.
+    timing: rollout_end
+    # verl-omni model.target_modules — attention + FFN, and now covering the
+    # token refiner too since it is wrapped above.
+    target_modules:
+      - attn.to_q
+      - attn.to_k
+      - attn.to_v
+      - attn.to_out.0
+      - ff.net.0.proj
+      - ff.net.2
+
+rollout:
+  _target_: unirl.rollout.engine.trainside.engine.TrainsideRolloutEngine
+  stage_attrs: [diffusion]
+  # Batch-1: the packed sequence carries UNBATCHED per-row metadata
+  # (position_ids / token_tags / timestep_indices), so the engine chunks to one
+  # sample per generate() call. Same discipline as the bagel navit recipe.
+  forward_batch_size: 1
+
+reward:
+  _target_: unirl.reward.service.RewardService
+  backend:
+    _target_: unirl.reward.local.t2av_composite.T2AVCompositeScorer
+    base_device: cuda
+    config:
+      _target_: unirl.reward.local.t2av_composite.T2AVCompositeSpec
+      device: auto
+      batch_size: 2
+      # verl-omni reward.aggregation=weighted_sum with clap.weight=1.0 and
+      # imagebind.weight=1.0. UniRL's composite is the same raw weighted sum, so
+      # these are the literal verl-omni weights, not a renormalised pair.
+      #
+      # imagebind takes its default spec, whose mode is already `audio_video` —
+      # verl-omni's `imagebind.mode=audio_video`. Its checkpoint is loaded by the
+      # imagebind package from `./.checkpoints/imagebind_huge.pth` relative to
+      # the launch directory, the same path verl-omni points at.
+      #
+      # LICENCE: ImageBind is CC-BY-NC-SA. This recipe is NonCommercial.
+      weights:
+        clap: 1.0
+        imagebind: 1.0
+
+algorithm:
+  _target_: unirl.algorithms.diffusionnft.DiffusionNFT
+  stage_attr: diffusion
+  conditions_cls:
+    _target_: hydra.utils.get_class
+    path: unirl.models.minimax_h3.conditions.MiniMaxH3Conditions
+  params: ${sampling}
+  # verl-omni actor.diffusion_loss.mix_beta=0.1 — the blend between the trained
+  # adapter and the frozen `old` one that forms the positive/negative pair.
+  beta: 0.1
+  adv_clip_max: 5.0
+  # UniRL's "raw" and verl-omni's "continuous" are the SAME mapping:
+  # clamp(adv/adv_clip_max/2 + 0.5, 0, 1). Verified against
+  # `DiffusionNFTLoss._advantage_to_reward_prob`, where "continuous" falls
+  # through every branch to exactly that line.
+  adv_mode: raw
+  use_adaptive_weight: true
+  # Read the rollout's own 10-step schedule and train on all of it.
+  train_timestep_mode: all
+  shuffle_train_timesteps: true
+  apply_time_shift_in_loss: false
+  # verl-omni algorithm.timestep_fraction=1.0. The sd3 recipe uses 0.99; H3 gets
+  # the verl-omni value.
+  training_timestep_fraction: 1.0
+  # DEVIATION: verl-omni adds `ref_kl_coef * MSE(new_pred, base_pred)` at
+  # ref_kl_coef=1e-4, a pull toward the LoRA-free base model. UniRL's DiffusionNFT
+  # does not implement it and rejects kl_coef > 0. Implementing it costs a third
+  # forward per timestep (the base model, adapters disabled) to buy a term
+  # weighted 1e-4 against a policy loss scaled by adv_clip_max=5 — so it is
+  # omitted deliberately, not overlooked.
+  kl_coef: 0.0
+
+stack:
+  _target_: unirl.train.stack.TrainStack
+  micro_batch_size: 1
+  # verl-omni actor.optim.clip_grad=1.0.
+  max_grad_norm: 1.0
+  num_updates_per_batch: 1
+
+data_source:
+  _target_: unirl.data.data_source.MultimodalRLDataSource
+  args:
+    run:
+      data_path: datasets/pickscore/train.txt
+      eval_data_path: datasets/pickscore/test.txt
+      seed: 42
+    algorithm:
+      prompts_per_rollout: ${batch_size}
+
+sampling:
+  _target_: unirl.types.sampling.DiffusionSamplingParams
+  # verl-omni rollout.pipeline.num_inference_steps=10.
+  num_inference_steps: 10
+  # Inert: the checkpoint is guidance-distilled
+  # (verl-omni rollout.pipeline.true_cfg_scale=1.0).
+  guidance_scale: 1.0
+  # verl-omni HEIGHT=256 WIDTH=384. Both multiples of 32, aspect 3:2, area far
+  # under the 768x1344 cap — legal on all three structural constraints.
+  #
+  # verl-omni also passes `aspect_ratio=16:9` alongside these, which does NOT
+  # describe 384x256 (that is 3:2). There, aspect_ratio is a separate
+  # CONDITIONING input and height/width are the canvas; UniRL has no
+  # aspect-ratio conditioning input, so there is nothing to port.
+  height: 256
+  width: 384
+  # verl-omni NUM_FRAMES=121, which H3's own `align_num_frames` snaps up to 124
+  # (the VAE maps 17n+5 pixel frames to 5n+2 latent frames, so 124 -> 37 latent
+  # frames). 124 is therefore the value verl-omni actually renders; UniRL
+  # requires it stated exactly rather than silently snapping.
+  num_frames: 124
+  # DiffusionNFT is a forward-process objective: the rollout is a deterministic
+  # ODE whose only output of interest is the clean final latent
+  # (verl-omni rollout.calculate_log_probs=False).
+  eta: 0.0
+  # verl-omni rollout.n=16 — the GRPO group size, and with global std the
+  # advantage estimator's denominator comes from the whole batch of 512.
+  samples_per_prompt: 16
+  seed: 42
+  init_same_noise: false
+  autocast_precision: bf16
+  trajectory_precision: fp16
+  logprob_precision: fp32
+  scheduler:
+    # num_sde_steps: 0 IS the forward-process switch. It makes
+    # `resolve_sde_indices` return [], which `is_forward_process` reads as "pure
+    # ODE, record no log-probs" and which makes the stage store only the
+    # terminal clean latent.
+    _target_: unirl.utils.scheduler_utils.AllSDEScheduler
+    num_timesteps: ${..num_inference_steps}
+    num_sde_steps: 0
