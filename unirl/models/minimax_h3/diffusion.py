@@ -71,12 +71,10 @@ def _combine_modality_logp(
 def pack_dual_streams(video_rows: torch.Tensor, audio_rows: torch.Tensor) -> torch.Tensor:
     """Flatten ``[B, V, Cv]`` + ``[B, A, Ca]`` into one ``[B, V*Cv + A*Ca]`` tensor.
 
-    Forward-process algorithms (DiffusionNFT) are written against a SINGLE
-    latent tensor: they noise it, ask for one prediction and take one MSE. H3
-    denoises two streams, so both have to ride in one tensor for that contract
-    to hold -- and both have to be IN it, because the reward (ImageBind on
-    audio+video) scores their agreement, which a video-only objective cannot
-    move. Bit-compatible with verl-omni's ``pack_video_audio_rows``.
+    Forward-process algorithms noise a SINGLE latent tensor and take one MSE
+    over it, so both streams have to ride in one tensor to reach the objective
+    -- and audio has to be in it, because the reward scores audio/video
+    agreement. Bit-compatible with verl-omni's ``pack_video_audio_rows``.
     """
     batch = video_rows.shape[0]
     return torch.cat([video_rows.reshape(batch, -1), audio_rows.reshape(batch, -1)], dim=1)
@@ -245,12 +243,8 @@ class MiniMaxH3DiffusionStage(DiffusionStage[MiniMaxH3Conditions]):
         sde_sorted = sorted(sde_indices) if sde_indices is not None else list(range(num_steps))
         sde_set = set(sde_sorted)
         needed = set(compute_trajectory_positions(sde_sorted, num_steps))
-        # The terminal position unconditionally: it is the clean latent the VAE
-        # decodes and the only one a forward-process algorithm (DiffusionNFT)
-        # reads. Under an SDE recipe it arrives anyway as the `i+1` of the last
-        # sde index, which is why this was never missed; under `sde_indices=[]`
-        # it is the ONLY position, and without this line `stored_pairs` is empty
-        # and the stack below raises. Mirrors sd3.
+        # An SDE recipe gets the terminal position for free as the `i+1` of its
+        # last index; `sde_indices=[]` does not, and stacks an empty list. (sd3)
         needed.add(num_steps)
 
         stored_pairs: List[Tuple[int, torch.Tensor]] = []
