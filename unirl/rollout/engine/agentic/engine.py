@@ -138,9 +138,11 @@ class AgenticRolloutEngine(BaseRolloutEngine):
     def get_memory_info(self) -> Dict[str, float]:
         return self._inner.get_memory_info()
 
+    @distributed(dispatch_mode=Dispatch.BROADCAST)
     def pause(self) -> None:
         self._inner.pause()
 
+    @distributed(dispatch_mode=Dispatch.BROADCAST)
     def resume(self) -> None:
         self._inner.resume()
 

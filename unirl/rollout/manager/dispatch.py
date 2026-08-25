@@ -154,7 +154,7 @@ class RolloutPool:
                 return
 
             try:
-                ready = [unit for unit in running if unit.pending.ready()]
+                ready = self._ready_among(running)
             except BaseException as exc:
                 self._record_failure(exc)
                 return
@@ -171,6 +171,21 @@ class RolloutPool:
                     self._running.remove(unit)
                     self._completed.append(unit)
                 self._condition.notify_all()
+
+    @staticmethod
+    def _ready_among(running: List[_PendingUnit]) -> List[_PendingUnit]:
+        """Probe every in-flight launch, in one call where the pending type offers it.
+
+        Polling hundreds of launches one at a time costs a core on the driver; a pending
+        type without ``ready_among`` still works, one probe each.
+        """
+        if not running:
+            return []
+        batched = getattr(type(running[0].pending), "ready_among", None)
+        if batched is None:
+            return [unit for unit in running if unit.pending.ready()]
+        resolved = set(map(id, batched([unit.pending for unit in running])))
+        return [unit for unit in running if id(unit.pending) in resolved]
 
     def _plan_launches(self) -> List[tuple[int, int, "Sample"]]:
         """Reserve launcher slots for queued tasks; caller holds the lock."""
