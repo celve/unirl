@@ -346,6 +346,18 @@ class PendingHandleCall:
         done, _ = ray.wait(self._refs, num_returns=len(self._refs), timeout=0)
         return len(done) == len(self._refs)
 
+    @staticmethod
+    def ready_among(calls: List["PendingHandleCall"]) -> List["PendingHandleCall"]:
+        """Those of ``calls`` fully resolved, probed in one ``ray.wait`` rather than one each.
+
+        Polling hundreds of in-flight calls individually costs a core on the driver.
+        """
+        refs = [ref for call in calls for ref in call._refs]
+        if not refs:
+            return []
+        done = set(ray.wait(refs, num_returns=len(refs), timeout=0)[0])
+        return [call for call in calls if all(ref in done for ref in call._refs)]
+
     def wait(self) -> None:
         """Block until every worker finishes, without collecting; re-raises worker errors."""
         ray.get(self._refs)
