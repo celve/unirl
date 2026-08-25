@@ -35,9 +35,13 @@
 #   bash examples/run_experiment_multinode_taiji.sh diffusion/minimax_h3/minimax_h3_t2va_nft
 
 num_devices: 8
-# verl-omni data.train_batch_size=32. Prompts per rollout; total samples per
-# step is this x sampling.samples_per_prompt = 512.
-batch_size: 32
+# DEVIATION. verl-omni data.train_batch_size=32, which x16 is 512 samples/step
+# and OOMs a 2.2 TB host in the reward phase (~265 GB in each of 8 rollout
+# workers; 128 samples peaks at 26 GB/rank, so the cost is superlinear).
+# samples_per_prompt keeps verl-omni's 16 because the group size is what the
+# advantage estimator divides by; this is the knob that gives. Raise it back on
+# a host that fits it. Must stay divisible by num_devices, as must the product.
+batch_size: 8
 # verl-omni algorithm.global_std defaults True: one batch-wide std, not per-group.
 adv_use_global_std: true
 # verl-omni trainer.total_training_steps=1000.
