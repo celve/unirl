@@ -71,10 +71,9 @@ def _combine_modality_logp(
 def pack_dual_streams(video_rows: torch.Tensor, audio_rows: torch.Tensor) -> torch.Tensor:
     """Flatten ``[B, V, Cv]`` + ``[B, A, Ca]`` into one ``[B, V*Cv + A*Ca]`` tensor.
 
-    Forward-process algorithms noise a SINGLE latent tensor and take one MSE
-    over it, so both streams have to ride in one tensor to reach the objective
-    -- and audio has to be in it, because the reward scores audio/video
-    agreement. Bit-compatible with verl-omni's ``pack_video_audio_rows``.
+    Forward-process algorithms noise a single latent tensor and take one MSE over
+    it, so audio only reaches the objective by riding along with video -- and it
+    has to, because the reward scores their agreement.
     """
     batch = video_rows.shape[0]
     return torch.cat([video_rows.reshape(batch, -1), audio_rows.reshape(batch, -1)], dim=1)
@@ -420,8 +419,8 @@ class MiniMaxH3DiffusionStage(DiffusionStage[MiniMaxH3Conditions]):
     def nft_clean_latents(self, segment: LatentSegment) -> torch.Tensor:
         """The clean ``x0`` a forward-process algorithm should train on.
 
-        Overrides the default ``segment.latents[:, -1]``, which is the VIDEO
-        half only. Both streams are packed so the objective covers audio too.
+        Overrides the caller's default of ``segment.latents[:, -1]``, which is
+        the video half only.
         """
         require(
             segment.latents is not None and segment.aux_latents is not None,
@@ -440,16 +439,13 @@ class MiniMaxH3DiffusionStage(DiffusionStage[MiniMaxH3Conditions]):
     ) -> torch.Tensor:
         """One packed forward at an arbitrary ``(xt, sigma)`` -- no SDE iteration.
 
-        ``sample`` is the ``[video|audio]`` tensor from :func:`pack_dual_streams`
-        and the return value is packed the same way, so the caller never sees
-        that H3 has two streams.
+        ``sample`` and the return value are both packed by
+        :func:`pack_dual_streams`, so the caller never sees the two streams.
 
-        BOTH STREAMS TAKE THE SAME SIGMA. That is not a simplification: the
-        video/audio shift split (12 vs 3) is a property of the REVERSE schedule,
-        which is what ``generate`` walks. A forward-process objective does not
-        walk it -- it picks a noise level and jumps there directly -- so there is
-        no second grid to be on. verl-omni's adapter passes ``audio_timestep =
-        video_timestep`` here for the same reason.
+        Both streams take the same sigma. The video/audio shift split describes
+        the reverse schedule that ``generate`` walks, and a forward-process
+        objective jumps to a noise level instead of walking it, so there is no
+        second grid to be on.
         """
         require(
             int(sample.shape[0]) == 1,
