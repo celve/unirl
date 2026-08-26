@@ -111,12 +111,14 @@ backend:
     learning_rate: 1.0e-4
     adam_beta1: 0.9
     adam_beta2: 0.999
-    # MEASURED. At 768x768 with four replayed steps this objective produced
-    # grad_norm ~5e-5, putting the per-coordinate gradient below the usual 1e-8
-    # so that eps dominated Adam's denominator and degraded it toward SGD. 1e-12
-    # is negligible at either gradient scale and far above fp32 underflow, so it
-    # is kept — but the shorter sequence and new reward should raise grad_norm,
-    # and if it settles near 1e-2 this line stops mattering.
+    # MEASURED, AND STILL LOAD-BEARING AT THIS CANVAS. grad_norm is 3e-5 here,
+    # against ~5e-5 at 768x768 with four steps -- the shorter sequence did not
+    # change it, because the per-sample log-prob is a MEAN over ~354k latent
+    # elements, so the policy gradient is attenuated by element count no matter
+    # how long the sequence is. That puts the per-coordinate gradient far below
+    # the usual 1e-8, where eps would dominate Adam's denominator and degrade it
+    # toward SGD. At 1e-12 eps sits ~3 orders below sqrt(v), so Adam rescales the
+    # tiny gradient away as designed. Do not "fix" the small grad_norm.
     adam_epsilon: 1.0e-12
     weight_decay: 0.0
   scheduler_cfg:
@@ -180,11 +182,12 @@ reward:
 algorithm:
   _target_: unirl.algorithms.flowgrpo.FlowGRPO
   stage_attr: diffusion
-  # Tight, because the ratio is exp of an element-MEAN log-prob difference over
-  # ~350k elements and moves fast. `clip_fraction` and `ratio_max` are logged
-  # every step — if the clip binds on most elements the step is capped no matter
-  # how good the advantage is, which reads as a flat curve. Check them before
-  # touching anything else here.
+  # INERT as configured, and measured so: with num_updates_per_batch=1 and
+  # old_logp_source=replay, both sides of the ratio are computed at the same
+  # weights, so ratio is exactly 1 and clip_fraction exactly 0. The objective is
+  # then a plain policy gradient with a GRPO baseline -- correct, just one update
+  # per rollout. This value only starts mattering if num_updates_per_batch rises,
+  # which is also the cheapest way to get more out of a ~30-minute rollout.
   clip_range: 5.0e-3
   clip_schedule: constant
   # Both sides of the ratio come from stage.replay at pre-update weights, so any
