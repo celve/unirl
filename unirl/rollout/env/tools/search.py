@@ -1,50 +1,46 @@
-"""SearchTool — batched web search via Serper or SerpApi (LIN-519, hardened).
+"""SearchTool — batched web search through the Polaris gateway (LIN-892).
 
-A concrete :class:`~unirl.rollout.env.tools.base.Tool` for the deep-research
-agent: given an array of query strings it returns the top web results per query
-as text. Two providers, selected by ``$SEARCH_PROVIDER`` (or the constructor):
+Given an array of query strings, returns the top web results per query as text.
+Credentials and endpoint come from :mod:`~unirl.rollout.env.tools.polaris`; there is no
+per-provider key to configure.
 
-- ``serper``  (default): Serper — ``POST serper.dev`` with an ``X-API-KEY`` header.
-- ``serpapi``          : SerpApi — ``GET serpapi.com`` with an ``api_key`` param.
-
-Both read the API key from ``$SERPER_KEY_ID``. ``execute`` is synchronous and
-thread-safe (it holds no state) so it runs cleanly under
-concurrent trajectory threads (:meth:`ToolEnvironment.step`).
+The schema wording, locale choice, retry budget and result formatting are inherited
+verbatim from AReaL's Tongyi DeepResearch ``tool_search.py``. **Do not reword the output
+while LIN-714's AReaL comparison is running** — those strings are the observation the
+policy reads, and the comparison is against AReaL's own reward curve. The failure text
+deliberately omits the exception, so a transport error cannot echo a credential.
 """
 
 from __future__ import annotations
 
-import os
-import time
+import asyncio
+import json
 from typing import Any, Dict, List
 
-import requests
+import aiohttp
 
 from unirl.rollout.env.tools.base import Tool
+from unirl.rollout.env.tools.polaris import POLARIS_URL, SEARCH_PATH, polaris_headers, run_sync
 
-_SERPER_URL = "https://google.serper.dev/search"
-_SERPAPI_URL = "https://serpapi.com/search"
+_MAX_ATTEMPTS = 5
+_RETRY_BACKOFF_SECONDS = 0.5
+_CONNECT_TIMEOUT_SECONDS = 10.0
+_READ_TIMEOUT_SECONDS = 30.0
+_TOTAL_TIMEOUT_SECONDS = 45.0
 
 
 class SearchTool(Tool):
-    """Google web search via Serper or SerpApi. Accepts one or more queries;
-    returns the top results per query as text. Requires ``$SERPER_KEY_ID``;
-    ``$SEARCH_PROVIDER=serpapi`` switches from Serper to SerpApi."""
+    """Batched Google web search via the gateway's ``serper`` provider."""
 
     name = "search"
 
-    def __init__(
-        self,
-        *,
-        top_k: int = 10,
-        timeout: float = 30.0,
-        provider: str = "serper",
-        max_retries: int = 3,
-    ) -> None:
-        self._top_k = int(top_k)
-        self._timeout = float(timeout)
-        self._provider = os.environ.get("SEARCH_PROVIDER", provider).lower()
-        self._max_retries = max(1, int(max_retries))
+    def __init__(self) -> None:
+        self._timeout = aiohttp.ClientTimeout(
+            total=_TOTAL_TIMEOUT_SECONDS,
+            connect=_CONNECT_TIMEOUT_SECONDS,
+            sock_connect=_CONNECT_TIMEOUT_SECONDS,
+            sock_read=_READ_TIMEOUT_SECONDS,
+        )
 
     def json_schema(self) -> Dict[str, Any]:
         return {
@@ -52,8 +48,8 @@ class SearchTool(Tool):
             "function": {
                 "name": self.name,
                 "description": (
-                    "Search the web. Provide an array of query strings; returns the top "
-                    "results for each query. Use multiple complementary queries in one call."
+                    "Performs batched web searches: supply an array 'query'; the tool "
+                    "retrieves the top 10 results for each query in one call."
                 ),
                 "parameters": {
                     "type": "object",
@@ -61,7 +57,10 @@ class SearchTool(Tool):
                         "query": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "description": "One or more search query strings.",
+                            "description": (
+                                "Array of query strings. Include multiple complementary "
+                                "search queries in a single call."
+                            ),
                         }
                     },
                     "required": ["query"],
@@ -70,50 +69,59 @@ class SearchTool(Tool):
         }
 
     def execute(self, arguments: Dict[str, Any]) -> str:
-        queries = arguments.get("query")
-        if isinstance(queries, str):
-            queries = [queries]
-        if not isinstance(queries, list) or not queries:
-            raise ValueError("search requires a non-empty 'query' string or array")
-        return "\n=======\n".join(self._search_one(str(q)) for q in queries)
+        try:
+            query = arguments["query"]
+        except Exception:
+            return "[Search] Invalid request format: Input must be a JSON object containing 'query' field"
+        if isinstance(query, str):
+            return run_sync(lambda: self._search_one(query))
+        assert isinstance(query, list)
+        return run_sync(lambda: self._search_many(query))
 
-    def _fetch_organic(self, query: str) -> list:
-        """One provider call -> the list of organic result dicts. Raises on HTTP error."""
-        key = os.environ.get("SERPER_KEY_ID", "")
-        if self._provider == "serpapi":
-            resp = requests.get(
-                _SERPAPI_URL,
-                params={"q": query, "engine": "google", "api_key": key, "num": self._top_k},
-                timeout=self._timeout,
-            )
-            resp.raise_for_status()
-            return resp.json().get("organic_results") or []
-        resp = requests.post(
-            _SERPER_URL,
-            json={"q": query},
-            headers={"X-API-KEY": key, "Content-Type": "application/json"},
-            timeout=self._timeout,
+    async def _search_many(self, queries: List[Any]) -> str:
+        responses = await asyncio.gather(*(self._search_one(query) for query in queries))
+        return "\n=======\n".join(responses)
+
+    async def _search_one(self, query: str) -> str:
+        payload = (
+            {"q": query, "location": "China", "gl": "cn", "hl": "zh-cn"}
+            if any("\u4e00" <= char <= "\u9fff" for char in query)
+            else {"q": query, "location": "United States", "gl": "us", "hl": "en"}
         )
-        resp.raise_for_status()
-        return resp.json().get("organic") or []
+        async with aiohttp.ClientSession(timeout=self._timeout) as session:
+            for attempt in range(_MAX_ATTEMPTS):
+                try:
+                    async with session.post(
+                        f"{POLARIS_URL}{SEARCH_PATH}",
+                        json=payload,
+                        headers=polaris_headers("serper"),
+                    ) as response:
+                        text = await response.text()
+                        if response.status < 200 or response.status >= 300:
+                            raise RuntimeError("search service returned a non-success status")
+                        try:
+                            results = json.loads(text)
+                        except Exception:
+                            return f"[Search] Failed to parse response for '{query}'."
+                        if "organic" not in results:
+                            return f"No results found for query: '{query}'. Use a less specific query."
+                        snippets = []
+                        for index, page in enumerate(results.get("organic", []), start=1):
+                            date = f"\nDate published: {page['date']}" if page.get("date") else ""
+                            source = f"\nSource: {page['source']}" if page.get("source") else ""
+                            snippet = f"\n{page['snippet']}" if page.get("snippet") else ""
+                            item = (
+                                f"{index}. [{page.get('title', '')}]({page.get('link', '')}){date}{source}\n{snippet}"
+                            ).replace("Your browser can't play this video.", "")
+                            snippets.append(item)
+                        return (
+                            f"A Google search for '{query}' found {len(snippets)} results:"
+                            "\n\n## Web Results\n" + "\n\n".join(snippets)
+                        )
+                except Exception:
+                    if attempt + 1 < _MAX_ATTEMPTS:
+                        await asyncio.sleep(_RETRY_BACKOFF_SECONDS)
+        return "Google search Timeout or error; return None, Please try again later."
 
-    def _search_one(self, query: str) -> str:
-        last = f"[search] error for {query!r}"
-        for _ in range(self._max_retries):
-            try:
-                organic = self._fetch_organic(query)
-                break
-            except Exception as exc:  # noqa: BLE001 — surfaced to the model as text, not raised
-                last = f"[search] error for {query!r}: {exc}"
-                time.sleep(0.5)
-        else:
-            return last
-        if not organic:
-            return f"No results for {query!r}. Try a less specific query."
-        lines: List[str] = []
-        for i, page in enumerate(organic[: self._top_k], start=1):
-            title = page.get("title", "")
-            link = page.get("link", "")
-            snippet = page.get("snippet", "")
-            lines.append(f"{i}. [{title}]({link})\n{snippet}")
-        return f"Results for {query!r}:\n" + "\n\n".join(lines)
+
+__all__ = ["SearchTool"]

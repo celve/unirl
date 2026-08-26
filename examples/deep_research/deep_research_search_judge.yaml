@@ -143,8 +143,8 @@ rollout:
     env:
       _target_: unirl.rollout.env.areal_deep_research.ARealDeepResearchEnvironment
       tools:
-        - _target_: unirl.rollout.env.tools.areal.ARealSearchTool
-        - _target_: unirl.rollout.env.tools.areal.ARealVisitTool
+        - _target_: unirl.rollout.env.tools.search.SearchTool
+        - _target_: unirl.rollout.env.tools.visit.VisitTool
           endpoint: ${areal_service.endpoint}
           model: ${areal_service.model}
           tokenizer_path: ${areal_service.tokenizer_path}
