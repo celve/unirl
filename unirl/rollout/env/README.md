@@ -89,8 +89,21 @@ The included tools are:
 
 - `CalculatorTool`: whitelisted arithmetic AST evaluation.
 - `SandboxTool`: a per-session persistent Python subprocess with timeout and output limits.
-- `SearchTool`: batched Serper or SerpApi search; requires `SERPER_KEY_ID`.
-- `VisitTool`: Jina page reading with optional OpenAI-compatible summarization.
+- `SearchTool`: batched web search.
+- `ImageSearchTool`: batched image search returning image URLs, pixel dimensions and sources.
+- `FetchTool`: URL content as text, unsummarized; an image URL yields a description of it.
+- `VisitTool`: page reading plus an evidence/summary extraction by an out-of-band summarizer.
+
+The four web tools reach their providers through the internal gateway in
+`unirl/rollout/env/tools/polaris.py`, which reads `POLARIS_APP_ID` and `POLARIS_APP_KEY` from the
+environment and needs no per-provider key. `SearchTool` and `VisitTool` reproduce AReaL's Tongyi
+DeepResearch wording for the LIN-714 comparison, so their output should not be reworded while it
+is running.
+
+Every one of them turns a transport failure into fallback text so the policy can recover, which
+means an unset credential yields a healthy-looking rollout with no live retrieval behind it. Call
+`unirl.rollout.env.tools.polaris.preflight()` from the launcher to fail loudly instead. Note also
+that `no_proxy` must cover the gateway host when proxy variables are set.
 
 ## Errors and limits
 
