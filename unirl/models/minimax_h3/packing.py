@@ -97,28 +97,22 @@ class MiniMaxH3Geometry:
     def resolve(cls, *, height: int, width: int, num_frames: int) -> "MiniMaxH3Geometry":
         """Validate a requested ``(height, width, num_frames)`` against H3.
 
-        The canvas constraints are STRUCTURAL, and there are only three: both
-        axes a multiple of 32, aspect ratio within 1:4..4:1, and area no larger
-        than ``768*1344``. The multiple of 32 is the load-bearing one -- it is
-        what makes ``height/16`` (VAE) divisible by the transformer's patch of 2,
-        so a violation misaligns the packed rows rather than merely degrading
-        quality.
+        Three structural canvas constraints: both axes a multiple of 32, aspect
+        within 1:4..4:1, and area no larger than ``768*1344``. The multiple of 32
+        is the load-bearing one, since it is what keeps ``height/16`` divisible
+        by the transformer's patch of 2 -- a violation misaligns the packed rows
+        rather than merely degrading quality.
 
-        The 768 pixel short edge is NOT one of them. ``resolve_canvas_size`` is
-        a DEFAULTS helper -- it answers "given only an aspect ratio, what canvas
-        should I use?" and starts the short edge at 768 as its choice. Reading it
-        as a validator (which this method used to do) turned a default into a
-        floor and rejected every canvas below 768, forcing ~21.5k packed rows on
-        every run. verl-omni's H3 recipe trains at 256x384 -- 3.9k rows, a 5.5x
-        shorter sequence -- so the floor was never real. Area is a cap, and a
-        cap only bites from above.
+        The 768 pixel short edge is not among them. ``resolve_canvas_size`` is a
+        defaults helper answering "given only an aspect ratio, what canvas?", and
+        reading it as a validator (as this once did) turned its starting choice
+        into a floor that rejected every smaller canvas.
 
-        Frame count is a genuine snap: the video VAE encodes 17 pixel frames per
-        chunk and drops 3 trailing latent frames, so only ``17n + 5`` counts
-        round-trip. This still raises rather than silently re-resolving, because
-        training at a different geometry than the recipe states is the kind of
-        drift that is impossible to spot later. The error carries the nearest
-        legal value.
+        Frame count is a genuine snap -- the video VAE encodes 17 pixel frames
+        per chunk and drops 3 trailing latent frames, so only ``17n + 5`` counts
+        round-trip -- but this raises with the nearest legal value rather than
+        re-resolving, since training at a geometry the recipe does not state is
+        undetectable later.
         """
         h, w = int(height), int(width)
         multiple = MINIMAX_H3_CANVAS_MULTIPLE
