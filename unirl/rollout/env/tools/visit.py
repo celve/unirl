@@ -1,102 +1,112 @@
-"""VisitTool — read webpage(s) and summarize toward a goal (LIN-519, hardened).
+"""VisitTool — read webpage(s) through the Polaris gateway and summarise toward a goal (LIN-892).
 
-A concrete :class:`~unirl.rollout.env.tools.base.Tool` for the deep-research
-agent: fetch a URL's content with the Jina reader (needs ``$JINA_API_KEYS``) and
-summarize the parts relevant to a stated goal with an OpenAI-compatible LLM
-(hosted out-of-band; ``$SUMMARY_URL`` / ``$SUMMARY_MODEL`` or the constructor
-args — the same endpoint the judge uses). ``execute`` is synchronous and
-thread-safe so it runs on concurrent trajectory threads (:meth:`ToolEnvironment.step`) across
-concurrent trajectories. If no summarizer is configured it returns the truncated
-raw page content, so the tool is usable without a summarizer for smoke tests.
+Page retrieval goes through the gateway's ``jina_ai`` provider; the extraction step calls
+an out-of-band OpenAI-compatible service (the same one the answer judge uses), so the
+observation is a structured evidence/summary block rather than raw HTML.
 
-Hardened toward AReaL's tongyi_deepresearch ``tool_visit.py``: Jina reads and the
-summarizer call retry on transient failures, and the summarizer returns a
-structured ``evidence`` / ``summary`` extraction (JSON-tolerant parse) rather than
-free text — higher-signal observations for the policy.
+Reach for :class:`~unirl.rollout.env.tools.fetch.FetchTool` instead when the content does
+not need summarising — an image URL, or a page small enough to read whole.
+
+The extractor prompt, retry budgets, truncation policy and result formatting are inherited
+verbatim from AReaL's Tongyi DeepResearch ``tool_visit.py``, including its ``feilds``
+typo. **Do not reword the output while LIN-714's AReaL comparison is running.**
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict
 
-import requests
+import aiohttp
 
 from unirl.rollout.env.tools.base import Tool
+from unirl.rollout.env.tools.polaris import POLARIS_URL, READER_PATH, polaris_headers, run_sync
 
-_JINA_READ = "https://r.jina.ai/"
-_EXTRACT_PROMPT = (
-    "Process the following webpage content and extract the information relevant "
-    "to the goal.\n\n"
-    "## Webpage content\n{content}\n\n"
-    "## Goal\n{goal}\n\n"
-    "## Task\n"
-    "1. evidence: extract the most relevant facts, figures, dates, and quotes "
-    "from the content — keep the full original context where possible.\n"
-    "2. summary: organize it into a concise paragraph, judging its contribution "
-    "to the goal.\n\n"
-    'Output ONLY a JSON object with string keys "evidence" and "summary".'
-)
+_JINA_ATTEMPTS = 3
+_JINA_TIMEOUT_SECONDS = 50.0
+_CONTENT_VALIDITY_ATTEMPTS = 8
+_SUMMARY_TRANSPORT_ATTEMPTS = 3
+_SHORT_OUTPUT_REGENERATIONS = 4
+_PARSE_REGENERATIONS = 3
+_RETRY_BACKOFF_SECONDS = 0.5
+_SUMMARY_TEMPERATURE = 0.7
+_SUMMARY_TOP_P = 1.0
+_SUMMARY_MAX_COMPLETION_TOKENS = 512
+_SUMMARY_CONTEXT_LIMIT = 32768
+_SUMMARY_CONTEXT_SAFETY_TOKENS = 256
+_SUMMARY_CONNECT_TIMEOUT_SECONDS = 10.0
+_SUMMARY_TIMEOUT_SECONDS = 200.0
+_MULTI_URL_TIMEOUT_SECONDS = 900.0
 
+_EXTRACTOR_PROMPT = """Please process the following webpage content and user goal to extract relevant information:
 
-def _extract_json(raw: str) -> Optional[dict]:
-    """Best-effort JSON parse: strip code fences, else grab the outer ``{...}``."""
-    raw = raw.replace("```json", "").replace("```", "").strip()
-    try:
-        return json.loads(raw)
-    except Exception:
-        left, right = raw.find("{"), raw.rfind("}")
-        if left != -1 and right != -1 and left <= right:
-            try:
-                return json.loads(raw[left : right + 1])
-            except Exception:
-                return None
-    return None
+## **Webpage Content**
+{webpage_content}
+
+## **User Goal**
+{goal}
+
+## **Task Guidelines**
+1. **Content Scanning for Rational**: Locate the **specific sections/data** directly related to the user's goal within the webpage content
+2. **Key Extraction for Evidence**: Identify and extract the **most relevant information** from the content, you never miss any important information, output the **full original context** of the content as far as possible, it can be more than three paragraphs.
+3. **Summary Output for Summary**: Organize into a concise paragraph with logical flow, prioritizing clarity and judge the contribution of the information to the goal.
+
+**Final Output Format using JSON format has "rational", "evidence", "summary" feilds**
+"""
+
+_READ_FAILURE = "[visit] Failed to read page."
+_EVIDENCE_FAILURE = "The provided webpage content could not be accessed. Please check the URL or file format."
+_SUMMARY_FAILURE = "The webpage content could not be processed, and therefore, no information is available."
 
 
 class VisitTool(Tool):
-    """Visit URL(s) via the Jina reader and summarize the content toward a goal.
-    Requires ``$JINA_API_KEYS``; the summarizer endpoint comes from ``$SUMMARY_URL``
-    / ``$SUMMARY_MODEL`` or the constructor args."""
+    """Read webpage(s) via the gateway and return an evidence/summary extraction."""
 
     name = "visit"
 
     def __init__(
         self,
         *,
-        endpoint: str = "",
-        model: str = "",
-        timeout: float = 60.0,
-        max_content_chars: int = 90000,
-        max_read_retries: int = 3,
-        max_summary_retries: int = 2,
+        endpoint: str,
+        model: str,
+        tokenizer_path: str,
     ) -> None:
-        self._endpoint = endpoint
-        self._model = model
-        self._timeout = float(timeout)
-        self._max_content_chars = int(max_content_chars)
-        self._max_read_retries = max(1, int(max_read_retries))
-        self._max_summary_retries = max(1, int(max_summary_retries))
+        if not endpoint or not model or not tokenizer_path:
+            raise ValueError("VisitTool requires endpoint, model, and tokenizer_path")
+        self._endpoint = str(endpoint)
+        self._model = str(model)
+        self._tokenizer_path = str(tokenizer_path)
+        self._summary_timeout = aiohttp.ClientTimeout(
+            total=_SUMMARY_TIMEOUT_SECONDS,
+            connect=_SUMMARY_CONNECT_TIMEOUT_SECONDS,
+            sock_connect=_SUMMARY_CONNECT_TIMEOUT_SECONDS,
+            sock_read=_SUMMARY_TIMEOUT_SECONDS,
+        )
+        self._tokenizer = None
 
     def json_schema(self) -> Dict[str, Any]:
         return {
             "type": "function",
             "function": {
                 "name": self.name,
-                "description": "Visit webpage(s) and return a summary of the content relevant to a goal.",
+                "description": "Visit webpage(s) and return the summary of the content.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "url": {
                             "type": ["string", "array"],
                             "items": {"type": "string"},
-                            "description": "The URL, or an array of URLs, to visit.",
+                            "minItems": 1,
+                            "description": (
+                                "The URL(s) of the webpage(s) to visit. Can be a single URL or an array of URLs."
+                            ),
                         },
                         "goal": {
                             "type": "string",
-                            "description": "The specific information to extract from the page(s).",
+                            "description": "The goal of the visit for webpage(s).",
                         },
                     },
                     "required": ["url", "goal"],
@@ -105,70 +115,229 @@ class VisitTool(Tool):
         }
 
     def execute(self, arguments: Dict[str, Any]) -> str:
-        url = arguments.get("url")
-        goal = str(arguments.get("goal", ""))
-        urls: List[str] = [url] if isinstance(url, str) else list(url or [])
-        if not urls:
-            raise ValueError("visit requires a 'url' string or array")
-        return "\n=======\n".join(self._visit_one(str(u), goal) for u in urls)
+        return run_sync(lambda: self._execute(arguments))
 
-    def _visit_one(self, url: str, goal: str) -> str:
-        content = self._read(url)
-        if content.startswith("[visit] "):
-            return f"The useful information in {url} for goal {goal}:\n{content}"
-        summary = self._summarize(content[: self._max_content_chars], goal)
-        return f"The useful information in {url} for goal {goal}:\n{summary}"
+    async def _execute(self, arguments: Dict[str, Any]) -> str:
+        try:
+            url = arguments["url"]
+            goal = arguments["goal"]
+        except Exception:
+            return "[Visit] Invalid request format: Input must be a JSON object containing 'url' and 'goal' fields"
 
-    def _read(self, url: str) -> str:
-        """Fetch page text via Jina, retrying on transient failures. Errors are
-        returned as ``[visit] ...`` text (surfaced to the model), never raised."""
-        key = os.environ.get("JINA_API_KEYS", "")
-        headers = {"Authorization": f"Bearer {key}"} if key else {}
-        last = f"[visit] failed to read {url}"
-        for _ in range(self._max_read_retries):
+        async with aiohttp.ClientSession(timeout=self._summary_timeout) as summary_session:
+            if isinstance(url, str):
+                try:
+                    response = await self._visit_one(url, goal, summary_session)
+                except Exception:
+                    response = self._failed_response(url, goal)
+            else:
+                assert isinstance(url, list)
+                started = time.monotonic()
+                responses = []
+                for item in url:
+                    item = str(item)
+                    if time.monotonic() - started > _MULTI_URL_TIMEOUT_SECONDS:
+                        response = self._failed_response(item, goal)
+                    else:
+                        try:
+                            response = await self._visit_one(item, goal, summary_session)
+                        except Exception:
+                            response = self._failed_response(item, goal)
+                    responses.append(response)
+                response = "\n=======\n".join(responses)
+        return response.strip()
+
+    async def _visit_one(
+        self,
+        url: str,
+        goal: Any,
+        summary_session: aiohttp.ClientSession,
+    ) -> str:
+        original_content = await self._html_readpage_jina(url)
+        if not self._valid_content(original_content):
+            return self._failed_response(url, goal)
+
+        content = self._truncate_for_summary(original_content, goal)
+        messages = [{"role": "user", "content": self._extractor_prompt(content, goal)}]
+        raw = await self._call_summary(messages, summary_session)
+
+        for regeneration in range(_SHORT_OUTPUT_REGENERATIONS):
+            if not isinstance(raw, str) or len(raw) >= 10:
+                break
+            if regeneration + 1 < _SHORT_OUTPUT_REGENERATIONS:
+                truncate_length = int(0.7 * len(content))
+            else:
+                truncate_length = 25000
+            content = content[:truncate_length]
+            messages = [{"role": "user", "content": self._extractor_prompt(content, goal)}]
+            raw = await self._call_summary(messages, summary_session)
+
+        if isinstance(raw, str):
+            raw = raw.replace("```json", "").replace("```", "").strip()
+
+        raw_object: Any = None
+        parse_attempt = 0
+        while True:
             try:
-                resp = requests.get(_JINA_READ + url, headers=headers, timeout=self._timeout)
-                resp.raise_for_status()
-                text = resp.text
-                if text and text.strip():
-                    return text
-                last = f"[visit] empty content for {url}"
-            except Exception as exc:  # noqa: BLE001 — surfaced to the model as text, not raised
-                last = f"[visit] failed to read {url}: {exc}"
-            time.sleep(0.5)
-        return last
+                raw_object = json.loads(raw) if isinstance(raw, str) else raw
+                if raw_object is not None and not isinstance(raw_object, dict):
+                    raise TypeError("summary response must be an object")
+                break
+            except Exception:
+                if parse_attempt >= _PARSE_REGENERATIONS:
+                    raw_object = None
+                    break
+                raw = await self._call_summary(messages, summary_session)
+                parse_attempt += 1
+                if parse_attempt >= _PARSE_REGENERATIONS:
+                    # AReaL exits without parsing its final regeneration.
+                    raw_object = None
+                    break
 
-    def _summarize(self, content: str, goal: str) -> str:
-        """Summarize toward the goal via the out-of-band LLM into a structured
-        evidence/summary block. No endpoint -> raw (truncated) content. On repeated
-        failure -> raw content, so a dead summarizer degrades rather than crashes."""
-        endpoint = os.environ.get("SUMMARY_URL", self._endpoint)
-        model = os.environ.get("SUMMARY_MODEL", self._model)
-        if not endpoint:
-            return content
-        headers = {"Content-Type": "application/json"}
-        key = os.environ.get("SUMMARY_API_KEY", "")
-        if key:
-            headers["Authorization"] = f"Bearer {key}"
+        if raw_object is None:
+            return f"The provided webpage content: {original_content[:1000]}"
+
+        response = f"The useful information in {url} for user goal {goal} as follows: \n\n"
+        response += "Evidence in page: \n" + str(raw_object.get("evidence", "")) + "\n\n"
+        response += "Summary: \n" + str(raw_object.get("summary", "")) + "\n\n"
+        return response
+
+    async def _call_summary(
+        self,
+        messages: list[dict[str, str]],
+        session: aiohttp.ClientSession,
+    ) -> str | None:
         payload = {
-            "model": model,
-            "messages": [{"role": "user", "content": _EXTRACT_PROMPT.format(goal=goal, content=content)}],
-            "temperature": 0.2,
+            "model": self._model,
+            "messages": messages,
+            "temperature": _SUMMARY_TEMPERATURE,
+            "top_p": _SUMMARY_TOP_P,
+            "max_completion_tokens": _SUMMARY_MAX_COMPLETION_TOKENS,
         }
-        for _ in range(self._max_summary_retries):
+        headers = {"Content-Type": "application/json"}
+        api_key = os.environ.get("JUDGE_API_KEY", "")
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+
+        for attempt in range(_SUMMARY_TRANSPORT_ATTEMPTS):
             try:
-                resp = requests.post(endpoint, json=payload, headers=headers, timeout=self._timeout)
-                resp.raise_for_status()
-                raw = str(resp.json()["choices"][0]["message"]["content"]).strip()
-                obj = _extract_json(raw)
-                if obj is not None:
-                    evidence = str(obj.get("evidence", "")).strip()
-                    summary = str(obj.get("summary", "")).strip()
-                    if evidence or summary:
-                        return f"Evidence:\n{evidence}\n\nSummary:\n{summary}"
-                if raw:
-                    return raw
-            except Exception:  # noqa: BLE001 — retry, then fall back to raw content
-                pass
-            time.sleep(0.5)
-        return content  # summarizer failed after retries — raw truncated content
+                async with session.post(self._endpoint, json=payload, headers=headers) as response:
+                    if response.status < 200 or response.status >= 300:
+                        await response.read()
+                        raise RuntimeError("summary service returned a non-success status")
+                    body = await response.json(content_type=None)
+                    content = body["choices"][0]["message"]["content"]
+                    if content:
+                        content = str(content)
+                        try:
+                            json.loads(content)
+                        except Exception:
+                            left = content.find("{")
+                            right = content.rfind("}")
+                            if left != -1 and right != -1 and left <= right:
+                                content = content[left : right + 1]
+                        return content
+                    return None
+            except Exception:
+                if attempt + 1 < _SUMMARY_TRANSPORT_ATTEMPTS:
+                    await asyncio.sleep(_RETRY_BACKOFF_SECONDS)
+        return ""
+
+    async def _jina_readpage(self, url: str) -> str:
+        timeout = aiohttp.ClientTimeout(total=_JINA_TIMEOUT_SECONDS)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            for attempt in range(_JINA_ATTEMPTS):
+                try:
+                    async with session.post(
+                        f"{POLARIS_URL}{READER_PATH}",
+                        json={"url": url},
+                        headers=polaris_headers("jina_ai"),
+                    ) as response:
+                        if response.status == 200:
+                            body = await response.json(content_type=None)
+                            content = body["data"]["content"]
+                            if not isinstance(content, str):
+                                raise TypeError("page reader content must be text")
+                            return content
+                        await response.read()
+                        raise RuntimeError("page reader returned a non-success status")
+                except Exception:
+                    if attempt + 1 < _JINA_ATTEMPTS:
+                        await asyncio.sleep(_RETRY_BACKOFF_SECONDS)
+        return _READ_FAILURE
+
+    async def _html_readpage_jina(self, url: str) -> str:
+        for _ in range(_CONTENT_VALIDITY_ATTEMPTS):
+            content = await self._jina_readpage(url)
+            if self._valid_content(content):
+                return content
+        return _READ_FAILURE
+
+    @staticmethod
+    def _valid_content(content: Any) -> bool:
+        return bool(
+            content
+            and not content.startswith(_READ_FAILURE)
+            and content != "[visit] Empty content."
+            and not content.startswith("[document_parser]")
+        )
+
+    @staticmethod
+    def _extractor_prompt(content: str, goal: Any) -> str:
+        return _EXTRACTOR_PROMPT.format(webpage_content=content, goal=goal)
+
+    def _truncate_for_summary(self, content: str, goal: Any) -> str:
+        tokenizer = self._get_tokenizer()
+        max_prompt_tokens = _SUMMARY_CONTEXT_LIMIT - _SUMMARY_MAX_COMPLETION_TOKENS - _SUMMARY_CONTEXT_SAFETY_TOKENS
+        if max_prompt_tokens <= 0:
+            raise ValueError("summary completion allowance leaves no prompt capacity")
+
+        def prompt_length(page: str) -> int:
+            messages = [{"role": "user", "content": self._extractor_prompt(page, goal)}]
+            token_ids = tokenizer.apply_chat_template(
+                messages,
+                tokenize=True,
+                add_generation_prompt=True,
+            )
+            return len(token_ids)
+
+        if prompt_length(content) <= max_prompt_tokens:
+            return content
+        if prompt_length("") > max_prompt_tokens:
+            raise ValueError("summary prompt exceeds configured context headroom")
+
+        content_tokens = tokenizer.encode(content, add_special_tokens=False)
+        low, high = 0, len(content_tokens)
+        while low < high:
+            middle = (low + high + 1) // 2
+            candidate = tokenizer.decode(
+                content_tokens[:middle],
+                skip_special_tokens=False,
+                clean_up_tokenization_spaces=False,
+            )
+            if prompt_length(candidate) <= max_prompt_tokens:
+                low = middle
+            else:
+                high = middle - 1
+        return tokenizer.decode(
+            content_tokens[:low],
+            skip_special_tokens=False,
+            clean_up_tokenization_spaces=False,
+        )
+
+    def _get_tokenizer(self):
+        if self._tokenizer is None:
+            from transformers import AutoTokenizer
+
+            self._tokenizer = AutoTokenizer.from_pretrained(self._tokenizer_path)
+        return self._tokenizer
+
+    @staticmethod
+    def _failed_response(url: str, goal: Any) -> str:
+        response = f"The useful information in {url} for user goal {goal} as follows: \n\n"
+        response += "Evidence in page: \n" + _EVIDENCE_FAILURE + "\n\n"
+        response += "Summary: \n" + _SUMMARY_FAILURE + "\n\n"
+        return response
+
+
+__all__ = ["VisitTool"]
