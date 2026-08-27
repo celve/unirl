@@ -166,6 +166,10 @@ reward:
       _target_: unirl.reward.local.t2av_composite.T2AVCompositeSpec
       device: auto
       batch_size: 2
+      # Inert while videopickscore is unweighted, since it is the only inner
+      # scorer declaring the field, and kept so re-adding it cannot go back to
+      # scoring a blank opening frame.
+      frame_selection: middle
       # imagebind, not videopickscore, which scores the FIRST FRAME only and so
       # is close to constant in what this optimises.
       #
