@@ -652,7 +652,11 @@ class Handle:
             and batch_size is not None
             and batch_size % self.dp_size != 0
         ):
-            raise ValueError(f"batch_size={batch_size} not divisible by dp_size={self.dp_size}")
+            raise ValueError(
+                f"batch_size={batch_size} not divisible by dp_size={self.dp_size}. "
+                f"Gradient-bearing dispatch needs equal shards; a read-only method "
+                f"can use Dispatch.DP_SCATTER_UNEVEN instead."
+            )
 
         shards = dispatch_fn(self, args, kwargs, batch_size)
         transport_cls = self.pool.transport_cls

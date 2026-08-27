@@ -436,10 +436,15 @@ class Sample(Batch):
         """Concat Samples (e.g. DP gather): concat each part position-wise across"""
         if not items:
             raise ValueError("Sample.concat: cannot concat an empty sequence")
-        if len(items) == 1:
+        # Slicing to an empty range drops the parts list wholesale, and an uneven
+        # DP scatter hands exactly that to ranks it had no group for.
+        present = [it for it in items if it.parts]
+        if not present:
             return items[0]
-        n_parts = len(items[0].parts)
-        merged = [Part.concat([it.parts[i] for it in items]) for i in range(n_parts)]
+        if len(present) == 1:
+            return present[0]
+        n_parts = len(present[0].parts)
+        merged = [Part.concat([it.parts[i] for it in present]) for i in range(n_parts)]
         return cls(parts=merged, reward_compute_s=max(it.reward_compute_s for it in items))
 
     @classmethod

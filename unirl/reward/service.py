@@ -101,9 +101,14 @@ class RewardService(Remote):
             )
         return self.backend.compute_rewards_differentiable(media_tensor, list(prompts), records=records)
 
-    @distributed(dispatch_mode=Dispatch.DP_SCATTER)
+    @distributed(dispatch_mode=Dispatch.DP_SCATTER_UNEVEN)
     def score_and_attach(self, sample: Sample) -> Sample:
         """Score the frontier (last) Part's generated media and return the updated Sample."""
+        # Fewer prompt groups than DP ranks leaves the tail ranks holding an empty
+        # slice, which carries no parts at all; Sample.concat drops it on the way back.
+        if not sample.parts:
+            return sample
+
         frontier = sample.parts[-1]
         if frontier.rewards is not None:
             raise RuntimeError("Actor-side reward compute does not accept precomputed rewards on the frontier Part.")

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -98,6 +98,57 @@ def pytree_chunk(value, dp_size: int, batch_size: int) -> list:
         return [value] * dp_size
 
 
+def uneven_bounds(batch_size: int, dp_size: int) -> List[Tuple[int, int]]:
+    """Contiguous ``[start, stop)`` per DP rank, tolerating a short or ragged batch."""
+    base, rem = divmod(batch_size, dp_size)
+    out: List[Tuple[int, int]] = []
+    start = 0
+    for i in range(dp_size):
+        stop = start + base + (1 if i < rem else 0)
+        out.append((start, stop))
+        start = stop
+    return out
+
+
+def pytree_chunk_uneven(value, dp_size: int, batch_size: int) -> list:
+    """Like :func:`pytree_chunk`, but a rank with nothing to do gets an empty shard."""
+    if isinstance(value, Broadcast):
+        return [value.value] * dp_size
+
+    bounds = uneven_bounds(batch_size, dp_size)
+
+    if isinstance(value, torch.Tensor):
+        if value.dim() == 0 or value.shape[0] != batch_size:
+            return [value] * dp_size
+        return [value[lo:hi] for lo, hi in bounds]
+
+    elif isinstance(value, np.ndarray):
+        if value.shape[0] != batch_size:
+            return [value] * dp_size
+        return [value[lo:hi] for lo, hi in bounds]
+
+    elif isinstance(value, list):
+        if len(value) != batch_size:
+            return [value] * dp_size
+        return [value[lo:hi] for lo, hi in bounds]
+
+    elif isinstance(value, dict):
+        split = {k: pytree_chunk_uneven(v, dp_size, batch_size) for k, v in value.items()}
+        return [{k: split[k][i] for k in value} for i in range(dp_size)]
+
+    elif isinstance(value, tuple):
+        split = [pytree_chunk_uneven(v, dp_size, batch_size) for v in value]
+        return [tuple(split[j][i] for j in range(len(value))) for i in range(dp_size)]
+
+    elif isinstance(value, Batch):
+        if value.batch_size != batch_size:
+            return [value] * dp_size
+        return [value.slice(lo, hi) for lo, hi in bounds]
+
+    else:
+        return [value] * dp_size
+
+
 def pytree_cat(results: list) -> Any:
     """Recursively merge same-structure results along axis 0."""
     if not results:
@@ -134,4 +185,10 @@ def pytree_cat(results: list) -> Any:
         return first
 
 
-__all__ = ["infer_batch_size", "pytree_cat", "pytree_chunk"]
+__all__ = [
+    "infer_batch_size",
+    "pytree_cat",
+    "pytree_chunk",
+    "pytree_chunk_uneven",
+    "uneven_bounds",
+]

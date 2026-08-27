@@ -6,7 +6,7 @@ from enum import Enum, auto
 from functools import wraps
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, TypeAlias
 
-from unirl.distributed.tensor.pytree import pytree_cat, pytree_chunk
+from unirl.distributed.tensor.pytree import pytree_cat, pytree_chunk, pytree_chunk_uneven
 from unirl.distributed.utils import Broadcast
 
 if TYPE_CHECKING:
@@ -37,6 +37,7 @@ class Dispatch(Enum):
     SCATTER = auto()  # Split N ways across world (one shard per worker)
     DP_SCATTER = auto()  # One shard per DP group; all ranks receive it.
     DP_SCATTER_HEAD = auto()  # One shard per DP group; only its head receives it.
+    DP_SCATTER_UNEVEN = auto()  # Like DP_SCATTER, but a short batch leaves ranks empty-handed.
 
 
 class Execute(Enum):
@@ -92,6 +93,31 @@ def _dispatch_dp_scatter(
 
     split_args = tuple(pytree_chunk(v, dp_size, batch_size) for v in args)
     split_kwargs = {k: pytree_chunk(v, dp_size, batch_size) for k, v in kwargs.items()}
+
+    dp_shards = []
+    for dp_rank in range(dp_size):
+        shard_args = tuple(split_args[j][dp_rank] for j in range(len(args)))
+        shard_kwargs = {k: split_kwargs[k][dp_rank] for k in kwargs}
+        dp_shards.append((shard_args, shard_kwargs))
+
+    return [dp_shards[wg.rank_infos[i].dp_rank] for i in range(wg.world_size)]
+
+
+def _dispatch_dp_scatter_uneven(
+    wg: "Handle",
+    args: Tuple[Any, ...],
+    kwargs: Dict[str, Any],
+    batch_size: Optional[int],
+) -> List[Shard]:
+    """Split by dp_size without demanding divisibility; short ranks get an empty shard."""
+    dp_size = wg.dp_size
+
+    if batch_size is None:
+        args, kwargs = _unwrap_broadcast(args, kwargs)
+        return [(args, kwargs)] * wg.world_size
+
+    split_args = tuple(pytree_chunk_uneven(v, dp_size, batch_size) for v in args)
+    split_kwargs = {k: pytree_chunk_uneven(v, dp_size, batch_size) for k, v in kwargs.items()}
 
     dp_shards = []
     for dp_rank in range(dp_size):
@@ -159,6 +185,7 @@ DISPATCH_MODE_REGISTRY: Dict[Dispatch, Dict[str, Callable]] = {
     Dispatch.SCATTER: {"dispatch_fn": _dispatch_scatter, "collect_fn": _collect_passthrough},
     Dispatch.DP_SCATTER: {"dispatch_fn": _dispatch_dp_scatter, "collect_fn": _collect_dp_merge},
     Dispatch.DP_SCATTER_HEAD: {"dispatch_fn": _dispatch_dp_scatter_head, "collect_fn": _collect_dp_merge},
+    Dispatch.DP_SCATTER_UNEVEN: {"dispatch_fn": _dispatch_dp_scatter_uneven, "collect_fn": _collect_dp_merge},
 }
 
 
@@ -172,6 +199,14 @@ def resolve_backward_dispatch_mode(
         raise ValueError(
             f"Method '{method_name}' uses dispatch_mode={fwd_dispatch_mode.name}, "
             f"which does not support auto-backward (no shared batch dimension). "
+            f"Do not call this method inside enable_grad()."
+        )
+
+    if fwd_dispatch_mode is Dispatch.DP_SCATTER_UNEVEN:
+        raise ValueError(
+            f"Method '{method_name}' uses dispatch_mode={fwd_dispatch_mode.name}, "
+            f"which does not support auto-backward: ranks hold unequal shard sizes, "
+            f"so a gradient reduced across them would be weighted by shard size. "
             f"Do not call this method inside enable_grad()."
         )
 
