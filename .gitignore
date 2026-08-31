@@ -134,3 +134,7 @@ benchmarks_results/
 # Private experimental packages (dirs or stray files) stay local-only
 # (the tier is also not packaged).
 experimental/private_*
+
+# Written by setuptools-scm at build time. Committing it makes git report a dirty
+# tree on every later build, which silently yields an unpublishable local version.
+unirl/_version.py
