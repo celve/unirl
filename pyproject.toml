@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=61", "wheel"]
+requires = ["setuptools>=80", "wheel", "setuptools-scm>=10"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -191,8 +191,18 @@ url = "https://download.pytorch.org/whl/cu130"
 [tool.setuptools]
 include-package-data = true
 
-[tool.setuptools.dynamic]
-version = { attr = "unirl.__version__" }
+# setuptools-scm also registers the file finder that gives include-package-data above
+# something to act on; without it the wheel ships no stage_configs YAMLs at all.
+[tool.setuptools_scm]
+version_file = "unirl/_version.py"
+fallback_version = "0.0.0.dev0"
+# Upstream is migrating this default to not writing; editable installs import
+# _version.py from the source tree, so pin the behaviour we depend on.
+write_to_source = true
+
+[tool.setuptools_scm.tag]
+prefix = "v"
+strict = true
 
 [tool.setuptools.packages.find]
 where = ["."]

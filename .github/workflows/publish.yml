@@ -18,6 +18,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # setuptools-scm reads the version from tags; a shallow clone yields 0.0.0.dev0
 
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -60,10 +62,7 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           repository-url: https://test.pypi.org/legacy/
-          skip-existing: true   # re-runs of an existing version are a no-op, not a failure
 
       - name: Publish to PyPI
         if: inputs.repository == 'pypi'
         uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          skip-existing: true
