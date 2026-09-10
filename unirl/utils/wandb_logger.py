@@ -1,6 +1,7 @@
 """WandB Logger for unirl Training."""
 
 import functools
+import json
 import logging
 import os
 import time
@@ -218,6 +219,16 @@ class UniRLWandBLogger:
         self._initialized = False
         self._optimizer_step = int(optimizer_step)
         self.memory_monitor = None
+        # Gate 6 of the paper's evidence protocol wants unaggregated per-step metrics
+        # as an archived file; wandb alone drops every series when reporting is off.
+        self._metrics_sink_path = os.environ.get("UNIRL_METRICS_JSONL")
+        self._metrics_sink = None
+        if self._metrics_sink_path and rank == 0:
+            try:
+                os.makedirs(os.path.dirname(os.path.abspath(self._metrics_sink_path)), exist_ok=True)
+                self._metrics_sink = open(self._metrics_sink_path, "a", buffering=1)
+            except OSError as e:
+                print(f"Warning: could not open UNIRL_METRICS_JSONL={self._metrics_sink_path}: {e}")
 
         self.enabled = enabled and rank == 0
 
@@ -334,6 +345,7 @@ class UniRLWandBLogger:
         prefix: str = "",
     ) -> None:
         """Log metrics with an explicit namespace step key."""
+        self._write_metrics_sink(step_key, step, metrics, prefix)
         if not self.enabled or not self._initialized:
             return
 
@@ -350,6 +362,20 @@ class UniRLWandBLogger:
             wandb.log(log_dict)
         except Exception as e:
             print(f"Warning: Failed to log metrics ({step_key}): {e}")
+
+    def _write_metrics_sink(self, step_key: str, step: int, metrics: Dict[str, Any], prefix: str) -> None:
+        """Append one row of raw per-step metrics, independent of whether wandb is on."""
+        if self._metrics_sink is None:
+            return
+        row: Dict[str, Any] = {"step_key": step_key, "step": int(step), "wall_time": time.time()}
+        for key, value in metrics.items():
+            scalar = self._coerce_metric_value(value)
+            if scalar is not None:
+                row[self._apply_prefix(str(key), prefix)] = scalar
+        try:
+            self._metrics_sink.write(json.dumps(row, sort_keys=True) + "\n")
+        except OSError as e:
+            print(f"Warning: failed to append to the metrics sink: {e}")
 
     def log_step(
         self,
@@ -677,6 +703,11 @@ class UniRLWandBLogger:
                 wandb.finish()
             except Exception as e:
                 print(f"Warning: Failed to finish wandb run: {e}")
+        if self._metrics_sink is not None:
+            try:
+                self._metrics_sink.close()
+            finally:
+                self._metrics_sink = None
 
 
 def init_logger(
