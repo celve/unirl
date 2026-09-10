@@ -16,3 +16,7 @@ opencv-python-headless
 qwen-vl-utils
 # hpsv3 imports torch.utils.tensorboard at module scope, which needs the real package.
 tensorboard
+# hpsv3.train does `from trl import get_kbit_device_map, get_quantization_config`; the
+# last release re-exporting both while still accepting transformers>=4.55 is 0.19.1.
+trl==0.19.1
+rich
