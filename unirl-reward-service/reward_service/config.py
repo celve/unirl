@@ -13,6 +13,9 @@ the matching pdsh bootstrap.
 
 from __future__ import annotations
 
+import os
+import re
+
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -135,6 +138,40 @@ def _parse_cluster_cfg(raw: dict | None) -> ClusterCfg:
     return ClusterCfg(ray_address=_opt_str("ray_address"), namespace=_opt_str("namespace"))
 
 
+_ENV_INTERPOLATION = re.compile(r"\$\{oc\.env:([A-Za-z_][A-Za-z0-9_]*)(?:,([^}]*))?\}")
+
+
+def _resolve_env_interpolations(node: Any, path: Path) -> Any:
+    """Expand ``${oc.env:VAR}`` / ``${oc.env:VAR,default}`` throughout a parsed config.
+
+    Configs that stage weights under one root write the root as an env
+    interpolation so the same file runs on any pod, but this loader parses with
+    plain ``yaml.safe_load``, which leaves the placeholder as a literal string and
+    sends it on to the scorer as a model id. An unset variable with no default is
+    an error here rather than an unresolvable path several layers down.
+    """
+    if isinstance(node, dict):
+        return {key: _resolve_env_interpolations(value, path) for key, value in node.items()}
+    if isinstance(node, list):
+        return [_resolve_env_interpolations(item, path) for item in node]
+    if not isinstance(node, str):
+        return node
+
+    def substitute(match: "re.Match[str]") -> str:
+        name, default = match.group(1), match.group(2)
+        value = os.environ.get(name)
+        if value is None or value == "":
+            if default is None:
+                raise ValueError(
+                    f"{path}: config interpolates ${{oc.env:{name}}} but {name} is unset; "
+                    f"export it before launching this config"
+                )
+            return default
+        return value
+
+    return _ENV_INTERPOLATION.sub(substitute, node)
+
+
 def load_config(path: str | Path) -> ServiceCfg:
     """Parse YAML into ServiceCfg, validating required fields and name uniqueness."""
     path = Path(path)
@@ -146,6 +183,8 @@ def load_config(path: str | Path) -> ServiceCfg:
 
     if not isinstance(raw, dict):
         raise ValueError(f"config root must be a mapping, got {type(raw).__name__}")
+
+    raw = _resolve_env_interpolations(raw, path)
 
     server_raw = raw.get("server") or {}
     score_timeout_s = float(server_raw.get("score_timeout_s", _DEFAULT_SCORE_TIMEOUT_S))
