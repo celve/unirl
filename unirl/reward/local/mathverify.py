@@ -2,15 +2,18 @@ r"""math-verify reward scorer — the paper's grader (HuggingFace Math-Verify)."
 
 from __future__ import annotations
 
+import logging
 import os
 import threading
 from dataclasses import dataclass
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 from unirl.reward.base import BaseRewardComponentSpec
 from unirl.types.reward import RewardRequest
 
 from .base import LocalRewardBackend
+
+logger = logging.getLogger(__name__)
 
 # math-verify's own timeouts are signal.alarm-based, and signal only works on the
 # main thread — under the reward's Ray worker thread they raise, which would score
@@ -22,6 +25,10 @@ _VERIFY_TIMEOUT_S = float(os.environ.get("UNIRL_MATHVERIFY_TIMEOUT_S", "10"))
 # a rollout. Replaced wholesale when a timeout kills its worker.
 _POOL: Optional[Any] = None
 _POOL_LOCK = threading.Lock()
+
+# A 0.0 has three causes — wrong answer, expiry, grader error — and a reward curve
+# cannot distinguish them. Counted so a flat curve is attributable after the fact.
+VERIFY_COUNTERS: Dict[str, int] = {"graded": 0, "expired": 0, "failed": 0}
 
 
 def _grade(gold: str, prediction: str) -> bool:
@@ -40,10 +47,11 @@ def _grade(gold: str, prediction: str) -> bool:
 def _reset_pool() -> None:
     """Drop the pool, terminating a worker still spinning on a runaway expression."""
     global _POOL
-    if _POOL is not None:
-        _POOL.terminate()
-        _POOL.join()
-        _POOL = None
+    pool, _POOL = _POOL, None
+    if pool is None:
+        return
+    pool.terminate()
+    threading.Thread(target=pool.join, daemon=True).start()
 
 
 def _verify_with_deadline(gold: str, prediction: str, *, seconds: float) -> bool:
@@ -55,11 +63,15 @@ def _verify_with_deadline(gold: str, prediction: str, *, seconds: float) -> bool
         if _POOL is None:
             _POOL = multiprocessing.get_context("fork").Pool(processes=1)
         try:
-            return bool(_POOL.apply_async(_grade, (gold, prediction)).get(timeout=seconds))
+            out = bool(_POOL.apply_async(_grade, (gold, prediction)).get(timeout=seconds))
+            VERIFY_COUNTERS["graded"] += 1
+            return out
         except multiprocessing.TimeoutError:
+            VERIFY_COUNTERS["expired"] += 1
             _reset_pool()
             return False
         except Exception:
+            VERIFY_COUNTERS["failed"] += 1
             _reset_pool()
             return False
 
@@ -92,6 +104,14 @@ class MathVerifyRewardScorer(LocalRewardBackend):
             except Exception:
                 ok = False
             rewards.append(1.0 if ok else 0.0)
+        if VERIFY_COUNTERS["expired"] or VERIFY_COUNTERS["failed"]:
+            logger.warning(
+                "math-verify counters: graded=%d expired=%d failed=%d — a 0.0 reward from an "
+                "expiry or a grader error is indistinguishable from a wrong answer in the curve",
+                VERIFY_COUNTERS["graded"],
+                VERIFY_COUNTERS["expired"],
+                VERIFY_COUNTERS["failed"],
+            )
         return rewards
 
 
