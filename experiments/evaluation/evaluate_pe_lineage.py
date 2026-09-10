@@ -122,7 +122,8 @@ def generate_images(
             guidance_scale=guidance,
             generator=generator,
         ).images[0]
-        path = out_dir / f"{rewrite.rewrite_id}_{index:02d}.png"
+        # rewrite_id carries the lineage delimiter, which would name a directory here.
+        path = out_dir / f"{rewrite.rewrite_id.replace('/', '_')}_{index:02d}.png"
         image.save(path)
         paths.append(path)
     return paths
