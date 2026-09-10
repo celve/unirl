@@ -11,6 +11,7 @@ import torch
 from unirl.config.require import require
 from unirl.types.conditions import Condition
 from unirl.types.segments.latent import LatentSegment
+from unirl.utils.parity_gate import parity_measurement_enabled
 
 from .base import (
     AlgorithmStepResult,
