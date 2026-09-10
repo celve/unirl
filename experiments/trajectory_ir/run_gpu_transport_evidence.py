@@ -123,9 +123,13 @@ def _metadata_bytes(obj: object) -> int:
 
 def _hash_payloads(payloads: Sequence[object]) -> str:
     """Correctness hash over materialized content, order-independent by leaf index."""
+    import torch
+
     digest = hashlib.sha256()
     for tensor in payloads:
-        digest.update(tensor.detach().to("cpu").contiguous().view(-1)[:4096].numpy().tobytes())
+        # view(torch.uint8) rather than numpy(): numpy has no bfloat16 dtype.
+        head = tensor.detach().to("cpu").contiguous().view(-1)[:4096]
+        digest.update(head.view(torch.uint8).numpy().tobytes())
     return digest.hexdigest()
 
 
