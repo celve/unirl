@@ -1,12 +1,4 @@
-"""Generation provenance: make a reused output directory detectable rather than silent.
-
-Both generation drivers resume by *identity alone* — `t2i_jobs` skips any `(prompt, sample)`
-whose PNG exists, and `run_text` skips any `(id, sample)` already in the completions file.
-Neither filename nor row records the configuration that produced it, so re-running a tag after
-changing a checkpoint, sampler setting or decoding parameter silently mixes two populations
-with counts that reconcile and nothing flagged. `GPU_HANDOFF_README.md` documents this as a
-trap ("never reuse an output tag after changing anything"); this turns it into a check.
-"""
+"""Generation provenance: refuse to extend outputs another configuration produced — see README.md."""
 
 from __future__ import annotations
 

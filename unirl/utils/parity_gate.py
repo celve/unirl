@@ -1,16 +1,4 @@
-"""Tolerance gate on rollout/replay log-prob parity — E0 correctness tests 1 and 2.
-
-The drift gauge itself already exists (``unirl.algorithms.base.rollout_replay_logp_absdiff``)
-and every AR algorithm emits it per micro-batch. What the evidence protocol additionally
-requires is a *stated tolerance* and a check that fires at two specific moments: before the
-first optimizer update, and again after each weight-publication path. This module supplies
-both, and records the tolerance it used so an archive shows whether a gate was armed.
-
-Arm it with ``UNIRL_PARITY_TOLERANCE=<float>``; unset, the check records and never raises.
-``UNIRL_PARITY_STRICT=0`` downgrades a breach to a warning while still recording it, and
-``UNIRL_PARITY_MEASURE`` decides whether the gauge is computed at all — a timing run wants
-the instrumentation without measurement cost inside its timed path.
-"""
+"""Tolerance gate on rollout/replay log-prob parity — see README.md for the env vars."""
 
 from __future__ import annotations
 
@@ -34,13 +22,7 @@ _CONTEXT_CODES = {BEFORE_FIRST_UPDATE: 1.0, AFTER_PUBLICATION: 2.0, STEADY_STATE
 
 
 def parity_measurement_enabled() -> bool:
-    """Whether to pay for the parity gauge at all — the D2H copy and the device sync.
-
-    Separate from the tolerance because a timing run must be able to take the driver clock
-    and phase timers without measurement cost inside one framework's timed path, which is
-    the mirror image of the protocol's rule against subtracting a phase from one side.
-  Set ``UNIRL_PARITY_MEASURE=1``; an armed ``UNIRL_PARITY_TOLERANCE`` implies it.
-    """
+    """Whether to compute the gauge at all; separate from the tolerance that gates raising."""
     explicit = os.environ.get("UNIRL_PARITY_MEASURE")
     if explicit is not None:
         return explicit not in ("0", "false", "False", "")

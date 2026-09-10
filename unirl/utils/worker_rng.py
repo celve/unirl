@@ -1,12 +1,4 @@
-"""Audited worker RNG path — one derivation from the run seed to every worker draw.
-
-The recipes' seed fields reach data order and the rollout engine only, so model
-materialization and LoRA adapter initialization draw from whatever global RNG state
-the process happens to hold. Two runs configured with different seed IDs can
-therefore share an initialization, and one run is not reproducible on rerun. This
-module makes the worker-side draws a function of (run seed, rank, purpose) and
-records what it seeded so a run's archive can show it.
-"""
+"""Audited worker RNG: one derivation from run seed to every draw — see README.md."""
 
 from __future__ import annotations
 
@@ -43,11 +35,7 @@ def current_rank() -> int:
 
 
 def seed_worker_rngs(base_seed: Optional[int], *, purpose: str, rank: Optional[int] = None) -> Optional[int]:
-    """Seed python/numpy/torch global RNGs for one purpose; returns the derived seed.
-
-    ``base_seed=None`` is the framework's documented "draw from OS entropy" contract,
-    so it is recorded and left alone rather than forced to a default.
-    """
+    """Seed python/numpy/torch RNGs for one purpose; returns the derived seed, None when base is null."""
     resolved_rank = current_rank() if rank is None else int(rank)
     if base_seed is None:
         _SEEDING_LOG.append({"purpose": purpose, "rank": resolved_rank, "base_seed": None, "derived_seed": None})

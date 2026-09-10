@@ -119,3 +119,50 @@ byte-identical to an unpatched run.
 - `cpu_memory_used` climbing = host-side leak (data loading/caching, not the model).
 - One rank ≫ the rest (Level-1 `min`/`max` spread) = imbalance; investigate it.
 - **Check the y-axis range first** — wandb auto-zooms a flat 40 MB wobble into a mountain.
+
+## E0 correctness instrumentation
+
+Three modules added for the paper's evidence-admission gates. All three are opt-in and
+byte-identical to an unpatched run when their env vars are unset.
+
+### `driver_clock.py` — the full async iteration
+
+`perf/step_time_s` stops at the optimizer update, so the quiesce, weight publication,
+evaluation and checkpoint tail of an async iteration falls outside it — and outside the next
+iteration too, since `t0` resets. Summed `step_time_s` therefore under-counts wall clock by
+the whole tail with no other series covering it. `DriverClock` wraps each stage of
+`AsyncRolloutTrainerMixin._train_async_loop` and reports the unattributed remainder explicitly.
+
+**This is an async-only concern.** The sync trainers time publication *inside* their own
+window (`DiffusionTrainer.train_step` spans data load, `_rollout_and_score` — which contains
+`weight_sync.sync()` — and `train_track`), so their `step_time_s` is already a complete
+interval, provided `eval_interval` and `save_interval` are both 0. `evaluate()` and
+`maybe_save_checkpoint()` sit outside it.
+
+### `parity_gate.py` — rollout/replay agreement, tests 1 and 2
+
+The drift gauge already existed (`algorithms/base.rollout_replay_logp_absdiff`); what the
+protocol additionally wants is a *stated tolerance* and a check at two moments: before the
+first optimizer update, and after each weight-publication path.
+
+- `UNIRL_PARITY_TOLERANCE=<float>` arms raising. Unset, the check records and never raises,
+  and archives `parity/tolerance` as NaN so an unarmed run is visibly unarmed.
+- `UNIRL_PARITY_MEASURE` controls whether the gauge is *computed*. Separate from the tolerance
+  because the cost lands **inside** `perf/step_time_s` — two `float()` CUDA syncs per
+  micro-batch under `train_track` — so a timing run that leaves it on reports an inflated
+  number rather than a clean one with untimed work beside it.
+- The gate reads per-micro maxima, not the step-level metric: `aggregate_numeric_metrics`
+  averages every key, so a step-level `..._max` is a mean of maxima and hides one bad micro.
+- Only `flowgrpo.py` is behind the measurement switch. `cppo`, `dppo`, `drpo`, `grpo`, `gspo`
+  and `ppo` splat the gauge unconditionally and predate this work, so an AR timing row cannot
+  switch the cost off without a code change. Its *marginal* cost there is small — those dict
+  literals already sync several times per micro.
+
+### `worker_rng.py` — the audited seeding path
+
+Nothing under `train/` or `distributed/` called `torch.manual_seed`, so LoRA A-matrix
+initialization drew from ambient global RNG and two runs with different seed IDs could share
+an initialization. Seeds derive from (run seed, rank, purpose) and every draw is recorded.
+`LoraConfig.seed` carries it; left null the framework's documented OS-entropy contract holds,
+and the failure mode is *ungoverned* initialization rather than *collided*. The
+`ema_lora_cfg`/NFT path (`inject_nft`) is still unseeded and reaches no current experiment.

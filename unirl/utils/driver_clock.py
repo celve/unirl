@@ -1,11 +1,4 @@
-"""Monotonic driver clock and full-iteration phase accounting for the async loops.
-
-``perf/step_time_s`` stops at the optimizer update, so the quiesce, weight
-publication, evaluation and checkpoint tail of every async iteration is invisible
-to it (``unirl/trainer/async_rollout.py`` logs the step inside
-``_advantage_and_train``, before that tail runs). RQ2/RQ4 timing needs the whole
-iteration on one clock, which is what this module supplies.
-"""
+"""Monotonic driver clock and full-iteration phase accounting — see README.md."""
 
 from __future__ import annotations
 
