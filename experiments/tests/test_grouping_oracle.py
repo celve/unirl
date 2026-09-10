@@ -70,11 +70,15 @@ def test_oracle_flags_a_reshape_that_crossed_groups():
 
 
 def test_non_uniform_groups_are_rejected_by_both_paths():
-    sample_ids = ["a/0", "a/1", "a/2", "b/0"]
-    rewards = [1.0, 2.0, 3.0, 4.0]
+    """Uneven branching trips divisibility when n % n_groups != 0, contiguity otherwise."""
     with pytest.raises(ValueError, match="non-uniform group sizes"):
-        _part(sample_ids, rewards).compute_advantages(normalize=False)
-    oracle = flat_id_join(sample_ids, rewards, normalize=False)
+        _part(["a/0", "a/1", "b/0"], [1.0, 2.0, 3.0]).compute_advantages(normalize=False)
+
+    sample_ids = ["a/0", "a/1", "a/2", "b/0"]
+    with pytest.raises(ValueError, match="not in group-by-parent contiguous order"):
+        _part(sample_ids, [1.0, 2.0, 3.0, 4.0]).compute_advantages(normalize=False)
+
+    oracle = flat_id_join(sample_ids, [1.0, 2.0, 3.0, 4.0], normalize=False)
     assert not oracle.uniform_branch
 
 

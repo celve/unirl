@@ -1,0 +1,60 @@
+# Pinned reward-service config for the paper's E2 and E4 rows.
+#
+# Exactly the three scorers those experiments admit — `hpsv3`, `pickscore`,
+# `imagereward` — and nothing else, so the service's GPU budget is 3 and every
+# scorer present is one a paper number depends on. The example config serves nine
+# rewards on eight GPUs; an uncounted reward GPU invalidates every GPU-hour claim,
+# which is why this file exists separately rather than as an edit to that one.
+#
+# PickScore is the optimized training reward; HPSv3 and ImageReward are frozen
+# automatic judges used for held-out evaluation. They are distinct roles and the
+# paper must not present the judges as independent human studies.
+#
+# Set REWARD_MODEL_ROOT to the directory holding the staged scorer weights, then
+# launch this file. Weight paths below resolve under it, so the same config runs on
+# any pod without edits, and the resolved paths land in the archived evidence.
+
+server:
+  host: 0.0.0.0
+  port: 8080
+  # HPSv3's Qwen2-VL-7B backbone is slow on its first request after startup;
+  # 300 s absorbs that cold start without masking a genuinely hung scorer.
+  score_timeout_s: 300.0
+
+rewards:
+  - name: pickscore
+    scorer: pickscore
+    runtime_env: envs/pickscore.txt
+    num_replicas: 1
+    num_gpus: 1
+    num_cpus: 2
+    max_concurrency: 4
+    params:
+      model_name: yuvalkirstain/PickScore_v1
+      weights_path: ${oc.env:REWARD_MODEL_ROOT}/PickScore_v1
+      dtype: float32
+
+  - name: imagereward
+    scorer: imagereward
+    runtime_env: envs/imagereward.txt
+    num_replicas: 1
+    num_gpus: 1
+    num_cpus: 2
+    max_concurrency: 4
+    params:
+      model_name: ImageReward-v1.0
+      weights_path: ${oc.env:REWARD_MODEL_ROOT}/ImageReward
+      dtype: float32
+
+  - name: hpsv3
+    scorer: hpsv3
+    runtime_env: envs/hpsv3.txt
+    num_replicas: 1
+    num_gpus: 1
+    num_cpus: 4
+    params:
+      weights_path: ${oc.env:REWARD_MODEL_ROOT}/HPSv3
+      config_path: null
+      # 4 keeps peak activation under ~10 GB on top of the ~50 GB weights on a
+      # 96 GB H20; 8 has been observed to crash one.
+      max_batch_size: 4
