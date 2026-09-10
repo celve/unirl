@@ -78,20 +78,61 @@ def image_seed(base_seed: int, rewrite_id: str, index: int) -> int:
     return int.from_bytes(digest[:4], "big")
 
 
-def build_pipeline(base: str, adapter: Optional[str], device: str):
-    """Load the common frozen diffusion evaluation pipeline, optionally with a PE adapter.
+LORA_EXPECTED = {"rank": 16, "alpha": 32}
 
-    PE checkpoints place the trainable side under ``checkpoint-<rollout>/diffusion``,
-    so the caller passes that subdirectory, not the checkpoint root.
+
+def load_pe_lora_state_dict(adapter: str):
+    """Read a PE checkpoint's LoRA weights and rename them for diffusers.
+
+    PE saves the trainable side as ``checkpoint-<rollout>/diffusion/checkpoint.pt`` — a
+    torch dict whose ``policy_state_dict`` holds PEFT-named tensors keyed relative to the
+    transformer, e.g. ``transformer_blocks.0.attn.to_q.lora_A.default.weight``. Diffusers
+    wants ``transformer.transformer_blocks.0.attn.to_q.lora_A.weight``, so the adapter
+    name segment comes out and the stage prefix goes on.
     """
+    import torch
+
+    path = Path(adapter)
+    if path.is_dir():
+        path = path / "checkpoint.pt"
+    if not path.exists():
+        raise FileNotFoundError(f"PE adapter checkpoint not found: {path}")
+
+    blob = torch.load(path, map_location="cpu", weights_only=False)
+    raw = blob.get("policy_state_dict")
+    if not raw:
+        raise ValueError(f"{path}: no policy_state_dict — this is not a PE stage checkpoint")
+
+    lora_config = dict(blob.get("lora_config") or {})
+    for key, want in LORA_EXPECTED.items():
+        got = lora_config.get(key)
+        if got is not None and int(got) != want:
+            raise ValueError(f"{path}: lora_config[{key}]={got}, expected {want}")
+
+    renamed = {f"transformer.{k.replace('.default.', '.')}": v for k, v in raw.items()}
+    if not renamed:
+        raise ValueError(f"{path}: policy_state_dict is empty")
+    return renamed, {
+        "adapter_path": str(path),
+        "adapter_num_tensors": len(renamed),
+        "adapter_step": blob.get("step"),
+        "adapter_optimizer_step_count": blob.get("optimizer_step_count"),
+        "adapter_lora_config": lora_config,
+    }
+
+
+def build_pipeline(base: str, adapter: Optional[str], device: str):
+    """Load the frozen diffusion evaluation pipeline, optionally with a PE stage adapter."""
     import torch
     from diffusers import StableDiffusion3Pipeline
 
     pipeline = StableDiffusion3Pipeline.from_pretrained(base, torch_dtype=torch.bfloat16).to(device)
+    provenance: Dict[str, object] = {}
     if adapter:
-        pipeline.load_lora_weights(adapter)
+        state_dict, provenance = load_pe_lora_state_dict(adapter)
+        pipeline.load_lora_weights(state_dict)
     pipeline.set_progress_bar_config(disable=True)
-    return pipeline
+    return pipeline, provenance
 
 
 def generate_images(
@@ -293,7 +334,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     served = assert_service_serves(args.reward_url, evaluators) if args.reward_url else []
     rewrites = load_rewrite_manifest(args.rewrite_manifest)
-    pipeline = build_pipeline(args.base, args.adapter, device)
+    pipeline, adapter_provenance = build_pipeline(args.base, args.adapter, device)
 
     args.output.mkdir(parents=True, exist_ok=True)
     image_root = args.output / "images"
@@ -358,6 +399,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "samples_per_rewrite": args.samples_per_rewrite,
         "rewrite_manifest_sha256": _sha256_file(args.rewrite_manifest),
         "num_rows": len(rows),
+        **adapter_provenance,
         "reward_service_url": args.reward_url,
         "reward_service_rewards": served,
         "generation": {
