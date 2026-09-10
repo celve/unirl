@@ -105,6 +105,8 @@ class FlowGRPO(StageAlgorithm):
                 )
             return
         typed_conds = typed_conditions(conditions, self.conditions_cls)
+        if segment.sde_logp is not None and segment.rollout_sde_logp is None:
+            segment.rollout_sde_logp = segment.sde_logp.detach().cpu().clone()
         with torch.no_grad():
             result = self.stage.replay(typed_conds, segment=segment, params=self.params, step_indices=target_steps)
         segment.sde_logp = result.log_probs.detach().cpu()
@@ -151,9 +153,16 @@ class FlowGRPO(StageAlgorithm):
         metrics: Dict[str, Any] = {
             "policy_loss": float(policy_loss.detach().item()),
             "clip_range": float(clip_range),
-            **rollout_replay_logp_absdiff(new_logp, old_logp),
             **{k: float(v.item()) for k, v in ratio_metrics.items()},
         }
+        # Against the engine's own log-probs, never the replay anchor that
+        # prepare_segment may have written over them — else this reads ~0 by construction.
+        rollout_logp_src = segment.rollout_sde_logp if segment.rollout_sde_logp is not None else segment.sde_logp
+        if rollout_logp_src is not None:
+            rollout_logp = gather_sde_field(
+                rollout_logp_src, segment.sde_indices, target_steps, field_name="rollout_sde_logp"
+            ).to(dtype=new_logp.dtype, device=new_logp.device)
+            metrics.update(rollout_replay_logp_absdiff(new_logp, rollout_logp))
 
         if self.beta > 0.0:
             if new_means is None:
