@@ -14,6 +14,7 @@ from unirl.rollout.manager import (
 )
 from unirl.trainer.base import unwrap_replicated_int
 from unirl.types.sampling import total_samples_per_prompt
+from unirl.utils.driver_clock import DriverClock, buffer_accounting_metrics
 
 if TYPE_CHECKING:
     from unirl.types.sample import Sample
@@ -211,6 +212,9 @@ class AsyncRolloutTrainerMixin:
             name="backend optimizer step count",
         )
         self._batches_since_sync = 0
+        self._driver_clock = DriverClock()
+        self._last_quiesce_carried: Optional[int] = None
+        self._last_barrier_wait_s: Optional[float] = None
         for _ in range(start_rollout):
             self.data_source.get_samples(self.batch_size)
         staleness_budget = self._max_staleness * self._num_updates_per_batch
@@ -247,28 +251,31 @@ class AsyncRolloutTrainerMixin:
         try:
             for rollout_id in range(start_rollout, num_rollouts):
                 t0 = time.perf_counter()
+                self._driver_clock.begin_iteration()
                 hard_boundary = next_hard_boundary(
                     rollout_id,
                     num_rollouts=num_rollouts,
                     eval_interval=self.eval_interval,
                     save_interval=save_interval,
                 )
-                sample, output_version = self._next_rollout_batch(
-                    rollout_id,
-                    hard_boundary=hard_boundary,
-                )
+                with self._driver_clock.phase("batch"):
+                    sample, output_version = self._next_rollout_batch(
+                        rollout_id,
+                        hard_boundary=hard_boundary,
+                    )
                 training_progress = rollout_id / max(1, num_rollouts - 1)
-                result, mean_reward = self._advantage_and_train(
-                    sample,
-                    training_progress=training_progress,
-                    rollout_id=rollout_id,
-                    t0=t0,
-                    extra_metrics=rollout_version_metrics(
-                        train_version=self._train_version,
-                        output_version=output_version,
-                        num_updates_per_batch=self._num_updates_per_batch,
-                    ),
-                )
+                with self._driver_clock.phase("train"):
+                    result, mean_reward = self._advantage_and_train(
+                        sample,
+                        training_progress=training_progress,
+                        rollout_id=rollout_id,
+                        t0=t0,
+                        extra_metrics=rollout_version_metrics(
+                            train_version=self._train_version,
+                            output_version=output_version,
+                            num_updates_per_batch=self._num_updates_per_batch,
+                        ),
+                    )
                 self.wandb_logger.log_progress(rollout_id, num_rollouts, result, mean_reward, logger=logger)
 
                 step = rollout_id + 1
@@ -276,26 +283,53 @@ class AsyncRolloutTrainerMixin:
                 save_due = save_interval > 0 and (step % save_interval == 0 or step >= num_rollouts)
                 sync_due = step < num_rollouts and self._batches_since_sync >= self._weight_sync_interval
                 if eval_due or save_due or sync_due:
-                    self._sync_rollout(require_empty=eval_due or save_due)
+                    with self._driver_clock.phase("sync"):
+                        self._sync_rollout(require_empty=eval_due or save_due)
 
                 if step >= num_rollouts and not self._rollout_manager.empty:
                     raise RuntimeError("final rollout boundary requires an empty RolloutManager")
 
                 if eval_due:
-                    self._boundary_evaluate(rollout_id, initial=False)
+                    with self._driver_clock.phase("eval"):
+                        self._boundary_evaluate(rollout_id, initial=False)
                 if save_due:
-                    self.maybe_save_checkpoint(
-                        rollout_id,
-                        num_rollouts,
-                        save_interval=save_interval,
-                        save_dir=save_dir,
-                        save_mode=save_mode,
-                    )
+                    with self._driver_clock.phase("checkpoint"):
+                        self.maybe_save_checkpoint(
+                            rollout_id,
+                            num_rollouts,
+                            save_interval=save_interval,
+                            save_dir=save_dir,
+                            save_mode=save_mode,
+                        )
+                self._log_driver_iteration(rollout_id, staleness_budget=staleness_budget)
         finally:
             try:
                 self._rollout_manager.close()
             finally:
                 self._finish_wandb()
+
+    def _log_driver_iteration(self, rollout_id: int, *, staleness_budget: int) -> None:
+        """Emit the full-iteration driver timing and buffer series for this rollout."""
+        inflight_groups, ready_groups = self._rollout_manager.counts
+        metrics: Dict[str, float] = dict(self._driver_clock.iteration_metrics())
+        self.wandb_logger.log_perf(rollout_id + 1, metrics)
+        self.wandb_logger.log_with_step(
+            step_key="rollout/step",
+            step=rollout_id + 1,
+            metrics=buffer_accounting_metrics(
+                inflight_groups=inflight_groups,
+                ready_groups=ready_groups,
+                batch_size=self.batch_size,
+                staleness_budget=staleness_budget,
+                published_version=self._rollout_manager.published_version,
+                train_version=self._train_version,
+                quiesce_carried=self._last_quiesce_carried,
+                barrier_wait_s=self._last_barrier_wait_s,
+            ),
+            prefix="",
+        )
+        self._last_quiesce_carried = None
+        self._last_barrier_wait_s = None
 
     def _sync_rollout(self, *, force: bool = False, require_empty: bool = False) -> None:
         manager = self._rollout_manager
@@ -309,7 +343,10 @@ class AsyncRolloutTrainerMixin:
         # Quiesce engine work before weight publication, but keep completed
         # groups in the manager. The lag filter decides whether buffered work
         # remains trainable after publication, matching continuous prompt carry.
+        _barrier_t0 = time.monotonic()
         carried = manager.quiesce(current_version=self._train_version)
+        self._last_barrier_wait_s = time.monotonic() - _barrier_t0
+        self._last_quiesce_carried = len(carried)
         if require_empty and (carried or not manager.empty):
             raise RuntimeError("eval/checkpoint boundary requires an empty RolloutManager")
         if not require_empty:

@@ -85,6 +85,7 @@ def inject_lora(
     bias: str = "none",
     task_type: str = "FEATURE_EXTRACTION",
     adapter_name: str = "default",
+    seed: Optional[int] = None,
 ) -> None:
     """Inject a single LoRA adapter.  No Shadow, no EMA."""
     from peft import LoraConfig, inject_adapter_in_model
@@ -120,19 +121,23 @@ def inject_lora(
             n_trainable,
         )
 
-    defer_after_materialize(model, partial(_reset_adapter, name=adapter_name))
+    defer_after_materialize(model, partial(_reset_adapter, name=adapter_name, seed=seed))
 
 
-def _reset_adapter(model: nn.Module, *, name: str) -> None:
+def _reset_adapter(model: nn.Module, *, name: str, seed: Optional[int] = None) -> None:
     from peft.tuners.lora import LoraLayer
 
+    if seed is not None:
+        from unirl.utils.worker_rng import seed_worker_rngs
+
+        seed_worker_rngs(seed, purpose=f"lora_init:{name}")
     n_reset = 0
     for m in model.modules():
         if isinstance(m, LoraLayer):
             m.reset_lora_parameters(name, init_lora_weights=True)
             n_reset += 1
     if _current_rank() == 0:
-        logger.info("_reset_adapter(%r): %d LoraLayer(s)", name, n_reset)
+        logger.info("_reset_adapter(%r): %d LoraLayer(s), seed=%s", name, n_reset, seed)
 
 
 def _activate(model: nn.Module, adapter_name: str) -> None:
