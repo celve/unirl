@@ -15,6 +15,7 @@ from unirl.rollout.manager import (
 from unirl.trainer.base import unwrap_replicated_int
 from unirl.types.sampling import total_samples_per_prompt
 from unirl.utils.driver_clock import DriverClock, buffer_accounting_metrics
+from unirl.utils.parity_gate import ParityGate, publication_path_name
 
 if TYPE_CHECKING:
     from unirl.types.sample import Sample
@@ -213,6 +214,7 @@ class AsyncRolloutTrainerMixin:
         )
         self._batches_since_sync = 0
         self._driver_clock = DriverClock()
+        self._parity_gate = ParityGate.from_env()
         self._last_quiesce_carried: Optional[int] = None
         self._last_barrier_wait_s: Optional[float] = None
         for _ in range(start_rollout):
@@ -277,6 +279,7 @@ class AsyncRolloutTrainerMixin:
                         ),
                     )
                 self.wandb_logger.log_progress(rollout_id, num_rollouts, result, mean_reward, logger=logger)
+                self._parity_metrics = self._parity_gate.check(result, rollout_id=rollout_id)
 
                 step = rollout_id + 1
                 eval_due = self.eval_interval > 0 and step % self.eval_interval == 0
@@ -309,27 +312,29 @@ class AsyncRolloutTrainerMixin:
                 self._finish_wandb()
 
     def _log_driver_iteration(self, rollout_id: int, *, staleness_budget: int) -> None:
-        """Emit the full-iteration driver timing and buffer series for this rollout."""
+        """Emit the full-iteration driver timing, buffer and parity series for this rollout."""
         inflight_groups, ready_groups = self._rollout_manager.counts
-        metrics: Dict[str, float] = dict(self._driver_clock.iteration_metrics())
-        self.wandb_logger.log_perf(rollout_id + 1, metrics)
+        self.wandb_logger.log_perf(rollout_id + 1, dict(self._driver_clock.iteration_metrics()))
+        series: Dict[str, float] = buffer_accounting_metrics(
+            inflight_groups=inflight_groups,
+            ready_groups=ready_groups,
+            batch_size=self.batch_size,
+            staleness_budget=staleness_budget,
+            published_version=self._rollout_manager.published_version,
+            train_version=self._train_version,
+            quiesce_carried=self._last_quiesce_carried,
+            barrier_wait_s=self._last_barrier_wait_s,
+        )
+        series.update(getattr(self, "_parity_metrics", {}) or {})
         self.wandb_logger.log_with_step(
             step_key="rollout/step",
             step=rollout_id + 1,
-            metrics=buffer_accounting_metrics(
-                inflight_groups=inflight_groups,
-                ready_groups=ready_groups,
-                batch_size=self.batch_size,
-                staleness_budget=staleness_budget,
-                published_version=self._rollout_manager.published_version,
-                train_version=self._train_version,
-                quiesce_carried=self._last_quiesce_carried,
-                barrier_wait_s=self._last_barrier_wait_s,
-            ),
+            metrics=series,
             prefix="",
         )
         self._last_quiesce_carried = None
         self._last_barrier_wait_s = None
+        self._parity_metrics = {}
 
     def _sync_rollout(self, *, force: bool = False, require_empty: bool = False) -> None:
         manager = self._rollout_manager
@@ -379,6 +384,7 @@ class AsyncRolloutTrainerMixin:
                     f"inflight={inflight_count}, ready={ready_count}, batch_size={self.batch_size}"
                 )
         manager.sync_weights(self.weight_sync, output_version=self._train_version)
+        self._parity_gate.note_publication(publication_path_name(self.weight_sync))
         if carried:
             manager.submit(carried)
         self._batches_since_sync = 0

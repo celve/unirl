@@ -24,6 +24,7 @@ from .base import (
     _resolve_reference_model,
     _transition_sigma,
     gather_sde_field,
+    rollout_replay_logp_absdiff,
     typed_conditions,
 )
 
@@ -150,6 +151,7 @@ class FlowGRPO(StageAlgorithm):
         metrics: Dict[str, Any] = {
             "policy_loss": float(policy_loss.detach().item()),
             "clip_range": float(clip_range),
+            **rollout_replay_logp_absdiff(new_logp, old_logp),
             **{k: float(v.item()) for k, v in ratio_metrics.items()},
         }
 

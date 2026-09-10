@@ -20,6 +20,7 @@ from unirl.trainer.hydra import parse_hydra_cfg, remote_hydra
 from unirl.types.primitives import Texts
 from unirl.types.sample import Sample
 from unirl.types.sampling import BaseSamplingParams, total_samples_per_prompt
+from unirl.utils.parity_gate import ParityGate, publication_path_name
 from unirl.utils.wandb_metrics import pooled_window_reward_metrics
 
 logger = logging.getLogger(__name__)
@@ -640,6 +641,8 @@ class DiffusionTrainer(BaseTrainer):
             self.rollout.wake_up()
             if sync_weights and self.weight_sync is not None:
                 self.weight_sync.sync()
+                if getattr(self, "_parity_gate", None) is not None:
+                    self._parity_gate.note_publication(publication_path_name(self.weight_sync))
             if should_offload_train:
                 train_offload_attempted = True
                 self.backend.offload()
@@ -930,6 +933,7 @@ class DiffusionTrainer(BaseTrainer):
         for _ in range(start_rollout):
             self.data_source.get_samples(self.batch_size)
         self._init_wandb(num_rollouts=num_rollouts)
+        self._parity_gate = ParityGate.from_env()
         try:
             if self.eval_interval > 0:
                 self.evaluate(start_rollout)
@@ -943,6 +947,12 @@ class DiffusionTrainer(BaseTrainer):
                 )
                 final_id = window_ids[-1]
                 self.wandb_logger.log_progress(final_id, num_rollouts, result, mean_reward, logger=logger)
+                self.wandb_logger.log_with_step(
+                    step_key="rollout/step",
+                    step=final_id + 1,
+                    metrics=self._parity_gate.check(result, rollout_id=final_id),
+                    prefix="",
+                )
                 if self.eval_interval > 0 and (final_id + 1) % self.eval_interval == 0:
                     self.evaluate(final_id + 1)
                 self.maybe_save_checkpoint(
