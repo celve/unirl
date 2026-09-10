@@ -2,6 +2,8 @@ r"""math-verify reward scorer — the paper's grader (HuggingFace Math-Verify)."
 
 from __future__ import annotations
 
+import os
+import threading
 from dataclasses import dataclass
 from typing import List
 
@@ -9,6 +11,34 @@ from unirl.reward.base import BaseRewardComponentSpec
 from unirl.types.reward import RewardRequest
 
 from .base import LocalRewardBackend
+
+# math-verify's own timeouts are signal.alarm-based, and signal only works on the
+# main thread — under the reward's Ray worker thread they raise, which would score
+# every sample 0. A worker thread with a join deadline is the portable equivalent.
+_VERIFY_TIMEOUT_S = float(os.environ.get("UNIRL_MATHVERIFY_TIMEOUT_S", "10"))
+
+
+def _verify_with_deadline(gold: str, prediction: str, *, seconds: float) -> bool:
+    """Grade one answer, returning False if math-verify does not finish in ``seconds``."""
+    from math_verify import parse, verify
+
+    result: List[bool] = []
+
+    def _run() -> None:
+        result.append(
+            bool(
+                verify(
+                    parse("\\boxed{" + gold + "}", parsing_timeout=None),
+                    parse(prediction, parsing_timeout=None),
+                    timeout_seconds=None,
+                )
+            )
+        )
+
+    worker = threading.Thread(target=_run, daemon=True)
+    worker.start()
+    worker.join(seconds)
+    return result[0] if result else False
 
 
 class MathVerifyRewardScorer(LocalRewardBackend):
@@ -25,8 +55,6 @@ class MathVerifyRewardScorer(LocalRewardBackend):
         self.model = "math_verify"
 
     def _compute_model_rewards(self, request: RewardRequest) -> List[float]:
-        from math_verify import parse, verify
-
         generated = request.texts
         if generated is None:
             raise ValueError("MathVerifyRewardScorer requires request.texts (generated answers).")
@@ -38,13 +66,7 @@ class MathVerifyRewardScorer(LocalRewardBackend):
                 continue
             gt = str(meta["answer"]).strip()
             try:
-                ok = bool(
-                    verify(
-                        parse("\\boxed{" + gt + "}", parsing_timeout=None),
-                        parse(text or "", parsing_timeout=None),
-                        timeout_seconds=None,
-                    )
-                )
+                ok = _verify_with_deadline(gt, text or "", seconds=_VERIFY_TIMEOUT_S)
             except Exception:
                 ok = False
             rewards.append(1.0 if ok else 0.0)
