@@ -2,6 +2,7 @@ r"""math-verify reward scorer — the paper's grader (HuggingFace Math-Verify)."
 
 from __future__ import annotations
 
+import atexit
 import logging
 import os
 import threading
@@ -62,6 +63,9 @@ def _verify_with_deadline(gold: str, prediction: str, *, seconds: float) -> bool
     with _POOL_LOCK:
         if _POOL is None:
             _POOL = multiprocessing.get_context("fork").Pool(processes=1)
+            # Pool.__del__ raises at interpreter shutdown once its module globals are
+            # torn down; an atexit close keeps that noise out of a run's log.
+            atexit.register(_reset_pool)
         try:
             out = bool(_POOL.apply_async(_grade, (gold, prediction)).get(timeout=seconds))
             VERIFY_COUNTERS["graded"] += 1
