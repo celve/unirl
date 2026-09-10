@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import random
 from dataclasses import dataclass
 from pathlib import Path
@@ -127,14 +128,43 @@ def generate_images(
     return paths
 
 
+def assert_service_serves(reward_url: str, evaluators: Sequence[str]) -> List[str]:
+    """Fail before generating anything if the service does not serve every evaluator.
+
+    A scorer whose optional dependency failed to install is absent from ``/rewards``
+    rather than erroring per request, so an unchecked run would quietly report on
+    fewer metrics than it claims.
+    """
+    import requests
+
+    session = requests.Session()
+    session.trust_env = False
+    response = session.get(f"{reward_url.rstrip('/')}/rewards", timeout=60)
+    response.raise_for_status()
+    served = list(response.json()["rewards"])
+    missing = [name for name in evaluators if name not in served]
+    if missing:
+        raise RuntimeError(
+            f"reward service at {reward_url} serves {served} but the run requires {list(evaluators)}; "
+            f"missing {missing} — install the scorer rather than dropping the metric"
+        )
+    return served
+
+
 def score_images(
     image_paths: Sequence[Path],
     prompt: str,
     *,
     evaluator: str,
     reward_url: Optional[str],
+    batch_size: int = 8,
 ) -> List[float]:
-    """Score each image against one prompt through the pinned reward service."""
+    """Score each image against one prompt through the pinned reward service.
+
+    Speaks ``reward_service.schemas``: a batch of ``{history: [{text, image_b64}],
+    required_rewards: [...]}`` under ``requests``, answered as
+    ``results[i][reward][sub_metric]``.
+    """
     if not reward_url:
         raise RuntimeError(
             f"evaluator {evaluator} needs --reward-url pointing at the pinned reward service; "
@@ -144,19 +174,45 @@ def score_images(
 
     import requests
 
+    session = requests.Session()
+    session.trust_env = False
+    endpoint = f"{reward_url.rstrip('/')}/score"
+
     scores: List[float] = []
-    for path in image_paths:
+    for start in range(0, len(image_paths), batch_size):
+        chunk = list(image_paths[start : start + batch_size])
         payload = {
-            "prompt": prompt,
-            "image_base64": base64.b64encode(path.read_bytes()).decode(),
-            "scorer": evaluator,
+            "protocol_version": "1",
+            "requests": [
+                {
+                    "history": [
+                        {"text": prompt, "image_b64": base64.b64encode(path.read_bytes()).decode()}
+                    ],
+                    "required_rewards": [evaluator],
+                    "sample_id": path.name,
+                }
+                for path in chunk
+            ],
         }
-        response = requests.post(f"{reward_url.rstrip('/')}/score", json=payload, timeout=300)
+        response = session.post(endpoint, json=payload, timeout=1800)
         response.raise_for_status()
         body = response.json()
-        if "score" not in body:
-            raise RuntimeError(f"reward service returned no score for {path.name}: {body}")
-        scores.append(float(body["score"]))
+        results = body.get("results") or []
+        errors = body.get("errors") or []
+        if len(results) != len(chunk):
+            raise RuntimeError(f"reward service returned {len(results)} results for {len(chunk)} images")
+        for index, (path, result) in enumerate(zip(chunk, results)):
+            failure = errors[index].get(evaluator) if index < len(errors) else None
+            if failure:
+                raise RuntimeError(f"{evaluator} failed on {path.name}: {failure}")
+            metrics = result.get(evaluator)
+            if not metrics:
+                raise RuntimeError(f"{evaluator} returned no metrics for {path.name}: {result}")
+            # One finite score per metric per image; a dropped sub-metric must not average away.
+            values = [float(v) for v in metrics.values()]
+            if len(values) != 1 or not all(math.isfinite(v) for v in values):
+                raise RuntimeError(f"{evaluator} on {path.name} is not one finite score: {metrics}")
+            scores.append(values[0])
     return scores
 
 
@@ -218,6 +274,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--guidance", type=float, default=1.0)
     parser.add_argument("--evaluators", default="hpsv3,imagereward")
     parser.add_argument("--reward-url", default=None)
+    parser.add_argument("--score-batch-size", type=int, default=8)
     parser.add_argument("--bootstrap", type=int, default=10000)
     parser.add_argument("--scope", default=None, help="recorded on every row: prompt or rewrite")
     parser.add_argument("--checkpoint", default=None, help="recorded on every row, e.g. checkpoint-300")
@@ -233,6 +290,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     import torch
 
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
+    served = assert_service_serves(args.reward_url, evaluators) if args.reward_url else []
     rewrites = load_rewrite_manifest(args.rewrite_manifest)
     pipeline = build_pipeline(args.base, args.adapter, device)
 
@@ -255,8 +313,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         # Root-conditioned and rewrite-conditioned scores must be shown separately:
         # the training request uses the rewrite, so it cannot establish root intent.
         for evaluator in evaluators:
-            root_scores = score_images(paths, rewrite.root_text, evaluator=evaluator, reward_url=args.reward_url)
-            rewrite_scores = score_images(paths, rewrite.rewrite_text, evaluator=evaluator, reward_url=args.reward_url)
+            root_scores = score_images(
+                paths, rewrite.root_text, evaluator=evaluator,
+                reward_url=args.reward_url, batch_size=args.score_batch_size,
+            )
+            rewrite_scores = score_images(
+                paths, rewrite.rewrite_text, evaluator=evaluator,
+                reward_url=args.reward_url, batch_size=args.score_batch_size,
+            )
             for index, path in enumerate(paths):
                 rows.append(
                     {
@@ -293,6 +357,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "samples_per_rewrite": args.samples_per_rewrite,
         "rewrite_manifest_sha256": _sha256_file(args.rewrite_manifest),
         "num_rows": len(rows),
+        "reward_service_url": args.reward_url,
+        "reward_service_rewards": served,
         "generation": {
             "height": args.height,
             "width": args.width,
