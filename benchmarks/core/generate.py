@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import threading
@@ -12,6 +13,7 @@ from typing import Dict, List, Tuple
 
 import requests
 
+from . import provenance
 from .checkpoints import ResolvedCkpt
 
 T2I_KWARGS = {"steps": "num_inference_steps", "guidance": "guidance_scale", "height": "height", "width": "width"}
@@ -65,12 +67,26 @@ def run_t2i(
     linspace_sigmas: bool = False,
     prompt_seed: bool = False,
 ) -> None:
+    provenance.guard(
+        images_dir / provenance.MANIFEST_NAME,
+        {
+            "driver": "t2i",
+            "base": str(ckpt.base),
+            "adapter": str(ckpt.adapter) if ckpt.adapter else None,
+            "samples_per_prompt": samples_per_prompt,
+            "seed": seed,
+            "gen_kwargs": dict(gen_kwargs),
+            "linspace_sigmas": linspace_sigmas,
+            "prompt_seed": prompt_seed,
+            "num_prompts": len(prompts),
+            "prompts_sha256": hashlib.sha256("\n".join(prompts).encode()).hexdigest(),
+        },
+        outputs_exist=images_dir.exists() and any(images_dir.glob("p*_s*.png")),
+    )
     jobs = t2i_jobs(prompts, images_dir, samples_per_prompt, shard)
     if not jobs:
         print("[t2i] all images present — nothing to generate")
         return
-    import hashlib
-
     import numpy as np
     import torch
 
@@ -139,6 +155,21 @@ def run_text(
         return
 
     model = server_model(endpoint)
+    provenance.guard(
+        out_file.parent / f"{out_file.stem}.manifest.json",
+        {
+            "driver": "text",
+            "served_model": model,
+            "samples_per_prompt": samples_per_prompt,
+            "temperature": gen.get("temperature", 0.6),
+            "top_p": gen.get("top_p", 0.95),
+            "max_tokens": gen.get("max_tokens", 16384),
+            "prompt_suffix": gen.get("prompt_suffix", ""),
+            "num_items": len(items),
+            "items_sha256": hashlib.sha256("\n".join(str(i["id"]) for i in items).encode()).hexdigest(),
+        },
+        outputs_exist=bool(done),
+    )
     url = f"{endpoint.rstrip('/')}/v1/chat/completions"
     suffix = gen.get("prompt_suffix", "")
     base_payload = {
