@@ -14,3 +14,5 @@ fire
 matplotlib
 opencv-python-headless
 qwen-vl-utils
+# hpsv3 imports torch.utils.tensorboard at module scope, which needs the real package.
+tensorboard
