@@ -40,9 +40,9 @@ def test_reset_adapter_seeds_before_drawing():
 
 def test_the_backend_passes_the_configured_seed_through():
     """The wiring gap that made test 6 unenforced: the field existed but nothing passed it."""
-    from unirl.train.backend import base_backend
+    from unirl.train.backend.base_backend import BaseFSDP2Backend
 
-    source = inspect.getsource(base_backend._inject_structural)
+    source = inspect.getsource(BaseFSDP2Backend._inject_structural)
     assert "seed=lora_cfg.seed" in source, "backend drops the configured LoRA seed"
 
 
