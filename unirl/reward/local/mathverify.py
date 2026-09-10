@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import threading
 from dataclasses import dataclass
-from typing import List
+from typing import Any, List, Optional
 
 from unirl.reward.base import BaseRewardComponentSpec
 from unirl.types.reward import RewardRequest
@@ -14,32 +14,54 @@ from .base import LocalRewardBackend
 
 # math-verify's own timeouts are signal.alarm-based, and signal only works on the
 # main thread — under the reward's Ray worker thread they raise, which would score
-# every sample 0. A worker thread with a join deadline is the portable equivalent.
+# every sample 0. A thread cannot be killed and a runaway grade holds the GIL, so the
+# grade runs in a child PROCESS that can actually be terminated on expiry.
 _VERIFY_TIMEOUT_S = float(os.environ.get("UNIRL_MATHVERIFY_TIMEOUT_S", "10"))
+
+# One long-lived single-worker pool per process: a pool-per-call would fork 512 times
+# a rollout. Replaced wholesale when a timeout kills its worker.
+_POOL: Optional[Any] = None
+_POOL_LOCK = threading.Lock()
+
+
+def _grade(gold: str, prediction: str) -> bool:
+    """Run in the child: the raw math-verify call, with its own timeouts left off."""
+    from math_verify import parse, verify
+
+    return bool(
+        verify(
+            parse("\\boxed{" + gold + "}", parsing_timeout=None),
+            parse(prediction, parsing_timeout=None),
+            timeout_seconds=None,
+        )
+    )
+
+
+def _reset_pool() -> None:
+    """Drop the pool, terminating a worker still spinning on a runaway expression."""
+    global _POOL
+    if _POOL is not None:
+        _POOL.terminate()
+        _POOL.join()
+        _POOL = None
 
 
 def _verify_with_deadline(gold: str, prediction: str, *, seconds: float) -> bool:
     """Grade one answer, returning False if math-verify does not finish in ``seconds``."""
-    from math_verify import parse, verify
+    import multiprocessing
 
-    result: List[bool] = []
-
-    def _run() -> None:
-        result.append(
-            bool(
-                verify(
-                    parse("\\boxed{" + gold + "}", parsing_timeout=None),
-                    parse(prediction, parsing_timeout=None),
-                    timeout_seconds=None,
-                )
-            )
-        )
-
-    worker = threading.Thread(target=_run, daemon=True)
-    worker.start()
-    worker.join(seconds)
-    return result[0] if result else False
-
+    global _POOL
+    with _POOL_LOCK:
+        if _POOL is None:
+            _POOL = multiprocessing.get_context("fork").Pool(processes=1)
+        try:
+            return bool(_POOL.apply_async(_grade, (gold, prediction)).get(timeout=seconds))
+        except multiprocessing.TimeoutError:
+            _reset_pool()
+            return False
+        except Exception:
+            _reset_pool()
+            return False
 
 class MathVerifyRewardScorer(LocalRewardBackend):
     r"""Numeric/symbolic reward via HuggingFace ``math-verify`` (1.0 match / 0.0)."""
