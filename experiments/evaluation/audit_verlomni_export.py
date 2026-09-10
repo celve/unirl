@@ -105,8 +105,17 @@ def compare(
 
     if mismatched:
         findings.append(f"{len(mismatched)} tensors differ beyond {tolerance:.1e}: {mismatched[:6]}")
-    if all(float(exported_lora[n].to(torch.float32).abs().max().item()) == 0.0 for n in shared) and shared:
-        findings.append("every exported tensor is all-zero — the export folded an uninitialized adapter")
+    # An untrained adapter has Kaiming lora_A and all-zero lora_B, so BA is a no-op. Test
+    # lora_B only, and require ALL of them zero: a single zero lora_B is legitimate, e.g.
+    # SD3 block 23's attn.add_q_proj feeds nothing (context_pre_only) and takes no gradient.
+    exported_b = [n for n in shared if "lora_b" in n]
+    if exported_b and all(
+        float(exported_lora[n].to(torch.float32).abs().max().item()) == 0.0 for n in exported_b
+    ):
+        findings.append(
+            f"all {len(exported_b)} exported lora_B tensors are zero — the adapter is a no-op, "
+            "so the export folded an untrained or uninitialized adapter"
+        )
 
     report: Dict[str, object] = {
         "native_lora_tensors": len(native_lora),
@@ -123,17 +132,83 @@ def compare(
     return not findings, findings, report
 
 
+def _max_lora_diff(left: Dict[str, object], right: Dict[str, object]) -> Optional[float]:
+    """Largest |Δ| over lora tensors shared by name; None when the two share none."""
+    import torch
+
+    a = {_normalize(k): v for k, v in _lora_tensors(left).items()}
+    b = {_normalize(k): v for k, v in _lora_tensors(right).items()}
+    shared = [n for n in set(a) & set(b) if tuple(a[n].shape) == tuple(b[n].shape)]
+    if not shared:
+        return None
+    return max(float((a[n].to(torch.float32) - b[n].to(torch.float32)).abs().max().item()) for n in shared)
+
+
+def check_export_tracks_checkpoint(
+    native_a: Dict[str, object],
+    exported_a: Dict[str, object],
+    native_b: Dict[str, object],
+    exported_b: Dict[str, object],
+    *,
+    tolerance: float,
+) -> Tuple[List[str], Dict[str, object]]:
+    """Two checkpoints must yield two different exports — a self-comparison cannot see a stale file."""
+    checkpoint_diff = _max_lora_diff(native_a, native_b)
+    export_diff = _max_lora_diff(exported_a, exported_b)
+
+    findings: List[str] = []
+    if checkpoint_diff is None or export_diff is None:
+        findings.append("cross-checkpoint check: the two runs share no comparable lora tensors")
+    elif checkpoint_diff > tolerance and export_diff <= tolerance:
+        findings.append(
+            f"the two checkpoints differ (max|Δ|={checkpoint_diff:.3e}) but their exports do not "
+            f"(max|Δ|={export_diff:.3e}): the export does not track its checkpoint — a stale file, "
+            "a cached path, or the same directory read twice would pass every self-comparison"
+        )
+    elif checkpoint_diff <= tolerance and export_diff > tolerance:
+        findings.append(
+            f"the two checkpoints agree (max|Δ|={checkpoint_diff:.3e}) but their exports differ "
+            f"(max|Δ|={export_diff:.3e}): the exporter is not deterministic"
+        )
+    return findings, {
+        "cross_checkpoint_native_max_abs_diff": checkpoint_diff,
+        "cross_checkpoint_export_max_abs_diff": export_diff,
+    }
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--native-checkpoint", type=Path, required=True, help="VeRL-Omni native checkpoint dir or file")
     parser.add_argument("--exported-adapter", type=Path, required=True, help="PEFT/diffusers adapter the exporter wrote")
+    parser.add_argument("--previous-checkpoint", type=Path, default=None, help="an earlier checkpoint, to prove the export tracks it")
+    parser.add_argument("--previous-export", type=Path, default=None, help="the adapter exported from --previous-checkpoint")
     parser.add_argument("--tolerance", type=float, default=1e-5)
     parser.add_argument("--output", type=Path, default=None, help="write the JSON report here as well as stdout")
     args = parser.parse_args(argv)
 
+    if bool(args.previous_checkpoint) != bool(args.previous_export):
+        parser.error("--previous-checkpoint and --previous-export must be given together")
+
     native = _load_state_dict(args.native_checkpoint)
     exported = _load_state_dict(args.exported_adapter)
     passed, findings, report = compare(native, exported, tolerance=args.tolerance)
+
+    if args.previous_checkpoint:
+        cross_findings, cross_report = check_export_tracks_checkpoint(
+            _load_state_dict(args.previous_checkpoint),
+            _load_state_dict(args.previous_export),
+            native,
+            exported,
+            tolerance=args.tolerance,
+        )
+        findings = [*findings, *cross_findings]
+        report.update(cross_report)
+        report["findings"] = findings
+        report["previous_checkpoint"] = str(args.previous_checkpoint)
+        report["previous_export"] = str(args.previous_export)
+        passed = passed and not cross_findings
+    else:
+        report["cross_checkpoint_checked"] = False
 
     report["native_checkpoint"] = str(args.native_checkpoint)
     report["exported_adapter"] = str(args.exported_adapter)
