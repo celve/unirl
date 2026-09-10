@@ -19,6 +19,7 @@ from unirl.trainer.hydra import parse_hydra_cfg, remote_hydra
 from unirl.types.sample import Sample
 from unirl.types.sampling import BaseSamplingParams, total_samples_per_prompt
 from unirl.utils.graceful_shutdown import run_with_timeout
+from unirl.utils.parity_gate import ParityGate, publication_path_name
 
 logger = logging.getLogger(__name__)
 
@@ -299,6 +300,7 @@ class ARTrainer(BaseTrainer):
             if do_sync and do_offload and self._supports_staged_wake:
                 self.rollout.wake_up(tags=["weights"])
                 self.weight_sync.sync()
+                self._note_publication()
                 train_state_maybe_offloaded = True
                 self.backend.offload()
                 full_wake_after_train_offload_in_progress = True
@@ -307,6 +309,7 @@ class ARTrainer(BaseTrainer):
             elif do_sync:
                 self.rollout.wake_up()
                 self.weight_sync.sync()
+                self._note_publication()
                 if do_offload:
                     train_state_maybe_offloaded = True
                     self.backend.offload()
@@ -409,7 +412,26 @@ class ARTrainer(BaseTrainer):
             step_time_s=time.perf_counter() - t0,
             trunc_len=getattr(self.sampling_params.get("ar"), "max_new_tokens", None),
         )
+        self.wandb_logger.log_with_step(
+            step_key="rollout/step",
+            step=rollout_id + 1,
+            metrics=self._gate.check(result, rollout_id=rollout_id),
+            prefix="",
+        )
         return result, mean_reward
+
+    @property
+    def _gate(self) -> ParityGate:
+        """The run's parity gate, built on first use so a bare ``train_step`` is still gated."""
+        gate = getattr(self, "_parity_gate", None)
+        if gate is None:
+            gate = ParityGate.from_env()
+            self._parity_gate = gate
+        return gate
+
+    def _note_publication(self) -> None:
+        """Tag the next parity check as correctness test 2 for the path that just published."""
+        self._gate.note_publication(publication_path_name(self.weight_sync))
 
     def evaluate(self, rollout_id: int) -> float:
         """Periodic eval — ``avg@k`` accuracy on the eval prompt set."""
@@ -595,6 +617,7 @@ class ARTrainer(BaseTrainer):
             num_rollouts=num_rollouts,
             extra={"adv_normalization_scope": self.adv_normalization_scope},
         )
+        self._parity_gate = ParityGate.from_env()
         try:
             if self.eval_interval > 0:
                 self.evaluate(rollout_id=-1)
