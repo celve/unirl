@@ -30,6 +30,12 @@ _POOL_LOCK = threading.Lock()
 # A 0.0 has three causes — wrong answer, expiry, grader error — and a reward curve
 # cannot distinguish them. Counted so a flat curve is attributable after the fact.
 VERIFY_COUNTERS: Dict[str, int] = {"graded": 0, "expired": 0, "failed": 0}
+_LAST_REPORTED: Dict[str, int] = {"graded": 0, "expired": 0, "failed": 0}
+_LAST_REPORTED_BAD = 0
+
+# Pool.__del__ raises at interpreter shutdown once its module globals are torn
+# down; closing at exit keeps that noise out of a run's log.
+atexit.register(lambda: _reset_pool())
 
 
 def _grade(gold: str, prediction: str) -> bool:
@@ -63,9 +69,6 @@ def _verify_with_deadline(gold: str, prediction: str, *, seconds: float) -> bool
     with _POOL_LOCK:
         if _POOL is None:
             _POOL = multiprocessing.get_context("fork").Pool(processes=1)
-            # Pool.__del__ raises at interpreter shutdown once its module globals are
-            # torn down; an atexit close keeps that noise out of a run's log.
-            atexit.register(_reset_pool)
         try:
             out = bool(_POOL.apply_async(_grade, (gold, prediction)).get(timeout=seconds))
             VERIFY_COUNTERS["graded"] += 1
@@ -108,10 +111,21 @@ class MathVerifyRewardScorer(LocalRewardBackend):
             except Exception:
                 ok = False
             rewards.append(1.0 if ok else 0.0)
-        if VERIFY_COUNTERS["expired"] or VERIFY_COUNTERS["failed"]:
+        # Only on change: the counters are cumulative, so an unconditional check would
+        # repeat one line every batch for the rest of the run and bury the event.
+        global _LAST_REPORTED_BAD
+        bad = VERIFY_COUNTERS["expired"] + VERIFY_COUNTERS["failed"]
+        if bad > _LAST_REPORTED_BAD:
+            d_exp = VERIFY_COUNTERS["expired"] - _LAST_REPORTED["expired"]
+            d_fail = VERIFY_COUNTERS["failed"] - _LAST_REPORTED["failed"]
+            _LAST_REPORTED.update(VERIFY_COUNTERS)
+            _LAST_REPORTED_BAD = bad
             logger.warning(
-                "math-verify counters: graded=%d expired=%d failed=%d — a 0.0 reward from an "
-                "expiry or a grader error is indistinguishable from a wrong answer in the curve",
+                "math-verify: +%d expired +%d failed this batch (cumulative graded=%d "
+                "expired=%d failed=%d) - a 0.0 from an expiry or grader error is "
+                "indistinguishable from a wrong answer in the reward curve",
+                d_exp,
+                d_fail,
                 VERIFY_COUNTERS["graded"],
                 VERIFY_COUNTERS["expired"],
                 VERIFY_COUNTERS["failed"],
