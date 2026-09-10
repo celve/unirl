@@ -122,14 +122,19 @@ def _metadata_bytes(obj: object) -> int:
 
 
 def _hash_payloads(payloads: Sequence[object]) -> str:
-    """Correctness hash over materialized content, order-independent by leaf index."""
+    """Representation-invariant content hash: leaf bytes in leaf order, ignoring grouping.
+
+    The tree keeps one tensor per leaf while the flat join concatenates each group,
+    so hashing tensors individually would differ by construction. Flattening first is
+    what lets the two representations be compared for equality, which is what E5-R asks.
+    """
     import torch
 
     digest = hashlib.sha256()
     for tensor in payloads:
         # view(torch.uint8) rather than numpy(): numpy has no bfloat16 dtype.
-        head = tensor.detach().to("cpu").contiguous().view(-1)[:4096]
-        digest.update(head.view(torch.uint8).numpy().tobytes())
+        flat = tensor.detach().to("cpu").contiguous().view(-1)
+        digest.update(flat.view(torch.uint8).numpy().tobytes())
     return digest.hexdigest()
 
 
