@@ -132,6 +132,45 @@ def load_pe_lora_state_dict(adapter: str):
     }
 
 
+def verify_adapter_loaded(pipeline, state_dict: Dict[str, "object"]) -> Dict[str, object]:
+    """Require exactly one attached adapter whose live weights equal what was handed over.
+
+    Diffusers names an adapter ``default_{len(module.r)}`` — it counts what is already
+    attached — so the segment between ``lora_X`` and ``weight`` is stripped rather than
+    assumed. A second adapter in one pipeline would both change that name and leave the
+    first one active, which scores a checkpoint with an earlier checkpoint's weights and
+    looks exactly like a healthy run. Asserting a count of one and comparing by value
+    catches that as well as a failed load.
+    """
+    import re
+
+    from peft.tuners.tuners_utils import BaseTunerLayer
+
+    counts = {len(m.r) for m in pipeline.transformer.modules() if isinstance(m, BaseTunerLayer)}
+    if counts != {1}:
+        raise ValueError(f"expected exactly one attached adapter, found adapter counts {sorted(counts)}")
+
+    def canonical(name: str) -> str:
+        return re.sub(r"(lora_[AB])\.[^.]+\.weight$", r"\1.weight", name)
+
+    live = {
+        canonical(f"transformer.{name}"): param
+        for name, param in pipeline.transformer.named_parameters()
+        if "lora_" in name
+    }
+    missing = sorted(set(state_dict) - set(live))
+    if missing:
+        raise ValueError(f"{len(missing)} adapter tensors never reached the transformer, e.g. {missing[:3]}")
+
+    worst = 0.0
+    for key, want in state_dict.items():
+        got = live[key].detach().float().cpu()
+        worst = max(worst, float((got - want.detach().float().cpu()).abs().max()))
+    if worst > 2e-3:
+        raise ValueError(f"loaded adapter differs from the checkpoint: max |delta| {worst:.3e}")
+    return {"adapter_verified_tensors": len(state_dict), "adapter_max_load_delta": worst}
+
+
 def build_pipeline(base: str, adapter: Optional[str], device: str):
     """Load the frozen diffusion evaluation pipeline, optionally with a PE stage adapter."""
     import torch
@@ -142,6 +181,7 @@ def build_pipeline(base: str, adapter: Optional[str], device: str):
     if adapter:
         state_dict, provenance = load_pe_lora_state_dict(adapter)
         pipeline.load_lora_weights(state_dict)
+        provenance.update(verify_adapter_loaded(pipeline, state_dict))
     pipeline.set_progress_bar_config(disable=True)
     return pipeline, provenance
 
