@@ -7,7 +7,9 @@ first optimizer update, and again after each weight-publication path. This modul
 both, and records the tolerance it used so an archive shows whether a gate was armed.
 
 Arm it with ``UNIRL_PARITY_TOLERANCE=<float>``; unset, the check records and never raises.
-``UNIRL_PARITY_STRICT=0`` downgrades a breach to a warning while still recording it.
+``UNIRL_PARITY_STRICT=0`` downgrades a breach to a warning while still recording it, and
+``UNIRL_PARITY_MEASURE`` decides whether the gauge is computed at all — a timing run wants
+the instrumentation without measurement cost inside its timed path.
 """
 
 from __future__ import annotations
@@ -29,6 +31,20 @@ STEADY_STATE = "steady_state"
 
 # Numeric codes, because the metric sinks coerce every value to a float.
 _CONTEXT_CODES = {BEFORE_FIRST_UPDATE: 1.0, AFTER_PUBLICATION: 2.0, STEADY_STATE: 0.0}
+
+
+def parity_measurement_enabled() -> bool:
+    """Whether to pay for the parity gauge at all — the D2H copy and the device sync.
+
+    Separate from the tolerance because a timing run must be able to take the driver clock
+    and phase timers without measurement cost inside one framework's timed path, which is
+    the mirror image of the protocol's rule against subtracting a phase from one side.
+  Set ``UNIRL_PARITY_MEASURE=1``; an armed ``UNIRL_PARITY_TOLERANCE`` implies it.
+    """
+    explicit = os.environ.get("UNIRL_PARITY_MEASURE")
+    if explicit is not None:
+        return explicit not in ("0", "false", "False", "")
+    return os.environ.get("UNIRL_PARITY_TOLERANCE") not in (None, "")
 
 
 class ParityViolation(RuntimeError):
@@ -149,5 +165,6 @@ __all__ = [
     "ParityViolation",
     "micro_absdiff_max",
     "micro_absdiff_mean",
+    "parity_measurement_enabled",
     "publication_path_name",
 ]

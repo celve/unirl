@@ -24,9 +24,6 @@ class LatentSegment(Segment):
     sigmas: Optional[torch.Tensor] = shared_field(default=None)  # [T+1] float — the full schedule
     indices: Optional[torch.Tensor] = shared_field(default=None)  # [K] long — step of each snapshot
     sde_logp: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None)  # [N_segs, S], S = len(sde_indices)
-    # The engine's own per-step log-probs, kept when prepare_segment overwrites sde_logp
-    # with a replay anchor, so rollout/replay parity stays measurable.
-    rollout_sde_logp: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None)  # [N_segs, S]
     sde_means: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None)  # [N_segs, S] + *latent_shape
     sde_indices: Optional[torch.Tensor] = shared_field(default=None)  # [S] long — step per sde_logp slot
     log_probs: Optional[torch.Tensor] = field(kind=FieldKind.CONCAT, default=None)

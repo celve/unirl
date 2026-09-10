@@ -19,6 +19,7 @@ from unirl.trainer.hydra import parse_hydra_cfg, remote_hydra
 from unirl.types.sample import Sample
 from unirl.types.sampling import BaseSamplingParams, total_samples_per_prompt
 from unirl.utils.graceful_shutdown import run_with_timeout
+from unirl.utils.parity_gate import ParityGate, publication_path_name
 
 logger = logging.getLogger(__name__)
 
@@ -299,6 +300,8 @@ class ARTrainer(BaseTrainer):
             if do_sync and do_offload and self._supports_staged_wake:
                 self.rollout.wake_up(tags=["weights"])
                 self.weight_sync.sync()
+                if getattr(self, "_parity_gate", None) is not None:
+                    self._parity_gate.note_publication(publication_path_name(self.weight_sync))
                 train_state_maybe_offloaded = True
                 self.backend.offload()
                 full_wake_after_train_offload_in_progress = True
@@ -307,6 +310,8 @@ class ARTrainer(BaseTrainer):
             elif do_sync:
                 self.rollout.wake_up()
                 self.weight_sync.sync()
+                if getattr(self, "_parity_gate", None) is not None:
+                    self._parity_gate.note_publication(publication_path_name(self.weight_sync))
                 if do_offload:
                     train_state_maybe_offloaded = True
                     self.backend.offload()
@@ -598,6 +603,7 @@ class ARTrainer(BaseTrainer):
         try:
             if self.eval_interval > 0:
                 self.evaluate(rollout_id=-1)
+            self._parity_gate = ParityGate.from_env()
             for rollout_id in range(start_rollout, num_rollouts):
                 training_progress = rollout_id / max(1, num_rollouts - 1)
                 inputs = self.data_source.get_samples(self.batch_size)
@@ -612,6 +618,12 @@ class ARTrainer(BaseTrainer):
                     rollout_id=rollout_id,
                 )
                 self.wandb_logger.log_progress(rollout_id, num_rollouts, result, mean_reward, logger=logger)
+                self.wandb_logger.log_with_step(
+                    step_key="rollout/step",
+                    step=rollout_id + 1,
+                    metrics=self._parity_gate.check(result, rollout_id=rollout_id),
+                    prefix="",
+                )
                 if self.eval_interval > 0 and (rollout_id + 1) % self.eval_interval == 0:
                     self.evaluate(rollout_id=rollout_id)
                 self.maybe_save_checkpoint(
