@@ -46,3 +46,9 @@ inference server is down. The t2i payload needs no network, so it goes first the
 `all(not p.abs().sum().item() for p in lora_b)` with an empty-list guard — **all** `lora_B`
 zero, never **any**. A single zero `lora_B` is legitimate: SD3's last block sets
 `context_pre_only`, so `attn.add_q_proj` feeds nothing and never takes a gradient.
+
+This is the repo-wide convention, not a local choice — three sites agree, and two reached it
+independently: here, `unirl/tools/`-adjacent export checking via
+`experiments/evaluation/audit_verlomni_export.py`, and E2's hand verification of a real
+export. Write a new zero-guard the same way rather than rederiving it; testing **any**
+`lora_B` zero would fail every SD3 adapter on block 23 alone.
