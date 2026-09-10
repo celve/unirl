@@ -513,6 +513,18 @@ class Qwen3ARStage(ARStage[Qwen3ARConditions]):
             full_ids = prompt_ids
             full_mask = prompt_mask
 
+        # A total length in (8, 128) routes flex_attention to its DECODE kernel, whose
+        # config filters yield no autotune choice and raise NoValidChoicesError; padding
+        # up to 128 keeps the prefill kernel. The columns are masked off and every
+        # per-token result is sliced back to its true length below, so this is inert.
+        attn_impl = getattr(getattr(self.model.transformer, "config", None), "_attn_implementation", None)
+        if attn_impl == "flex_attention" and 0 < int(full_ids.shape[1]) < 128:
+            n_fill = 128 - int(full_ids.shape[1])
+            fill_ids = torch.full((batch_size, n_fill), pad_id, dtype=full_ids.dtype, device=device)
+            fill_mask = torch.zeros((batch_size, n_fill), dtype=full_mask.dtype, device=device)
+            full_ids = torch.cat([full_ids, fill_ids], dim=1)
+            full_mask = torch.cat([full_mask, fill_mask], dim=1)
+
         position_ids = (full_mask.long().cumsum(dim=-1) - 1).clamp(min=0)
 
         out = self.model.transformer(
