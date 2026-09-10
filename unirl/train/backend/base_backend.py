@@ -172,6 +172,7 @@ class BaseFSDP2Backend(Remote):
                 dropout=lora_cfg.dropout,
                 bias=lora_cfg.bias,
                 task_type=lora_cfg.task_type,
+                seed=lora_cfg.seed,
             )
             # Frozen sibling adapters (e.g. OPD teachers): injected pre-wrap so FSDP
             # shards them and checkpoints stay symmetric; requires_grad=False keeps

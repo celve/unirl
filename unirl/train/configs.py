@@ -47,6 +47,10 @@ class LoraConfig:
     dropout: float = 0.0
     bias: str = "none"
     task_type: str = "FEATURE_EXTRACTION"
+    # Governs the A-matrix draw at adapter reset. Left null, initialization comes from
+    # whatever global RNG state the worker holds, so two runs configured with different
+    # seed IDs can share a LoRA init — see unirl/utils/worker_rng.py.
+    seed: Optional[int] = None
     # Frozen inference-only adapters next to the trainable ``default`` (e.g. OPD
     # teachers): {name, path} entries (``Any`` for the same OmegaConf 2.3 reason
     # as ``target_modules``).
