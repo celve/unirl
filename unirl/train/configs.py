@@ -47,6 +47,9 @@ class LoraConfig:
     dropout: float = 0.0
     bias: str = "none"
     task_type: str = "FEATURE_EXTRACTION"
+    # Run seed for adapter initialization; None leaves the draw to global RNG, so
+    # two runs with different seed IDs share an initialization.
+    seed: Optional[int] = None
     # Frozen inference-only adapters next to the trainable ``default`` (e.g. OPD
     # teachers): {name, path} entries (``Any`` for the same OmegaConf 2.3 reason
     # as ``target_modules``).
