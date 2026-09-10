@@ -112,9 +112,20 @@ def load_pe_lora_state_dict(adapter: str):
     renamed = {f"transformer.{k.replace('.default.', '.')}": v for k, v in raw.items()}
     if not renamed:
         raise ValueError(f"{path}: policy_state_dict is empty")
+
+    # An adapter whose every lora_B is still at PEFT's zero init is a silent no-op, and
+    # its scores would be the base model's. Guard on *all* being zero, never any: SD3's
+    # last block has context_pre_only=True, so its add_q_proj output feeds nothing, takes
+    # no gradient, and legitimately stays zero.
+    b_tensors = [v for k, v in renamed.items() if ".lora_B." in k]
+    if b_tensors and not any(float(v.abs().sum()) for v in b_tensors):
+        raise ValueError(f"{path}: every lora_B is zero — this adapter would score as the base model")
+
     return renamed, {
         "adapter_path": str(path),
         "adapter_num_tensors": len(renamed),
+        "adapter_num_lora_b": len(b_tensors),
+        "adapter_zero_lora_b": sum(1 for v in b_tensors if not float(v.abs().sum())),
         "adapter_step": blob.get("step"),
         "adapter_optimizer_step_count": blob.get("optimizer_step_count"),
         "adapter_lora_config": lora_config,
