@@ -16,6 +16,7 @@ from unirl.config.require import require
 from unirl.models.types.bundle import Bundle
 
 from .assets import export_local_asset_bases
+from .compat import install_hymm_compat
 from .config import LEO2_CONFIG_RELPATH, Leo2PipelineConfig
 
 _HYMM_BOOTSTRAPPED = False
@@ -338,6 +339,9 @@ class Leo2Bundle(Bundle):
     @classmethod
     def from_config(cls, config: Leo2PipelineConfig) -> "Leo2Bundle":
         args = _bootstrap_hymm(config)
+        # Here, not in _bootstrap_hymm: that early-returns once bootstrapped, so a second
+        # bundle in the same process would skip the install.
+        install_hymm_compat()
 
         local_rank = int(os.environ.get("LOCAL_RANK", os.environ.get("RAY_LOCAL_RANK", 0)))
         if torch.cuda.is_available():

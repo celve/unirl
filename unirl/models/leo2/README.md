@@ -135,11 +135,18 @@ driver dies unpickling them otherwise.
 Each row is a divergence from stock hymm that this package installs at runtime, with the
 condition that retires it.
 
+`compat.py` fingerprints before it patches and **fails closed**: the FA3 shim requires
+`cu_seqlens_q`, `cu_seqlens_k`, `max_seqlen_q`, `max_seqlen_k`, `softmax_scale`, `causal`
+and `deterministic` to be present and the cu/max pairs to be in order, discriminates on
+`seqused_q`, and raises rather than patch a signature it does not recognise. A silently
+mis-positioned varlen call would corrupt attention, not crash.
+
 | Patch | Where it installs | Delete it when |
 |---|---|---|
+| FlashAttention-3 varlen: insert `seqused_q, seqused_k = None, None` positionally and unwrap `(out, lse)` | `compat.install_hymm_compat`, rebinding `hymm.models.basic.flash_attn_no_pad.flash_attn_varlen_func_v3` | hymm calls FA3 through its own version-tolerant wrapper, or `flash_attn_interface` is pinned below the `seqused` API |
 | `gate.wg.forward` follows the input dtype | `bundle._patch_router_dtype`, under `uniform_bf16` | FSDP2 stops requiring one original dtype per shard group, or hymm stops computing the MoE router in an autocast-disabled fp32 region |
 | whole-DiT bf16 cast (fp32 router lost) | `config.uniform_bf16` | same trigger as above |
 | `ensure_hy_parallel_state()` | `bundle`, re-checked in `diffusion.predict_noise` | `hy_parallelism.parallel_states.get_parallel_state()` stops constructing a fresh `ParallelDims` when uninitialised |
 | `sys.path` bootstrap of the hymm repo | `bundle._resolve_hymm_paths` | hymm ships as an installable distribution |
-| assert `capture_init_state` is empty | `bundle.from_config`, under meta-init | core `restore_init_state` resolves post-wrap owners and raises on misses instead of skipping them — the AC/peft-unwrapping version on `personal/zuhaoding/leo2.0/dev` is the ready patch |
+| assert `capture_init_state` is empty | `bundle.from_config`, under meta-init | core `restore_init_state` unwraps the AC and peft wrappers before resolving a captured tensor's owner, and raises on a miss instead of skipping it |
 | `_dcp_load_sharded` re-implements core's `.base_layer.` remap and coverage check | `bundle._dcp_load_sharded` | `sharded_load` grows a DCP reader, at which point this package can stash `_transformer_weights_path` like every other bundle |
