@@ -48,6 +48,25 @@ eta=0 mean, so `diffusion_prediction` feeds `strategy.denoise` **un-negated**.
   are left behind, so `_move_non_block_to_device` places them or the first forward hits a
   cpu/cuda mismatch. `hunyuan_image3` sidesteps this with an eager whole-transformer
   `.to(device)`, which is not possible at 150 GB.
+- **`meta_init_transformer: true` is the measured path, and this package supplies
+  `materialize()` rather than `_transformer_weights_path`.** `load_sharded` reads only
+  `*.safetensors`, so the DCP read is ours. The order inside `materialize` is load-bearing:
+
+      to_empty(device) -> restore_init_state -> apply_deferred_ops -> _dcp_load_sharded
+
+  `apply_deferred_ops` (the LoRA A/B reset) must run **before** the load, because the load
+  *skips* every `lora_A` / `lora_B` / `lora_embedding_` key and would otherwise leave
+  `to_empty` garbage in them. The backend calls `apply_deferred_ops` again afterwards; that
+  second call is a no-op because the queue is cleared.
+- **The load iterates the live state dict, not the checkpoint.** peft exposes a base weight
+  as `<module>.base_layer.<leaf>` while the checkpoint says `<leaf>`, so each live key is
+  mapped back and a reverse map re-keys the write-back. Getting this wrong is not
+  hypothetical: an earlier version loaded 1176 of 2130 tensors and left the rest garbage,
+  which is why the load raises when either direction has more than a quarter as many
+  unmatched keys as matched ones.
+- **The bf16 cast under meta-init re-declares rather than copies.** `model.to(dtype)` would
+  be a 150 GB host copy per rank of values that are garbage until the load fills them, so
+  `_cast_params_dtype_no_copy` swaps in `torch.empty_like` tensors instead.
 - **Aux models live in `model_dict`, a plain dict.** hymm keeps the text encoder and VAE
   there specifically so they are not registered submodules — FSDP, `to_empty` and the
   optimizer never see them.
@@ -122,3 +141,5 @@ condition that retires it.
 | whole-DiT bf16 cast (fp32 router lost) | `config.uniform_bf16` | same trigger as above |
 | `ensure_hy_parallel_state()` | `bundle`, re-checked in `diffusion.predict_noise` | `hy_parallelism.parallel_states.get_parallel_state()` stops constructing a fresh `ParallelDims` when uninitialised |
 | `sys.path` bootstrap of the hymm repo | `bundle._resolve_hymm_paths` | hymm ships as an installable distribution |
+| assert `capture_init_state` is empty | `bundle.from_config`, under meta-init | core `restore_init_state` resolves post-wrap owners and raises on misses instead of skipping them — the AC/peft-unwrapping version on `personal/zuhaoding/leo2.0/dev` is the ready patch |
+| `_dcp_load_sharded` re-implements core's `.base_layer.` remap and coverage check | `bundle._dcp_load_sharded` | `sharded_load` grows a DCP reader, at which point this package can stash `_transformer_weights_path` like every other bundle |

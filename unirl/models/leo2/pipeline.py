@@ -128,6 +128,11 @@ class Leo2Pipeline(Pipeline):
             params.sigmas is not None,
             "Leo2Pipeline.generate: params.sigmas is None -- the hosting engine pins the schedule first.",
         )
+        require(
+            not self.bundle.weights_pending(),
+            "Leo2Pipeline.generate: the DiT is still on meta -- a train backend calls materialize(), so a "
+            "bundle built without one needs meta_init_transformer=false.",
+        )
 
         conditioning = list(sample.conditioning())
         texts = next((c for c in conditioning if isinstance(c, Texts)), None)

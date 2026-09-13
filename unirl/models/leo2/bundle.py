@@ -6,7 +6,8 @@ import contextlib
 import importlib.util
 import os
 import sys
-from typing import Any
+import time
+from typing import Any, Dict, List
 
 import torch
 from torch import nn
@@ -14,6 +15,7 @@ from torch import nn
 from unirl.config.require import require
 from unirl.models.types.bundle import Bundle
 
+from .assets import export_local_asset_bases
 from .config import LEO2_CONFIG_RELPATH, Leo2PipelineConfig
 
 _HYMM_BOOTSTRAPPED = False
@@ -60,8 +62,11 @@ def _resolve_hymm_paths(config: Leo2PipelineConfig) -> str:
         "leo2: no generation config -- set bundle.config.generation_config_path (recipe: $LEO2_GENERATION_CONFIG).",
     )
 
+    # Before any hymm import: hymm.constants freezes TEXT_ENCODER_BASE / VAE_BASE at import time.
+    export_local_asset_bases(text_encoder_base=config.text_encoder_base, vae_base=config.vae_base)
+
     repo = config.hymm_repo_path
-    # find_spec rather than an import: hymm.constants freezes the asset env vars at import time.
+    # find_spec rather than an import, for the same reason.
     if not all(importlib.util.find_spec(name) for name in _HYMM_MODULES):
         require(
             bool(repo),
@@ -187,6 +192,79 @@ def _dcp_load_into(model: nn.Module, weights_dir: str) -> None:
     )
 
 
+def _cast_params_dtype_no_copy(model: nn.Module, dtype: torch.dtype) -> int:
+    """Re-declare every floating tensor of another dtype as an EMPTY one of ``dtype``; returns the count."""
+    n = 0
+    for module in model.modules():
+        for name, p in list(module._parameters.items()):
+            if p is not None and p.is_floating_point() and p.dtype != dtype:
+                module._parameters[name] = nn.Parameter(torch.empty_like(p, dtype=dtype), requires_grad=p.requires_grad)
+                n += 1
+        for name, b in list(module._buffers.items()):
+            if b is not None and b.is_floating_point() and b.dtype != dtype:
+                module._buffers[name] = torch.empty_like(b, dtype=dtype)
+                n += 1
+    return n
+
+
+def _dcp_load_sharded(model: nn.Module, weights_dir: str, *, key_prefix: str = "model.") -> Dict[str, Any]:
+    """Fill an FSDP-wrapped model from a torch-DCP checkpoint, each rank reading only its shards."""
+    import pickle
+
+    import torch.distributed.checkpoint as dcp
+    from torch.distributed.checkpoint import FileSystemReader
+    from torch.distributed.checkpoint.state_dict import StateDictOptions, get_model_state_dict, set_model_state_dict
+
+    t0 = time.time()
+    md = pickle.load(open(os.path.join(weights_dir, ".metadata"), "rb"))
+    saved = md.state_dict_metadata
+    live = get_model_state_dict(model, options=StateDictOptions(full_state_dict=False, cpu_offload=False))
+    # peft exposes a base weight as ``<module>.base_layer.<leaf>`` and adds lora_A/lora_B
+    # params the checkpoint lacks; map the former back, skip the latter.
+    wanted: Dict[str, Any] = {}
+    live_name: Dict[str, str] = {}
+    skipped: List[str] = []
+    lora_keys = 0
+    for k, v in live.items():
+        if ".lora_A." in k or ".lora_B." in k or ".lora_embedding_" in k:
+            lora_keys += 1
+            continue
+        ck = k.replace(".base_layer.", ".")
+        if f"{key_prefix}{ck}" in saved:
+            wanted[ck] = v
+            live_name[ck] = k
+        else:
+            skipped.append(k)
+    unclaimed = [k for k in saved if k.startswith(key_prefix) and k[len(key_prefix) :] not in wanted]
+    # Both counts are rank-invariant, so every rank raises together or none does.
+    for names, what in ((skipped, "model keys absent from the checkpoint"), (unclaimed, "checkpoint keys unclaimed")):
+        if names and len(names) > len(wanted) // 4:
+            raise RuntimeError(
+                f"[leo2 bundle] sharded DCP load: {len(names)} {what} against {len(wanted)} matched "
+                f"in {weights_dir} (e.g. {names[:6]}); refusing to train on uninitialised weights"
+            )
+    dcp.load({key_prefix.rstrip("."): wanted}, storage_reader=FileSystemReader(weights_dir))
+    # DTensor shards were filled in place; this covers plain tensors the planner copied.
+    set_model_state_dict(
+        model,
+        {live_name[ck]: v for ck, v in wanted.items()},
+        options=StateDictOptions(full_state_dict=False, strict=False),
+    )
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    nbytes = 0
+    for v in wanted.values():
+        local = v.to_local() if hasattr(v, "to_local") else v
+        nbytes += local.numel() * local.element_size()
+    print(
+        f"[leo2 bundle] sharded DCP load: {len(wanted)} tensors, this rank {nbytes / 2**30:.1f} GB, "
+        f"{lora_keys} LoRA keys left as initialised, {len(skipped)} not in ckpt, {len(unclaimed)} unclaimed, "
+        f"{time.time() - t0:.1f}s",
+        flush=True,
+    )
+    return {"loaded": len(wanted), "skipped": skipped, "unclaimed": unclaimed, "seconds": time.time() - t0}
+
+
 _BLOCK_CLASSES = ("LeoLayer", "LeoDualLayer", "LeoTripleLayer")
 
 
@@ -275,18 +353,45 @@ class Leo2Bundle(Bundle):
         from hymm.models import build_model
 
         dtype = torch.bfloat16 if config.model_precision == "bf16" else torch.float32
-        model, _model_config = build_model(args, dtype=dtype, device="cpu", initialize_weights=False)
+        deferred = config.meta_init_transformer and not config.skip_load_ckpt
+        captured_init = None
+        if deferred:
+            from accelerate import init_empty_weights
 
-        if not config.skip_load_ckpt:
+            from unirl.models.types.meta_init import capture_init_state
+
+            t_build = time.time()
+            # Parameters on meta so nn.Linear's reset_parameters costs nothing (the eager CPU
+            # build of 75B took ~20 min per rank); buffers stay real on CPU to be captured.
+            with init_empty_weights(include_buffers=False):
+                model, _model_config = build_model(args, dtype=dtype, device="cpu", initialize_weights=False)
+            captured_init = capture_init_state(model)
+            require(
+                not captured_init["buffers"] and not captured_init["attrs"],
+                f"leo2: hymm's DiT now builds {len(captured_init['buffers'])} init-only buffer(s) and "
+                f"{len(captured_init['attrs'])} tensor attr(s) that to_empty() destroys, and core "
+                "restore_init_state silently skips owners it cannot resolve after the AC/LoRA wrap "
+                "-- see unirl/models/leo2/README.md '## Gotchas'.",
+            )
+            print(f"[leo2 bundle] meta build in {time.time() - t_build:.1f}s", flush=True)
+        else:
+            model, _model_config = build_model(args, dtype=dtype, device="cpu", initialize_weights=False)
+
+        if not config.skip_load_ckpt and not deferred:
             _dcp_load_into(model, config.ckpt_path)
         model.requires_grad_(False)
         model.eval()
         if config.uniform_bf16:
-            model.to(dtype=torch.bfloat16)
+            if deferred:
+                n_cast = _cast_params_dtype_no_copy(model, torch.bfloat16)
+                print(f"[leo2 bundle] re-declared {n_cast} non-bf16 tensors as empty bf16", flush=True)
+            else:
+                model.to(dtype=torch.bfloat16)
             _patch_router_dtype(model)
         # FSDPBackend shards and moves only the block classes; the rest must already be on
-        # the device or the first forward hits a cpu/cuda mismatch.
-        _move_non_block_to_device(model, device)
+        # the device or the first forward hits a cpu/cuda mismatch. Deferred: materialize() does it.
+        if not deferred:
+            _move_non_block_to_device(model, device)
 
         # tokenizer + frozen aux models + the hymm pipeline object
         from hymm.core.extra_model_provider import build_text_encoder, build_tkwrapper, build_vae
@@ -305,10 +410,45 @@ class Leo2Bundle(Bundle):
         model.load_generation_config(config.generation_config_path)
         model.build_diffusion_pipeline()
 
-        return cls(model=model, hymm_args=args, dtype=dtype, device=device, config=config)
+        bundle = cls(model=model, hymm_args=args, dtype=dtype, device=device, config=config)
+        bundle._pending_dcp = config.ckpt_path if deferred else None
+        bundle._meta_init_state = captured_init
+        return bundle
 
     def trainable_module(self) -> nn.Module:
         return self.model
+
+    def weights_pending(self) -> bool:
+        """True while the DiT is still on meta, i.e. no backend has called materialize() yet."""
+        return getattr(self, "_pending_dcp", None) is not None
+
+    def materialize(self, *, device: Any = None, with_aux: tuple = ()) -> None:
+        """Post-wrap weight load hook called by ``sharded_load.load_trainable_weights``; idempotent."""
+        require(
+            not with_aux,
+            f"Leo2Bundle.materialize: with_aux={with_aux!r} is not supported -- the text encoder and "
+            "VAE are eager modules in model_dict, outside the wrap.",
+        )
+        pending = getattr(self, "_pending_dcp", None)
+        if not pending:
+            return
+        self._pending_dcp = None
+
+        from unirl.models.types.meta_init import restore_init_state
+        from unirl.models.types.post_materialize import apply_deferred_ops
+
+        dev = torch.device(device) if device is not None else self.device
+        t0 = time.time()
+        if any(t.is_meta for t in self.model.parameters()) or any(t.is_meta for t in self.model.buffers()):
+            self.model.to_empty(device=dev)
+        n_restored = restore_init_state(self.model, getattr(self, "_meta_init_state", None))
+        # Before the load, not after: it skips the LoRA keys, so they must already be reset.
+        apply_deferred_ops(self.model)
+        print(
+            f"[leo2 bundle] materialised on {dev} (restored {n_restored} init tensors) in {time.time() - t0:.1f}s",
+            flush=True,
+        )
+        _dcp_load_sharded(self.model, pending)
 
     @contextlib.contextmanager
     def text_encoder_ctx(self):

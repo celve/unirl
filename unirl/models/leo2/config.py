@@ -23,6 +23,10 @@ class Leo2PipelineConfig:
     ckpt_path: str = ""
     generation_config_path: str = ""
     assets_base: Optional[str] = None
+    # Node-local mirrors of the text encoder / video VAE, used only when the directory
+    # exists on this node; otherwise hymm reads the copies under ASSETS_BASE.
+    text_encoder_base: Optional[str] = None
+    vae_base: Optional[str] = None
     # Appended after the yaml; EP must stay 1 because UniRL's FSDP hosts the experts locally.
     extra_hymm_args: List[str] = field(
         default_factory=lambda: [
@@ -52,6 +56,8 @@ class Leo2PipelineConfig:
 
     # loading
     skip_load_ckpt: bool = False  # debug only: random weights
+    # Build on meta and let the backend load post-wrap; see README.md '## Precision & loading'.
+    meta_init_transformer: bool = False
     uniform_bf16: bool = True  # cast the fp32 MoE router too; see README.md '## Precision & loading'
 
     device: Optional[str] = None

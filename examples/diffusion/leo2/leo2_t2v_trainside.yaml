@@ -39,6 +39,10 @@ bundle:
     ckpt_path: ${oc.env:LEO2_CKPT_DIR}
     generation_config_path: ${oc.env:LEO2_GENERATION_CONFIG}
     assets_base: ${oc.env:LEO2_ASSETS_BASE,null}
+    text_encoder_base: ${oc.env:LEO2_TEXT_ENCODER_BASE,null}
+    vae_base: ${oc.env:LEO2_VAE_BASE,null}
+    # Measured configuration: 22 min -> ~107 s to weights-ready. false keeps the eager load.
+    meta_init_transformer: true
     video_shift: 3.0
     text_encoder_gpu_transient: true
 
