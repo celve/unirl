@@ -134,15 +134,27 @@ driver dies unpickling them otherwise.
 Each row is a divergence from stock hymm that this package installs at runtime, with the
 condition that retires it.
 
-`compat.py` fingerprints before it patches and **fails closed**: the FA3 shim requires
-`cu_seqlens_q`, `cu_seqlens_k`, `max_seqlen_q`, `max_seqlen_k`, `softmax_scale`, `causal`
-and `deterministic` to be present and the cu/max pairs to be in order, discriminates on
-`seqused_q`, and raises rather than patch a signature it does not recognise. A silently
-mis-positioned varlen call would corrupt attention, not crash.
+**Do not add a FlashAttention-3 varlen compat shim here.** One was written and removed
+after a GPU run (2026-09-14). Three facts, measured on 8xH20 against the runtime hymm
+checkout:
+
+- the installed `flash_attn_interface.flash_attn_varlen_func` orders its parameters
+  `(q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, seqused_q, seqused_k, ...)`
+  — `seqused` comes **after** the max-seqlens, so hymm's stock positional call is already
+  correct and inserting `None, None` after `cu_seqlens_k` corrupts attention;
+- the runtime hymm checkout already wraps the function to unwrap FA3's `(out, softmax_lse)`
+  return, so the tuple half needs no help either;
+- that wrapper makes the binding a `(*args, **kwargs)` function, so **no signature
+  fingerprint can read it** — a shim that fails closed on an unreadable signature simply
+  blocks the run.
+
+`hy_parallelism` also applies ~10 monkey patches at import, so the binding hymm ends up
+with is not necessarily `flash_attn_interface`'s. Check `inspect.getsource` on
+`hymm.models.basic.flash_attn_no_pad.flash_attn_varlen_func_v3` before concluding anything
+about what hymm calls.
 
 | Patch | Where it installs | Delete it when |
 |---|---|---|
-| FlashAttention-3 varlen: insert `seqused_q, seqused_k = None, None` positionally and unwrap `(out, lse)` | `compat.install_hymm_compat`, rebinding `hymm.models.basic.flash_attn_no_pad.flash_attn_varlen_func_v3` | hymm calls FA3 through its own version-tolerant wrapper, or `flash_attn_interface` is pinned below the `seqused` API |
 | `gate.wg.forward` follows the input dtype | `bundle._patch_router_dtype`, under `uniform_bf16` | FSDP2 stops requiring one original dtype per shard group, or hymm stops computing the MoE router in an autocast-disabled fp32 region |
 | whole-DiT bf16 cast (fp32 router lost) | `config.uniform_bf16` | same trigger as above |
 | `ensure_hy_parallel_state()` | `bundle`, re-checked in `diffusion.predict_noise` | `hy_parallelism.parallel_states.get_parallel_state()` stops constructing a fresh `ParallelDims` when uninitialised |
