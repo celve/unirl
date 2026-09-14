@@ -117,5 +117,23 @@ new remote reward needs no UniRL code — add it to the server and list its name
 - **`input_kind` must match the media** (`image`/`video`/`text`) — it picks which
   decoded key the backend sees. Remote allows only `image`/`video`; local scorers
   may be `text`.
+- **`math_verify` grades in a child process, and that is not optional.** Its own
+  timeouts are `signal.alarm`-based, so they work only on the main thread — which the
+  reward path is not; enabling them there raises and scores every sample 0. Inside the
+  child the main thread is the child's own, so they work and are passed through
+  (`UNIRL_MATHVERIFY_TIMEOUT_S`, default 10s). One child per reward call grades the
+  whole batch and exits — ~1.2s, amortised over the ~16 grades a call carries — and
+  shares nothing with the caller, so a child that is OOM-killed can only cost its own
+  batch, which is scored 0.0. Three details are load-bearing: `forkserver` rather than
+  `fork`, because `fork` runs `logging`'s registered at-fork handler, which acquires
+  the logging lock with no timeout and can block the forking thread forever when the
+  worker's other threads log; `wait()` on the child's sentinel as well as the pipe, so
+  a child that dies immediately costs a round-trip instead of the whole deadline; and
+  `proc.start()` inside the `try`, because `forkserver` forks the child *before* the
+  parent writes the job payload to it, so a child dying in that window raises
+  `BrokenPipeError` out of `start()`. **Do not reintroduce a `multiprocessing.Pool`
+  here**: a worker that dies while *idle* leaves the input-queue read lock held — a
+  POSIX semaphore with no owner — and `Pool.terminate()` then blocks on it forever in
+  `_help_stuff_finish`, with the module lock held, wedging every later grade.
 - **`base_device` is ignored by the remote backend** (it's HTTP-only); local
   scorers honor it, falling back to CPU with a warning if CUDA is unavailable.

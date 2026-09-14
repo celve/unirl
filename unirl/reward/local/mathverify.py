@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import logging
 import os
-import threading
 from dataclasses import dataclass
-from typing import Any, List, Optional
+from typing import Any, List, Tuple
 
 from unirl.reward.base import BaseRewardComponentSpec
 from unirl.types.reward import RewardRequest
@@ -15,105 +14,54 @@ from .base import LocalRewardBackend
 
 logger = logging.getLogger(__name__)
 
-# math-verify's own guards are signal.alarm-based, and signal only works on the main
-# thread — the reward path is not it, so enabling them raises and scores every sample
-# 0. A thread cannot be killed and a runaway grade holds the GIL, so the grade runs in
-# a child process that can be.
-_VERIFY_TIMEOUT_S = float(os.environ.get("UNIRL_MATHVERIFY_TIMEOUT_S", "10"))
-
-# One child, reused. Measured on an H20 worker: a child per grade costs ~1.2 s, since
-# it must import this module to unpickle the target, against ~0.1 ms for a pipe
-# round-trip to a child already running.
-_PROC: Optional[Any] = None
-_CONN: Optional[Any] = None
-_LOCK = threading.Lock()
+_VERIFY_TIMEOUT_S = int(float(os.environ.get("UNIRL_MATHVERIFY_TIMEOUT_S", "10")))
 
 
-def _grade_loop(conn: Any) -> None:
-    """Run in the child: grade jobs off the pipe until it closes."""
-    while True:
+def _grade_all(conn: Any, jobs: List[Tuple[str, str]], seconds: int) -> None:
+    """Grade every job and send the verdicts back; runs in the child, never the caller."""
+    from math_verify import parse, verify
+
+    verdicts: List[bool] = []
+    for gold, prediction in jobs:
         try:
-            gold, prediction = conn.recv()
-        except (EOFError, OSError):
-            return
-        try:
-            from math_verify import parse, verify
-
-            ok = bool(
-                verify(
-                    parse("\\boxed{" + gold + "}", parsing_timeout=None),
-                    parse(prediction, parsing_timeout=None),
-                    timeout_seconds=None,
+            verdicts.append(
+                bool(
+                    verify(
+                        parse("\\boxed{" + gold + "}", parsing_timeout=seconds),
+                        parse(prediction, parsing_timeout=seconds),
+                        timeout_seconds=seconds,
+                    )
                 )
             )
         except Exception:
-            ok = False
-        try:
-            conn.send(ok)
-        except (BrokenPipeError, OSError):
-            return
+            verdicts.append(False)
+    conn.send(verdicts)
 
 
-def _start_grader() -> Any:
-    """Start a grading child on ``forkserver`` rather than ``fork``: ``fork`` runs
-    ``logging``'s at-fork handler, which acquires the logging lock with no timeout, so
-    forking a worker whose other threads log can block the forking thread forever."""
+def _grade_in_child(jobs: List[Tuple[str, str]], *, seconds: int) -> List[bool]:
+    """Grade a batch in one child process, scoring all of it False if it never answers."""
     import multiprocessing
+    from multiprocessing.connection import wait
 
+    ctx = multiprocessing.get_context("forkserver")  # not fork — see ../README.md
+    ctx.set_forkserver_preload(["math_verify"])
+    receiver, sender = ctx.Pipe(duplex=False)
+    proc = ctx.Process(target=_grade_all, args=(sender, jobs, seconds), daemon=True)
     try:
-        ctx = multiprocessing.get_context("forkserver")
-        ctx.set_forkserver_preload(["math_verify"])
-    except (ValueError, ImportError, OSError):
-        ctx = multiprocessing.get_context("fork")
-    parent_conn, child_conn = ctx.Pipe(duplex=True)
-    proc = ctx.Process(target=_grade_loop, args=(child_conn,), daemon=True)
-    proc.start()
-    child_conn.close()
-    return proc, parent_conn
-
-
-def _drop_grader() -> None:
-    """Kill and reap the child with a bound. Nothing here may wait unbounded: the Pool
-    this replaced blocked in terminate() on a queue semaphore that a child which died
-    while idle still held, with the module lock held, wedging every later grade."""
-    global _PROC, _CONN
-    proc, conn = _PROC, _CONN
-    _PROC, _CONN = None, None
-    if conn is not None:
-        try:
-            conn.close()
-        except Exception:
-            pass
-    if proc is not None:
-        try:
-            proc.kill()
-            proc.join(timeout=1.0)
-        except Exception:
-            pass
-
-
-def _verify_with_deadline(gold: str, prediction: str, *, seconds: float) -> bool:
-    """Grade one answer, returning False if the child does not answer in ``seconds``."""
-    global _PROC, _CONN
-    if not _LOCK.acquire(timeout=seconds + 30.0):
-        logger.warning("math-verify: grader lock held past the deadline, scored 0.0")
-        return False
-    try:
-        if _PROC is None or not _PROC.is_alive():
-            _drop_grader()
-            _PROC, _CONN = _start_grader()
-        _CONN.send((gold, prediction))
-        if _CONN.poll(seconds):
-            return bool(_CONN.recv())
-        logger.warning("math-verify: grade exceeded %.1fs, killed and scored 0.0", seconds)
-        _drop_grader()
-        return False
+        proc.start()  # inside the try: a child dying here raises out of start()
+        # sentinel as well as the pipe, so a child that dies costs a round-trip, not the budget.
+        if receiver in wait([receiver, proc.sentinel], timeout=seconds * len(jobs) + 60):
+            return list(receiver.recv())
+        logger.warning("math-verify: %d grades did not return, scored 0.0", len(jobs))
     except Exception as exc:
         logger.warning("math-verify: grader failed (%r), scored 0.0", exc)
-        _drop_grader()
-        return False
     finally:
-        _LOCK.release()
+        if proc.pid is not None:
+            proc.kill()
+            proc.join(timeout=1.0)
+        receiver.close()
+        sender.close()
+    return [False] * len(jobs)
 
 
 class MathVerifyRewardScorer(LocalRewardBackend):
@@ -134,14 +82,17 @@ class MathVerifyRewardScorer(LocalRewardBackend):
         if generated is None:
             raise ValueError("MathVerifyRewardScorer requires request.texts (generated answers).")
         metadata_list = request.metadata or [None] * len(generated)
-        rewards: List[float] = []
-        for text, meta in zip(generated, metadata_list):
-            if meta is None or "answer" not in meta:
-                rewards.append(0.0)
-                continue
-            gt = str(meta["answer"]).strip()
-            ok = _verify_with_deadline(gt, text or "", seconds=_VERIFY_TIMEOUT_S)
-            rewards.append(1.0 if ok else 0.0)
+        rewards = [0.0] * len(generated)
+        jobs: List[Tuple[str, str]] = []
+        slots: List[int] = []
+        for i, (text, meta) in enumerate(zip(generated, metadata_list)):
+            if meta is not None and "answer" in meta:
+                slots.append(i)
+                jobs.append((str(meta["answer"]).strip(), text or ""))
+        if not jobs:
+            return rewards
+        for i, ok in zip(slots, _grade_in_child(jobs, seconds=_VERIFY_TIMEOUT_S)):
+            rewards[i] = 1.0 if ok else 0.0
         return rewards
 
 
