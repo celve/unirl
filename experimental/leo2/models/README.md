@@ -1,10 +1,9 @@
 # Leo2 (HunyuanVideo 2.0, MoE-A12B) — t2v trainside FlowGRPO
 
-> **Where it fits:** one model package under [`unirl/models/`](../README.md), driving
+> **Where it fits:** the model package of [`experimental/leo2`](../README.md), driving
 > text-to-video FlowGRPO through the in-process rollout engine
-> (`examples/diffusion/leo2/leo2_t2v_trainside.yaml`). One FSDP2-sharded copy per DP rank
-> does rollout, log-prob replay and the LoRA update — no separate inference engine, no
-> weight sync.
+> (`../examples/leo2_t2v_trainside.yaml`). Launch, environment and the verification table
+> live in the package README; this file is the model-side contract.
 
 ## What it is
 
@@ -82,7 +81,7 @@ Nothing in this package has a site-specific default; a run supplies these.
 | `ASSETS_BASE` or `LEO2_ASSETS_BASE` | `assets_base` | hymm asset root (text encoder, VAE); required |
 | `HYMM_REPO_PATH` | `hymm_repo_path` | only needed when `hymm` is not already importable |
 | `LEO2_HYMM_CONFIG` | `config_yaml` | defaults to `LEO2_CONFIG_RELPATH` under the repo |
-| `LEO2_PROMPT_FILE` / `LEO2_EVAL_PROMPT_FILE` | `data_path` / `eval_data_path` | default to `datasets/leo2_t2v/` |
+| `LEO2_PROMPT_FILE` / `LEO2_EVAL_PROMPT_FILE` | `data_path` / `eval_data_path` | default to `experimental/leo2/datasets/` |
 | `TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD` | — | set to `1` by the bundle |
 
 The validated launcher puts the hymm repo and its `deps/hy_parallelism` + `deps/IndexKits`

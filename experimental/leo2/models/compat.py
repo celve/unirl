@@ -31,7 +31,7 @@ def _install_fa3_varlen() -> bool:
     if missing:
         raise RuntimeError(
             f"leo2: FlashAttention-3 varlen signature {params} lacks {missing} -- the shim in "
-            f"{_FA3_MODULE} cannot be applied safely. See unirl/models/leo2/README.md."
+            f"{_FA3_MODULE} cannot be applied safely. See the package README."
         )
     needs_seqused = "seqused_q" in params
     order = [params.index(name) for name in _FA3_REQUIRED]
@@ -40,7 +40,7 @@ def _install_fa3_varlen() -> bool:
     ):
         raise RuntimeError(
             f"leo2: FlashAttention-3 varlen parameters are reordered ({params}); the positional call in "
-            f"{_FA3_MODULE} would pass the wrong arguments. See unirl/models/leo2/README.md."
+            f"{_FA3_MODULE} would pass the wrong arguments. See the package README."
         )
 
     def _varlen(q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, **kwargs):

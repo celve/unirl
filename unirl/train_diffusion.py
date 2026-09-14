@@ -24,8 +24,8 @@ def _resolve_task_config(cfg: DictConfig):
     return cfg.get("stage_config")
 
 
-@hydra.main(version_base=None, config_path="../examples", config_name="diffusion/sd3/sd3_trainside")
-def main(cfg: DictConfig) -> None:
+def run(cfg: DictConfig) -> None:
+    """Build the trainer from a composed recipe and train; the seam experimental runners reuse."""
     trainer = DiffusionTrainer(
         cfg=cfg,
         batch_size=cfg.batch_size,
@@ -68,6 +68,11 @@ def main(cfg: DictConfig) -> None:
         load_dir=cfg.get("load_dir"),
         save_mode=cfg.get("save_mode", "auto"),
     )
+
+
+@hydra.main(version_base=None, config_path="../examples", config_name="diffusion/sd3/sd3_trainside")
+def main(cfg: DictConfig) -> None:
+    run(cfg)
 
 
 if __name__ == "__main__":

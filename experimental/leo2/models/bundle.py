@@ -375,7 +375,7 @@ class Leo2Bundle(Bundle):
                 f"leo2: hymm's DiT now builds {len(captured_init['buffers'])} init-only buffer(s) and "
                 f"{len(captured_init['attrs'])} tensor attr(s) that to_empty() destroys, and core "
                 "restore_init_state silently skips owners it cannot resolve after the AC/LoRA wrap "
-                "-- see unirl/models/leo2/README.md '## Gotchas'.",
+                "-- see the package README '## Gotchas'.",
             )
             print(f"[leo2 bundle] meta build in {time.time() - t_build:.1f}s", flush=True)
         else:

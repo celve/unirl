@@ -8,7 +8,7 @@
 #   - strategy: FlowSDE (Leo2 velocity feeds noise_pred UN-negated)
 #   - reward: VideoPickScore on first frame
 # Launch (single node, 8 GPUs) -- see README.md for the required environment:
-#   bash examples/run_experiment_single_node.sh diffusion/leo2/leo2_t2v_trainside
+#   python -m experimental.leo2.run --config-name=leo2_t2v_trainside
 
 num_devices: 8
 batch_size: 8                 # prompts_per_rollout; must be divisible by num_devices (DP_SCATTER)
@@ -25,9 +25,9 @@ logging:
   media_max_items: 2
 
 bundle:
-  _target_: unirl.models.leo2.bundle.Leo2Bundle.from_config
+  _target_: experimental.leo2.models.bundle.Leo2Bundle.from_config
   config:
-    _target_: unirl.models.leo2.config.Leo2PipelineConfig
+    _target_: experimental.leo2.models.config.Leo2PipelineConfig
     model_precision: bf16
     autocast_precision: bf16
     trajectory_precision: bf16
@@ -47,7 +47,7 @@ bundle:
     text_encoder_gpu_transient: true
 
 pipeline:
-  _target_: unirl.models.leo2.pipeline.Leo2Pipeline.from_bundle
+  _target_: experimental.leo2.models.pipeline.Leo2Pipeline.from_bundle
   config: ${bundle.config}
   strategy:
     _target_: unirl.sde.kernels.FlowSDEStrategy
@@ -130,7 +130,7 @@ algorithm:
   rollout_replay_parity_action: warn
   conditions_cls:
     _target_: hydra.utils.get_class
-    path: unirl.models.leo2.conditions.Leo2Conditions
+    path: experimental.leo2.models.conditions.Leo2Conditions
   params: ${sampling}
 
 stack:
@@ -143,8 +143,8 @@ data_source:
   _target_: unirl.data.data_source.MultimodalRLDataSource
   args:
     run:
-      data_path: ${oc.env:LEO2_PROMPT_FILE,datasets/leo2_t2v/train.txt}
-      eval_data_path: ${oc.env:LEO2_EVAL_PROMPT_FILE,datasets/leo2_t2v/test.txt}
+      data_path: ${oc.env:LEO2_PROMPT_FILE,experimental/leo2/datasets/train.txt}
+      eval_data_path: ${oc.env:LEO2_EVAL_PROMPT_FILE,experimental/leo2/datasets/test.txt}
       seed: ${sampling.seed}
     algorithm:
       prompts_per_rollout: ${batch_size}
