@@ -68,7 +68,8 @@ def _resolve_hymm_paths(config: Leo2PipelineConfig) -> str:
 
     repo = config.hymm_repo_path
     # find_spec rather than an import, for the same reason.
-    if not all(importlib.util.find_spec(name) for name in _HYMM_MODULES):
+    specs = {name: importlib.util.find_spec(name) for name in _HYMM_MODULES}
+    if not all(specs.values()):
         require(
             bool(repo),
             "leo2: hymm is not importable -- set bundle.config.hymm_repo_path (recipe: $HYMM_REPO_PATH) "
@@ -77,11 +78,17 @@ def _resolve_hymm_paths(config: Leo2PipelineConfig) -> str:
         for path in (repo, os.path.join(repo, "deps/hy_parallelism"), os.path.join(repo, "deps/IndexKits")):
             if path not in sys.path:
                 sys.path.insert(0, path)
+    elif not repo:
+        # hymm came from PYTHONPATH; it is a namespace package, so origin is None and the
+        # search location is the only way back to the repo root the yaml sits under.
+        locations = list(specs["hymm"].submodule_search_locations or [])
+        repo = os.path.dirname(locations[0]) if locations else ""
 
     config_yaml = config.config_yaml or (os.path.join(repo, LEO2_CONFIG_RELPATH) if repo else "")
     require(
-        bool(config_yaml),
-        "leo2: no hymm config yaml -- set bundle.config.config_yaml or hymm_repo_path to derive it.",
+        bool(config_yaml) and os.path.isfile(config_yaml),
+        f"leo2: hymm config yaml not found at {config_yaml!r} -- set bundle.config.config_yaml "
+        "(recipe: $LEO2_HYMM_CONFIG).",
     )
     return config_yaml
 
