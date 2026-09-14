@@ -126,8 +126,6 @@ algorithm:
   clip_range: 1.0e-4
   clip_schedule: constant
   old_logp_source: replay
-  max_rollout_replay_logp_absdiff: 1.0e-2
-  rollout_replay_parity_action: warn
   conditions_cls:
     _target_: hydra.utils.get_class
     path: experimental.leo2.models.conditions.Leo2Conditions

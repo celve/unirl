@@ -63,6 +63,13 @@ prompt group; PickScore averaged over 4 uniformly spaced frames. ~630 s/step (ro
 train 225), or ~495 s/step with `algorithm.old_logp_source=rollout` and
 `bundle.config.text_encoder_gpu_transient=false`.
 
+This recipe runs `old_logp_source: replay`, and core `FlowGRPO` is the only algorithm that
+emits no `rollout_replay_logp_absdiff` metric — `grpo`, `gspo`, `cppo`, `dppo` and `drpo` all
+do. So replay-path drift is silent here: check it by hand when changing the sampler or the
+precision fields, against the 8.6e-6 in the table below. The recipe used to carry
+`max_rollout_replay_logp_absdiff` + `rollout_replay_parity_action` for exactly this, but those
+belong to a woa-branch-only FlowGRPO feature and raise `TypeError` against upstream `main`.
+
 **Always eyeball rollout media next to the reward curve.** LoRA lr 1e-4 without KL
 reward-hacks into stripe textures by ~rollout 50; 2.5e-5 stays clean, and
 `algorithm.beta>0` (KL against the adapter-disabled base) is the intended fix.
