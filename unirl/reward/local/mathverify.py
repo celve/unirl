@@ -22,10 +22,15 @@ logger = logging.getLogger(__name__)
 # grade runs in a child PROCESS that can actually be terminated on expiry.
 _VERIFY_TIMEOUT_S = float(os.environ.get("UNIRL_MATHVERIFY_TIMEOUT_S", "10"))
 
-# One long-lived single-worker pool per process: a pool-per-call would fork 512 times
-# a rollout. Replaced wholesale when a timeout kills its worker.
-_POOL: Optional[Any] = None
-_POOL_LOCK = threading.Lock()
+# One long-lived grading child per process: a child-per-call would fork 512 times a
+# rollout. Replaced whenever it dies or overruns.
+_PROC: Optional[Any] = None
+_CONN: Optional[Any] = None
+_LOCK = threading.Lock()
+
+# Grace above the grade deadline before a caller gives up on the lock itself, so one
+# stuck thread cannot silently wedge every later grade in the process.
+_LOCK_GRACE_S = float(os.environ.get("UNIRL_MATHVERIFY_LOCK_GRACE_S", "30"))
 
 # A 0.0 has three causes — wrong answer, expiry, grader error — and a reward curve
 # cannot distinguish them. Counted so a flat curve is attributable after the fact.
@@ -33,54 +38,120 @@ VERIFY_COUNTERS: Dict[str, int] = {"graded": 0, "expired": 0, "failed": 0}
 _LAST_REPORTED: Dict[str, int] = {"graded": 0, "expired": 0, "failed": 0}
 _LAST_REPORTED_BAD = 0
 
-# Pool.__del__ raises at interpreter shutdown once its module globals are torn
-# down; closing at exit keeps that noise out of a run's log.
-atexit.register(lambda: _reset_pool())
+def _grade_loop(conn: Any) -> None:
+    """Run in the child: grade jobs off the pipe until it closes."""
+    while True:
+        try:
+            job = conn.recv()
+        except (EOFError, OSError):
+            return
+        if job is None:
+            return
+        gold, prediction = job
+        try:
+            from math_verify import parse, verify
+
+            ok = bool(
+                verify(
+                    parse("\\boxed{" + gold + "}", parsing_timeout=None),
+                    parse(prediction, parsing_timeout=None),
+                    timeout_seconds=None,
+                )
+            )
+        except Exception:
+            ok = False
+        try:
+            conn.send(ok)
+        except (BrokenPipeError, OSError):
+            return
 
 
-def _grade(gold: str, prediction: str) -> bool:
-    """Run in the child: the raw math-verify call, with its own timeouts left off."""
-    from math_verify import parse, verify
+def _grader_context() -> Any:
+    """A start method that does not fork this process.
 
-    return bool(
-        verify(
-            parse("\\boxed{" + gold + "}", parsing_timeout=None),
-            parse(prediction, parsing_timeout=None),
-            timeout_seconds=None,
-        )
-    )
+    ``fork`` runs ``logging``'s registered at-fork handler, which acquires the logging
+    module lock with no timeout — so forking a Ray worker whose other threads log can
+    block the forking thread forever, while this module's lock is held. ``forkserver``
+    execs a small server once and forks children from that instead.
+    """
+    import multiprocessing
+
+    try:
+        ctx = multiprocessing.get_context("forkserver")
+        ctx.set_forkserver_preload(["math_verify"])
+        return ctx
+    except (ValueError, ImportError, OSError):
+        logger.warning("math-verify: forkserver unavailable, falling back to fork")
+        return multiprocessing.get_context("fork")
 
 
-def _reset_pool() -> None:
-    """Drop the pool, terminating a worker still spinning on a runaway expression."""
-    global _POOL
-    pool, _POOL = _POOL, None
-    if pool is None:
+def _spawn_grader() -> Any:
+    """Start a grading child and keep only the parent's end of its pipe."""
+    ctx = _grader_context()
+    parent_conn, child_conn = ctx.Pipe(duplex=True)
+    proc = ctx.Process(target=_grade_loop, args=(child_conn,), daemon=True)
+    proc.start()
+    child_conn.close()
+    return proc, parent_conn
+
+
+def _discard_grader() -> None:
+    """Drop the child with no unbounded wait — the Pool this replaced parked forever in
+    terminate(), on a queue semaphore a child that died while idle still held."""
+    global _PROC, _CONN
+    proc, conn = _PROC, _CONN
+    _PROC, _CONN = None, None
+    if conn is not None:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    if proc is None:
         return
-    pool.terminate()
-    threading.Thread(target=pool.join, daemon=True).start()
+    try:
+        if proc.is_alive():
+            proc.kill()
+        proc.join(timeout=1.0)
+    except Exception:
+        pass
 
 
 def _verify_with_deadline(gold: str, prediction: str, *, seconds: float) -> bool:
     """Grade one answer, returning False if math-verify does not finish in ``seconds``."""
-    import multiprocessing
-
-    global _POOL
-    with _POOL_LOCK:
-        if _POOL is None:
-            _POOL = multiprocessing.get_context("fork").Pool(processes=1)
-        try:
-            out = bool(_POOL.apply_async(_grade, (gold, prediction)).get(timeout=seconds))
-            VERIFY_COUNTERS["graded"] += 1
-            return out
-        except multiprocessing.TimeoutError:
+    global _PROC, _CONN
+    if not _LOCK.acquire(timeout=seconds + _LOCK_GRACE_S):
+        VERIFY_COUNTERS["failed"] += 1
+        return False
+    try:
+        if _PROC is None or not _PROC.is_alive():
+            _discard_grader()
+            _PROC, _CONN = _spawn_grader()
+        _CONN.send((gold, prediction))
+        if not _CONN.poll(seconds):
             VERIFY_COUNTERS["expired"] += 1
-            _reset_pool()
+            _discard_grader()
             return False
-        except Exception:
-            VERIFY_COUNTERS["failed"] += 1
-            _reset_pool()
-            return False
+        out = bool(_CONN.recv())
+        VERIFY_COUNTERS["graded"] += 1
+        return out
+    except Exception:
+        VERIFY_COUNTERS["failed"] += 1
+        _discard_grader()
+        return False
+    finally:
+        _LOCK.release()
+
+
+def _atexit_discard() -> None:
+    """Never block interpreter shutdown on a grade still in flight."""
+    if _LOCK.acquire(blocking=False):
+        try:
+            _discard_grader()
+        finally:
+            _LOCK.release()
+
+
+atexit.register(_atexit_discard)
 
 class MathVerifyRewardScorer(LocalRewardBackend):
     r"""Numeric/symbolic reward via HuggingFace ``math-verify`` (1.0 match / 0.0)."""
