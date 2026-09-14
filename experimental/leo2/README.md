@@ -81,10 +81,24 @@ reward-hacks into stripe textures by ~rollout 50; 2.5e-5 stays clean, and
 | `leo2_t2v_trainside` (8 rollouts, shipped defaults) | 8xH20 | pre-relocation (`6b51214a` lineage, eager load) | contributor run — 195–203 s/step, reward 0.727–0.733, `ratio` 1.0000, `gn` 0.0012–0.0026, peak 51.1–52.4 GB/GPU |
 | sharded post-wrap DCP load, first-rollout parity against the eager path | 8xH20 | pre-relocation (`83609a1b` lineage) | contributor run — meta build 25.6 s + `to_empty` 7.9 s + read 73.4 s at 17.5 GB/rank, weights-ready ~107 s (was 22 min), first reward 0.7310 through both paths |
 | v3 30-step recipe (2 rollouts) | 8xH20 | pre-relocation | contributor run — reward 0.7211, `gn` 0.0003, rollout-vs-replay \|Δlogp\| 8.6e-6 |
-| FA3 varlen shim (both signatures, tuple return, drift fails closed, idempotency) | CPU, faked `sys.modules` | current head | PASS — 9/9 assertions |
 | lint guards + ruff + `compileall` | CPU | current head | PASS |
-| **anything on this branch's own head, on GPU** | 8xH20 | current head | **pending** — the relocation and the compat shim have never run against real weights |
+| `leo2_t2v_trainside` (2 rollouts, shipped defaults) | 8xH20 | **`c67ecf82`, this branch's head** | **PASS** — reward 0.7310 / 0.7265, `ratio` 1.0000±0.0000, `clip` 0.00, `gn` 0.0027 / 0.0020, peak 39.1 GB/GPU, ~325 s/rollout |
+| sharded DCP load on this head | 8xH20 | `c67ecf82` | 2130 tensors, 17.5 GB/rank, **0 keys missing, 0 unclaimed**, 71.3 s; `materialize()` 9.1 s restoring 0 init tensors |
 
-The last row is the gate that matters. The first three were measured before this package was
-relocated and before the FA3 shim existed; the numbers are the targets a run on this head
-must reproduce, not evidence about this head.
+The first three rows were measured by a contributor before this package was relocated; they are
+the targets this head had to reproduce, not evidence about it. Rows four onward are this head.
+
+Reward 0.7310 reproduces the reference's first reward exactly, and `ratio` 1.0000±0.0000 with
+`clip` 0.00 is the rollout-vs-replay parity evidence for `old_logp_source: replay` — worth
+reading alongside the note above, since core `FlowGRPO` emits no parity metric of its own.
+
+Two numbers are environment, not code. **Meta build was 403.9 s against a 25.6 s reference**:
+the venv's `site-packages` is served from cross-region ceph and sits first on `PYTHONPATH`, so
+every import scans it — it drops to 33.5 s once the page cache is warm. And **~325 s/rollout
+against 195–203 s** on a config whose peak is 39.1 GB rather than 51–52 GB, so the comparison
+is not like-for-like; treat the step time as unmeasured until a run has hymm, the venv and the
+assets all node-local.
+
+Run it with the launcher recorded in the LIN-1204 workspace, not by hand: the checkpoint must be
+staged to local disk first. DCP seeks per tensor, and over cross-region ceph that random pattern
+sustains 2 MB/s across all 8 ranks — a 20-hour load — against 71.3 s from local disk.
