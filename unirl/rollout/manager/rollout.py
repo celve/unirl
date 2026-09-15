@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import logging
-from collections import Counter, defaultdict
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Sequence
+from collections import Counter
+from typing import TYPE_CHECKING, Any, Callable, List, Optional, Sequence
 
 from unirl.rollout.manager.buffers import CompleteGroups, PendingGroups, roots_of
 from unirl.rollout.manager.dispatch import RolloutPool
@@ -54,69 +54,29 @@ class RolloutManager:
 
         try:
             while True:
-                self._route(self._resolve(self._pool.take_completed(block=False)), allow_suspended=False)
+                self._route(self._resolve(self._pool.take_completed(block=False)))
                 self._filter_complete(current_version)
                 selected = self._complete.take(n)
                 if selected is not None:
                     return selected
                 if not self._pool.live:
                     raise RuntimeError(f"needed {n} rollout groups, collected {self._complete.group_count}")
-                self._route(self._resolve(self._pool.take_completed(block=True)), allow_suspended=False)
+                self._route(self._resolve(self._pool.take_completed(block=True)))
         except BaseException as exc:
             self._poison(exc)
             raise
 
     def quiesce(self, *, current_version: int) -> List["Sample"]:
+        """Pause dispatch and drain in-flight generation so a weight publication finds an idle pool."""
         self._ensure_open()
         current_version = int(current_version)
         if current_version < 0:
             raise ValueError(f"current_version must be non-negative; got {current_version}")
         try:
             undispatched = self._pool.pause()
-            self._rollout.set_stopping(True)
-            completed = self._resolve(self._pool.drain())
-            self._rollout.set_stopping(False)
-
-            suspended = self._route(completed, allow_suspended=True)
+            self._route(self._resolve(self._pool.drain()))
             self._filter_complete(current_version)
-            candidates = [*undispatched, *suspended]
-            tails_by_root: Dict[str, List["Sample"]] = defaultdict(list)
-            carried = []
-            for sample in candidates:
-                roots = roots_of(sample)
-                if len(roots) == 1:
-                    tails_by_root[roots[0]].append(sample)
-                elif self._keep_root([sample], current_version=current_version):
-                    carried.append(sample)
-
-            for root, tails in tails_by_root.items():
-                known = [*self._pending.get(root), *tails]
-                if self._keep_root(known, current_version=current_version):
-                    carried.extend(tails)
-                else:
-                    discarded = self._pending.discard(root)
-                    logger.info(
-                        "rollout filter discarded incomplete root=%s tails=%d completed=%d",
-                        root,
-                        len(tails),
-                        discarded,
-                    )
-            return carried
-        except BaseException as exc:
-            self._poison(exc)
-            raise
-
-    def finish(self, tasks: List["Sample"], *, current_version: int) -> None:
-        """Run an isolated carried prefix to terminal completion without admitting other work."""
-        self._ensure_open()
-        if current_version < 0:
-            raise ValueError(f"current_version must be non-negative; got {current_version}")
-        if not tasks:
-            return
-        try:
-            completed = self._resolve(self._pool.run_to_completion(list(tasks)))
-            self._route(completed, allow_suspended=False)
-            self._filter_complete(current_version)
+            return undispatched
         except BaseException as exc:
             self._poison(exc)
             raise
@@ -129,7 +89,7 @@ class RolloutManager:
                 f"output_version must be monotonic; current={self._published_version}, next={next_version}"
             )
         try:
-            self._route(self._resolve(self._pool.take_completed(block=False)), allow_suspended=False)
+            self._route(self._resolve(self._pool.take_completed(block=False)))
             if self._pool.live:
                 raise RuntimeError("sync_weights requires no queued or in-flight rollout work")
             weight_sync.sync()
@@ -171,23 +131,19 @@ class RolloutManager:
     def _resolve(self, units: List[Any]) -> List[tuple[int, "Sample"]]:
         return [(unit.sequence, unit.pending.result()) for unit in units]
 
-    def _route(self, results: List[tuple[int, "Sample"]], *, allow_suspended: bool) -> List["Sample"]:
+    def _route(self, results: List[tuple[int, "Sample"]]) -> None:
         terminal_trajectories = []
-        suspended = []
         for _, sample in results:
             status = sample.parts[-1].harness_status if sample.parts else None
             if status == "suspended":
-                if not allow_suspended:
-                    raise RuntimeError("trajectory suspended outside quiesce")
-                suspended.append(sample)
-            elif status is None:
+                raise RuntimeError("trajectory suspended but cooperative suspension is never armed")
+            if status is None:
                 self._complete.add(self._batch_group_count(sample), [sample])
             else:
                 self._require_stamped_generated_parts(sample)
                 terminal_trajectories.append(sample)
         for group in self._pending.add(terminal_trajectories):
             self._complete.add(1, group)
-        return suspended
 
     def _batch_group_count(self, sample: "Sample") -> int:
         roots = roots_of(sample)
@@ -221,13 +177,6 @@ class RolloutManager:
         kept = list(self._filter(list(candidates), current_version))
         validate_filter_output(candidates, kept)
         return kept
-
-    def _keep_root(self, samples: List["Sample"], *, current_version: int) -> bool:
-        candidates = list(samples)
-        kept = self._apply_filter(candidates, current_version=current_version)
-        if kept and Counter(map(id, kept)) != Counter(map(id, candidates)):
-            raise RuntimeError("rollout filter must retain or discard an entire incomplete root")
-        return bool(kept)
 
     @staticmethod
     def _require_stamped_generated_parts(sample: "Sample") -> None:

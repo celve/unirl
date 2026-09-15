@@ -121,12 +121,29 @@ change surface:
 - **Direct sampling forbids a `sync:` block; dedicated requires one.** The trainside
   engine also can't live on a `layout: separate` slab — `_build_rollout` raises.
 - **Quiesce before weight sync / eval / checkpoint on async paths** —
-  `RolloutManager.quiesce()` pauses dispatch, drains batch work, and cooperatively
-  suspends agentic trajectories at turn boundaries. `sync_weights()` rejects queued
-  or in-flight work, pushes weights, and publishes the optimizer-update
-  `output_version`; immutable buffered groups keep their original provenance and
-  remain subject to the configured filter. Eval/checkpoint admission still requires
-  an empty manager. Launch and scoring order remains trainer policy.
+  `RolloutManager.quiesce()` pauses dispatch and drains in-flight generation to
+  terminal completion, returning the prompts it never dispatched. `sync_weights()`
+  rejects queued or in-flight work, pushes weights, and publishes the
+  optimizer-update `output_version`; immutable buffered groups keep their original
+  provenance and remain subject to the configured filter, so a publication no longer
+  batch-aligns anything. Eval/checkpoint admission still requires an empty manager.
+  Launch and scoring order remains trainer policy.
+- **`output_version` is attributed to where generation started, not where it ended** —
+  engines capture the version before calling the backend, so a publication landing
+  mid-generation over-reports staleness by at most the publications it spanned rather
+  than silently claiming the work is fresher than it is. Filters therefore discard
+  more than strictly necessary and never keep off-policy work as on-policy.
+- **A mixed-version batch is attributed to its oldest span, and re-stamped explicitly** —
+  `output_version` is a `shared_field`, so `Batch.concat` resolves it to the first
+  chunk's value; `combine_rollout_prompts` overwrites every gen Part with
+  `min(versions)` afterwards, or the batch would merely *look* single-version to every
+  later reader. Diffusion keeps the single-version rejection, because `sampling_params`
+  is shared the same way and carries the pinned σ/SDE schedule that
+  `engine/sigma_verify.py` guards; `async/version_spread` must be zero there.
+- **Request-level partial rollout is gone** — nothing arms `set_stopping`, so an
+  agentic trajectory always runs to terminal completion and `harness_status ==
+  "suspended"` is unreachable. The engine-side suspension contract is left intact for
+  a future engine-level retract.
 - **A resolve/route failure poisons the `RolloutManager`** — samples may already be
   lost, so every later call (including `empty` / `counts`) re-raises the original
   error rather than reporting clean state; only `close()` stays safe.
