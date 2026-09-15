@@ -92,12 +92,15 @@ Reward 0.7310 reproduces the reference's first reward exactly, and `ratio` 1.000
 `clip` 0.00 is the rollout-vs-replay parity evidence for `old_logp_source: replay` — worth
 reading alongside the note above, since core `FlowGRPO` emits no parity metric of its own.
 
-Two numbers are environment, not code. **Meta build was 403.9 s against a 25.6 s reference**:
-the venv's `site-packages` is served from cross-region ceph and sits first on `PYTHONPATH`, so
-every import scans it — it drops to 33.5 s once the page cache is warm. And **~325 s/rollout
-against 195–203 s** on a config whose peak is 39.1 GB rather than 51–52 GB, so the comparison
-is not like-for-like; treat the step time as unmeasured until a run has hymm, the venv and the
-assets all node-local.
+The two slow numbers in that run were environment, not code, and a follow-up with **every**
+path node-local confirmed it: meta build **4.7 s** (was 403.9 s — the venv's `site-packages` is
+served from cross-region ceph and sits first on `PYTHONPATH`, so every import scans it), weights
+ready ~3 min after launch, and **~189 s/rollout, inside the 195–203 s reference band**, where the
+ceph-served run took ~325 s. Same reward 0.7310, same `ratio` 1.0000±0.0000.
+
+Stage everything before quoting a step time. That follow-up was cut short by pod reclamation
+after rollout 1, so the two-rollout `VERIFY_RC=0` above remains the complete run and the
+node-local timings rest on a single rollout.
 
 Run it with the launcher recorded in the LIN-1204 workspace, not by hand: the checkpoint must be
 staged to local disk first. DCP seeks per tensor, and over cross-region ceph that random pattern
