@@ -132,8 +132,19 @@ new remote reward needs no UniRL code — add it to the server and list its name
   `proc.start()` inside the `try`, because `forkserver` forks the child *before* the
   parent writes the job payload to it, so a child dying in that window raises
   `BrokenPipeError` out of `start()`. **Do not reintroduce a `multiprocessing.Pool`
-  here**: a worker that dies while *idle* leaves the input-queue read lock held — a
-  POSIX semaphore with no owner — and `Pool.terminate()` then blocks on it forever in
-  `_help_stuff_finish`, with the module lock held, wedging every later grade.
+  here**: `Pool.terminate()` is unbounded. `_terminate_pool` sends each worker `SIGTERM`
+  and then joins it with no timeout (CPython 3.12 `pool.py:732`), and a Python signal
+  handler only runs between bytecodes — so a grade inside a long C-level `sympy` call
+  never handles the `SIGTERM`, never exits, and the join blocks forever. That is the
+  same runaway expression whose slowness tripped the deadline that called `terminate()`,
+  so the condition triggering the teardown is the one that makes it hang. Confirmed by a
+  captured stack from a 32-GPU reproduction. `proc.kill()` is used instead because
+  `SIGKILL` cannot be caught, blocked or ignored and needs no bytecode boundary.
+- **A standalone test of the grader needs a real file with an `if __name__ ==
+  "__main__":` guard.** `forkserver` re-imports `__main__` in the child, so an unguarded
+  script — or a heredoc, where `__main__` is `<stdin>` — makes every grade return
+  `False` from a completely healthy grader, which is indistinguishable from the grader
+  failing closed. Production is unaffected: in a reward worker `__main__` is Ray's
+  `default_worker.py`.
 - **`base_device` is ignored by the remote backend** (it's HTTP-only); local
   scorers honor it, falling back to CPU with a warning if CUDA is unavailable.
