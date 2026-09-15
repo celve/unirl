@@ -205,6 +205,9 @@ class Leo2DiffusionStage(DiffusionStage[Leo2Conditions]):
         if 0 in needed:
             stored_pairs.append((0, x.detach().clone()))
 
+        # hymm substitutes sigmas[1] where sigma == 1, and sigma_0 is exactly 1 under the shift schedule.
+        sigma_max = float(sigmas[1].item()) if int(sigmas.shape[0]) > 1 else 0.99
+
         with self._autocast():
             for step_idx in range(num_steps):
                 step_eta = float(params.eta) if step_idx in sde_set else 0.0
@@ -225,6 +228,7 @@ class Leo2DiffusionStage(DiffusionStage[Leo2Conditions]):
                     sigma_next=sigmas[step_idx + 1],
                     eta=step_eta,
                     generator=step_generators,
+                    sigma_max=sigma_max,
                     step_index=step_idx,
                 )
                 x = x_next.to(dtype=self.trajectory_dtype)
@@ -263,6 +267,7 @@ class Leo2DiffusionStage(DiffusionStage[Leo2Conditions]):
         blob = conditions.hymm[0]
 
         sigmas = segment.sigmas.to(self.bundle.device)
+        sigma_max = float(sigmas[1].item()) if int(sigmas.shape[0]) > 1 else 0.99
         stored = [int(i) for i in segment.sde_indices.tolist()]
         targets = [int(i) for i in (step_indices if step_indices is not None else stored)]
 
@@ -283,6 +288,7 @@ class Leo2DiffusionStage(DiffusionStage[Leo2Conditions]):
                     sigma_next=sigmas[step_idx + 1],
                     eta=float(params.eta),
                     prev_sample=prev_x.to(torch.float32),
+                    sigma_max=sigma_max,
                     step_index=step_idx,
                 )
                 log_probs.append(log_prob.to(dtype=self.logprob_dtype))

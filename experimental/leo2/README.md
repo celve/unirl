@@ -94,6 +94,12 @@ reward-hacks into stripe textures by ~rollout 50; 2.5e-5 stays clean, and
 The first three rows were measured by a contributor before this package was relocated; they are
 the targets this head had to reproduce, not evidence about it. Rows four onward are this head.
 
+**Every reward figure above predates the `sigma_max` fix and will not reproduce bit-identically.**
+The stage used to let `unirl/sde/kernels.py` default `sigma_max` to 0.99 where hymm substitutes
+`sigmas[1]`; since sigma_0 is exactly 1 under the shift schedule, step 0's `std_dev_t` was wrong by
+1.89x at the shipped 10-step defaults and 1.066x at 30 steps. The fix is correct and the numbers
+above are the pre-fix baseline.
+
 Reward 0.7310 reproduces the reference's first reward exactly, and `ratio` 1.0000±0.0000 with
 `clip` 0.00 is the rollout-vs-replay parity evidence for `old_logp_source: replay` — worth
 reading alongside the note above, since core `FlowGRPO` emits no parity metric of its own.
