@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
+from collections import deque
+from typing import TYPE_CHECKING, Callable, Deque, Dict, List, Optional, Tuple
 
 from unirl.rollout.manager import (
     RolloutManager,
     keep_within_lag,
     required_worker_concurrency,
     validate_worker_inflight,
+    well_formed_group,
 )
 from unirl.trainer.base import unwrap_replicated_int
 from unirl.types.sampling import total_samples_per_prompt
@@ -67,22 +69,20 @@ def next_hard_boundary(
     return boundary
 
 
-def boundary_launch_prompts(
+def boundary_group_budget(
     *,
-    outstanding_prompts: int,
     max_inflight_prompts: int,
     batch_size: int,
     trained_batches: int,
     hard_boundary: int,
 ) -> int:
-    """Whole batches of prompts admissible within the capacity cap and the next eval/save/final boundary."""
+    """Groups the producer may keep outstanding across flight and buffer, clamped by the next hard boundary."""
     if max_inflight_prompts % batch_size:
         raise ValueError(
             f"max_inflight_prompts ({max_inflight_prompts}) must be divisible by batch_size ({batch_size})"
         )
     remaining_prompts = max(0, hard_boundary - trained_batches) * batch_size
-    headroom = min(max_inflight_prompts, remaining_prompts) - outstanding_prompts
-    return max(0, (headroom // batch_size) * batch_size)
+    return min(max_inflight_prompts, remaining_prompts)
 
 
 def rollout_version_metrics(
@@ -182,6 +182,25 @@ class AsyncRolloutTrainerMixin:
         """Run the trainer's evaluation at a synced, empty rollout boundary."""
         raise NotImplementedError
 
+    def _make_prompt_source(self) -> Tuple[Callable[[], Optional["Sample"]], Callable[["Sample"], None]]:
+        """A pull/recycle pair over one deque, both called only from the manager's loop thread."""
+        ready: Deque["Sample"] = deque()
+
+        def pull() -> Optional["Sample"]:
+            if not ready:
+                request = self._build_request_sample(
+                    self.data_source.get_samples(self.batch_size),
+                    self._next_generation_id,
+                )
+                self._next_generation_id += 1
+                prompts = request.split()
+                if len(prompts) != self.batch_size:
+                    raise RuntimeError(f"request batch split into {len(prompts)} prompts; expected {self.batch_size}")
+                ready.extend(prompts)
+            return ready.popleft() if ready else None
+
+        return pull, ready.append
+
     def _score_completed(self, rollout_id: int, completed: "Sample") -> "Sample":
         scored = self.reward.score_and_attach(completed)
         self._drop_decoded(scored, rollout_id=rollout_id)
@@ -222,13 +241,16 @@ class AsyncRolloutTrainerMixin:
 
         self._next_generation_id = start_rollout
         engine_slots = self.rollout.engine_slots
-        launchers = [lambda sample, slot=slot: slot.launch("generate_on_slot", sample) for slot in engine_slots]
+        pull, recycle = self._make_prompt_source()
         self._rollout_manager = RolloutManager(
             self.rollout,
-            launchers=launchers,
-            capacities=[self._per_worker_inflight] * len(engine_slots),
-            group_size=total_samples_per_prompt(self.sampling_params),
-            filter_fn=keep_within_lag(staleness_budget),
+            launch=lambda index, sample: engine_slots[index].launch("generate_on_slot", sample),
+            pull=pull,
+            recycle=recycle,
+            put_filter=well_formed_group(total_samples_per_prompt(self.sampling_params)),
+            get_filter=keep_within_lag(staleness_budget),
+            slot_capacities=[self._per_worker_inflight] * len(engine_slots),
+            fanout=1,
         )
 
         if resumed or self.eval_interval > 0:
@@ -255,12 +277,15 @@ class AsyncRolloutTrainerMixin:
                     training_progress=training_progress,
                     rollout_id=rollout_id,
                     t0=t0,
-                    extra_metrics=rollout_version_metrics(
-                        train_version=self._train_version,
-                        output_version=output_version,
-                        num_updates_per_batch=self._num_updates_per_batch,
-                        version_spread=version_spread,
-                    ),
+                    extra_metrics={
+                        **rollout_version_metrics(
+                            train_version=self._train_version,
+                            output_version=output_version,
+                            num_updates_per_batch=self._num_updates_per_batch,
+                            version_spread=version_spread,
+                        ),
+                        **self._rollout_manager.drain_metrics(),
+                    },
                 )
                 self.wandb_logger.log_progress(rollout_id, num_rollouts, result, mean_reward, logger=logger)
 
@@ -301,12 +326,9 @@ class AsyncRolloutTrainerMixin:
 
         # Completed groups stay buffered across the publication; the lag filter decides
         # at consume time whether they are still trainable.
-        undispatched = manager.quiesce(current_version=self._train_version)
-        if require_empty and (undispatched or not manager.empty):
+        manager.publish(self.weight_sync, output_version=self._train_version)
+        if require_empty and not manager.empty:
             raise RuntimeError("eval/checkpoint boundary requires an empty RolloutManager")
-        manager.sync_weights(self.weight_sync, output_version=self._train_version)
-        if undispatched:
-            manager.submit(undispatched)
         self._batches_since_sync = 0
 
     def _next_rollout_batch(
@@ -315,13 +337,10 @@ class AsyncRolloutTrainerMixin:
         *,
         hard_boundary: int,
     ) -> Tuple["Sample", int, int]:
-        self._admit_prompts(trained_batches=rollout_id, hard_boundary=hard_boundary)
+        self._set_group_budget(trained_batches=rollout_id, hard_boundary=hard_boundary)
 
         manager = self._rollout_manager
-        groups = manager.collect(
-            self.batch_size,
-            current_version=self._train_version,
-        )
+        groups = [manager.next_group(current_version=self._train_version) for _ in range(self.batch_size)]
         completed, output_version, version_spread = combine_rollout_prompts(
             groups,
             require_single_rollout_id=self._require_single_generation,
@@ -333,43 +352,27 @@ class AsyncRolloutTrainerMixin:
 
         # Consuming a batch releases capacity immediately. Refill before reward
         # for AR and before training for trainers that require reap-time scoring.
-        self._admit_prompts(trained_batches=rollout_id + 1, hard_boundary=hard_boundary)
+        self._set_group_budget(trained_batches=rollout_id + 1, hard_boundary=hard_boundary)
 
         if scored is None:
             scored = self._score_completed(rollout_id, completed)
 
         return scored, output_version, version_spread
 
-    def _admit_prompts(self, *, trained_batches: int, hard_boundary: int) -> None:
-        inflight_count, ready_count = self._rollout_manager.counts
-        prompts = boundary_launch_prompts(
-            outstanding_prompts=inflight_count + ready_count,
-            max_inflight_prompts=self._max_inflight_prompts,
-            batch_size=self.batch_size,
-            trained_batches=trained_batches,
-            hard_boundary=hard_boundary,
-        )
-        self._submit_prompts(prompts)
-
-    def _submit_prompts(self, count: int) -> None:
-        batch_count, remainder = divmod(count, self.batch_size)
-        if remainder:
-            raise RuntimeError(f"prompt admission must submit whole batches of {self.batch_size}; got {count} prompts")
-        for _ in range(batch_count):
-            request = self._build_request_sample(
-                self.data_source.get_samples(self.batch_size),
-                self._next_generation_id,
+    def _set_group_budget(self, *, trained_batches: int, hard_boundary: int) -> None:
+        self._rollout_manager.set_group_budget(
+            boundary_group_budget(
+                max_inflight_prompts=self._max_inflight_prompts,
+                batch_size=self.batch_size,
+                trained_batches=trained_batches,
+                hard_boundary=hard_boundary,
             )
-            self._next_generation_id += 1
-            prompts = request.split()
-            if len(prompts) != self.batch_size:
-                raise RuntimeError(f"request batch split into {len(prompts)} prompts; expected {self.batch_size}")
-            self._rollout_manager.submit(prompts)
+        )
 
 
 __all__ = [
     "AsyncRolloutTrainerMixin",
-    "boundary_launch_prompts",
+    "boundary_group_budget",
     "combine_rollout_prompts",
     "next_hard_boundary",
     "resolve_separate_worker_concurrency",

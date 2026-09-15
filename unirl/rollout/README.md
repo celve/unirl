@@ -120,14 +120,32 @@ change surface:
   exception: its undecorated method is reached through one `Handle.slot(...)`.
 - **Direct sampling forbids a `sync:` block; dedicated requires one.** The trainside
   engine also can't live on a `layout: separate` slab — `_build_rollout` raises.
-- **Quiesce before weight sync / eval / checkpoint on async paths** —
-  `RolloutManager.quiesce()` pauses dispatch and drains in-flight generation to
-  terminal completion, returning the prompts it never dispatched. `sync_weights()`
-  rejects queued or in-flight work, pushes weights, and publishes the
-  optimizer-update `output_version`; immutable buffered groups keep their original
-  provenance and remain subject to the configured filter, so a publication no longer
-  batch-aligns anything. Eval/checkpoint admission still requires an empty manager.
-  Launch and scoring order remains trainer policy.
+- **`RolloutManager.publish()` is the only weight-publication path on async trainers** —
+  it pauses the producer, settles in-flight groups into the buffer, pushes weights, and
+  resumes. It deliberately has no `try/finally`: a failed weight write leaves the
+  producer paused rather than resuming against half-published weights. Buffered groups
+  survive a publication and stay subject to the get-side filter, so publication no
+  longer batch-aligns anything. Eval/checkpoint boundaries still require an empty
+  manager. Scoring order remains trainer policy.
+- **`weight_sync.sync()` and `set_version()` run on the trainer thread, never the loop
+  thread** — the grad context is a `threading.local`, so a train-slab `@distributed`
+  call made from the manager's loop thread silently loses autograd instead of raising.
+  The loop thread owns the rollout Handle; the trainer thread owns the train slab.
+- **A dead producer surfaces on the next `next_group`, not after its backlog drains** —
+  the consumer races the buffer `get` against the producer task and checks the task
+  first, so a launcher or engine failure fails the step immediately. That race is the
+  whole liveness contract; there is no separate failure flag.
+- **`GroupBuffer.get` must not await between the pop and the return** — a cancelled
+  `get` would lose the popped group. Keep the get-side filter and the recycle callback
+  synchronous.
+- **Backpressure is the producer's budget, not a blocking `put`** — the producer pulls
+  only while `in-flight + buffered < budget`, and the trainer recomputes that budget each
+  batch, so the buffer depth is bounded by construction. A blocking `put` would be a
+  second, redundant mechanism and would deadlock `pause()`: the drain cannot complete
+  while the producer waits for buffer space no one is consuming.
+- **Only the producer coroutine may await `_inflight`** — `pause()` waits on an idle
+  event the producer sets, because two coroutines awaiting the same task set would each
+  put the same finished group.
 - **`output_version` is attributed to where generation started, not where it ended** —
   engines capture the version before calling the backend, so a publication landing
   mid-generation over-reports staleness by at most the publications it spanned rather

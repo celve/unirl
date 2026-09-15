@@ -17,7 +17,7 @@ from unirl.distributed.group.dispatch import (
     Execute,
     resolve_backward_dispatch_mode,
 )
-from unirl.distributed.group.ray_utils import get_actor_results, inspect_ready_actor_results
+from unirl.distributed.group.ray_utils import aget_actor_results, get_actor_results, inspect_ready_actor_results
 from unirl.distributed.group.remote import RankInfo, Remote
 from unirl.distributed.tensor import TensorRef, WorkerLocalTransport, map_tree
 from unirl.distributed.tensor.backend.gpu_store.handle import GPUTensorHandle
@@ -324,6 +324,28 @@ class PendingHandleCall:
         finally:
             self._release_leases()
         self._consumed = True
+        return self._value
+
+    async def aresult(self) -> Any:
+        """Await completion, then rebind + collect: the method's collected return value."""
+        if self._consumed:
+            return self._value
+        handle = self._handle
+        collect_fn = self._collect_fn
+        if collect_fn is None:
+            _, _, collect_fn, _ = handle._method_configs[self._method_name]
+        try:
+            self._value = await handle._aresolve_call(
+                collect_fn,
+                self._refs,
+                worker_local=self._worker_local,
+                targets=self._targets,
+                method_name=self._method_name,
+            )
+        finally:
+            # Latched here rather than after the try, so a failed call is never retried without its leases.
+            self._consumed = True
+            self._release_leases()
         return self._value
 
     def _release_leases(self) -> None:
@@ -704,6 +726,28 @@ class Handle:
     ):
         """Resolve a launched call into its collected method return value."""
         results = get_actor_results(
+            refs,
+            pool=self.pool,
+            role_name=self.role_name,
+            method_name=method_name,
+            timeout=ray_get_timeout,
+        )
+        workers = self.workers if targets is None else targets
+        results = [self._rebind_tree(r, workers[i], worker_local=worker_local) for i, r in enumerate(results)]
+        return collect_fn(self, results)
+
+    async def _aresolve_call(
+        self,
+        collect_fn: Callable,
+        refs: List,
+        *,
+        worker_local: bool,
+        ray_get_timeout: Optional[float] = None,
+        targets: Optional[List[Any]] = None,
+        method_name: str = "call",
+    ):
+        """Resolve a launched call into its collected return value without blocking the calling thread."""
+        results = await aget_actor_results(
             refs,
             pool=self.pool,
             role_name=self.role_name,
