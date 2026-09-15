@@ -230,7 +230,7 @@ class HandleRef:
 
 
 class PendingHandleCall:
-    """Future-like result of :meth:`Handle.launch_nowait`: launched, not yet collected."""
+    """Future-like result of :meth:`Slot.launch`: launched, not yet collected."""
 
     def __init__(
         self,
@@ -381,9 +381,6 @@ class Slot:
             collect_fn=lambda _, results: results[0],
             leases=shards,
         )
-
-    def call(self, method_name: str, *args, **kwargs) -> Any:
-        return self.launch(method_name, *args, **kwargs).result()
 
 
 class Handle:
@@ -716,27 +713,6 @@ class Handle:
         workers = self.workers if targets is None else targets
         results = [self._rebind_tree(r, workers[i], worker_local=worker_local) for i, r in enumerate(results)]
         return collect_fn(self, results)
-
-    def launch_nowait(self, method_name: str, *args, **kwargs) -> PendingHandleCall:
-        """Launch a @distributed method without blocking: the launch phase of"""
-        try:
-            dispatch_mode, dispatch_fn, _, execute_fn = self._method_configs[method_name]
-        except KeyError:
-            raise AttributeError(
-                f"{method_name!r} is not a @distributed method of {_owning_class(self.role_cls).__name__}"
-            ) from None
-
-        refs, worker_local, leases = self._launch_call(
-            method_name,
-            dispatch_mode,
-            dispatch_fn,
-            execute_fn,
-            args,
-            kwargs,
-            grad_mode=False,
-            call_id=None,
-        )
-        return PendingHandleCall(self, method_name, refs, worker_local, leases=leases)
 
     def _execute_all(self, method_name: str, shards: List, grad_mode: bool = False, call_id=None) -> List:
         """Send RPC to all Workers."""
