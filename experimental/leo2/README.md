@@ -55,11 +55,17 @@ RAY_ADDRESS=auto python -m experimental.leo2.run --config-name=leo2_t2v_trainsid
   sampling.samples_per_prompt=8 sampling.init_same_noise=true \
   stack.num_updates_per_batch=2 backend.optimizer_cfg.learning_rate=2.5e-5 \
   adv_use_global_std=false \
-  +reward.backend.config.frame_selection=uniform +reward.backend.config.num_score_frames=4
+  +reward.backend.config.frame_selection=middle
 ```
 
 SDE noise only on the five highest-sigma transitions, the rest ODE; one shared `x_T` per
-prompt group; PickScore averaged over 4 uniformly spaced frames. ~630 s/step (rollout 400 +
+prompt group; PickScore on the middle frame.
+
+`frame_selection=uniform` with `num_score_frames=4` appears in the woa recipes and in an
+earlier revision of this file. It does **not** work against upstream: `VideoPickScoreScorer`
+raises on anything but `first` or `middle`, and `VideoPickScoreSpec` has no
+`num_score_frames` field. `middle` is the nearest upstream behaviour — it scores one frame,
+not four, so a multi-frame average needs a core change rather than a recipe override. ~630 s/step (rollout 400 +
 train 225), or ~495 s/step with `algorithm.old_logp_source=rollout` and
 `bundle.config.text_encoder_gpu_transient=false`.
 
